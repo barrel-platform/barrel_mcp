@@ -6,6 +6,7 @@ MCP (Model Context Protocol) library for Erlang. Implements the full MCP 2024-11
 
 - **Full MCP Protocol Support**: Tools, Resources, Prompts, and Sampling
 - **Multiple Transports**: HTTP (Cowboy) and stdio (for Claude Desktop)
+- **Pluggable Authentication**: Bearer JWT, API keys, Basic auth, or custom providers
 - **Supervised Registry**: gen_statem-based registry with atomic operations
 - **Fast Reads**: ETS + persistent_term for O(1) handler lookups (no process call)
 - **Ready/Not-Ready States**: Flexible initialization pattern
@@ -152,6 +153,173 @@ summarize_prompt(Args) ->
 {ok, _} = barrel_mcp:start_http(#{port => 9090, ip => {127, 0, 0, 1}}).
 ```
 
+## Authentication
+
+barrel_mcp provides pluggable authentication following OAuth 2.1 patterns as recommended by the MCP specification. Authentication is optional and configurable per HTTP server.
+
+### Built-in Providers
+
+| Provider | Description |
+|----------|-------------|
+| `barrel_mcp_auth_none` | No authentication (default) |
+| `barrel_mcp_auth_bearer` | Bearer token (JWT or opaque) |
+| `barrel_mcp_auth_apikey` | API key authentication |
+| `barrel_mcp_auth_basic` | HTTP Basic authentication |
+
+### Bearer Token (JWT) Authentication
+
+```erlang
+%% Start HTTP server with JWT authentication
+{ok, _} = barrel_mcp:start_http(#{
+    port => 9090,
+    auth => #{
+        provider => barrel_mcp_auth_bearer,
+        provider_opts => #{
+            secret => <<"your-jwt-secret-key">>,
+            issuer => <<"https://auth.example.com">>,
+            audience => <<"https://mcp.example.com">>,
+            clock_skew => 60  % seconds
+        },
+        required_scopes => [<<"mcp:read">>, <<"mcp:write">>]
+    }
+}).
+```
+
+For RS256/ES256 or opaque tokens, use a custom verifier:
+
+```erlang
+%% Custom token verifier (e.g., for token introspection)
+Verifier = fun(Token) ->
+    case my_auth_service:validate(Token) of
+        {ok, Claims} -> {ok, Claims};
+        error -> {error, invalid_token}
+    end
+end,
+
+{ok, _} = barrel_mcp:start_http(#{
+    port => 9090,
+    auth => #{
+        provider => barrel_mcp_auth_bearer,
+        provider_opts => #{verifier => Verifier}
+    }
+}).
+```
+
+### API Key Authentication
+
+```erlang
+%% Simple API key list
+{ok, _} = barrel_mcp:start_http(#{
+    port => 9090,
+    auth => #{
+        provider => barrel_mcp_auth_apikey,
+        provider_opts => #{
+            keys => #{
+                <<"key-abc123">> => #{subject => <<"user1">>, scopes => [<<"read">>]},
+                <<"key-xyz789">> => #{subject => <<"user2">>, scopes => [<<"read">>, <<"write">>]}
+            }
+        }
+    }
+}).
+
+%% With hashed keys for security (recommended for production)
+HashedKey = barrel_mcp_auth_apikey:hash_key(<<"my-secret-key">>),
+{ok, _} = barrel_mcp:start_http(#{
+    port => 9090,
+    auth => #{
+        provider => barrel_mcp_auth_apikey,
+        provider_opts => #{
+            keys => #{HashedKey => #{subject => <<"user1">>}},
+            hash_keys => true
+        }
+    }
+}).
+```
+
+### Basic Authentication
+
+```erlang
+%% Simple username/password
+{ok, _} = barrel_mcp:start_http(#{
+    port => 9090,
+    auth => #{
+        provider => barrel_mcp_auth_basic,
+        provider_opts => #{
+            credentials => #{
+                <<"admin">> => <<"password123">>,
+                <<"user">> => <<"secret">>
+            },
+            realm => <<"MCP Server">>
+        }
+    }
+}).
+
+%% With hashed passwords (recommended)
+HashedPwd = barrel_mcp_auth_basic:hash_password(<<"my-password">>),
+{ok, _} = barrel_mcp:start_http(#{
+    port => 9090,
+    auth => #{
+        provider => barrel_mcp_auth_basic,
+        provider_opts => #{
+            credentials => #{<<"admin">> => HashedPwd},
+            hash_passwords => true
+        }
+    }
+}).
+```
+
+### Custom Authentication Provider
+
+Implement the `barrel_mcp_auth` behaviour:
+
+```erlang
+-module(my_auth_provider).
+-behaviour(barrel_mcp_auth).
+
+-export([init/1, authenticate/2, challenge/2]).
+
+init(Opts) ->
+    {ok, Opts}.
+
+authenticate(Request, State) ->
+    Headers = maps:get(headers, Request, #{}),
+    case barrel_mcp_auth:extract_bearer_token(Headers) of
+        {ok, Token} ->
+            %% Your validation logic
+            case validate_with_my_service(Token) of
+                {ok, User} ->
+                    {ok, #{
+                        subject => User,
+                        scopes => [<<"read">>],
+                        claims => #{}
+                    }};
+                error ->
+                    {error, invalid_token}
+            end;
+        {error, no_token} ->
+            {error, unauthorized}
+    end.
+
+challenge(Reason, _State) ->
+    {401, #{<<"www-authenticate">> => <<"Bearer realm=\"mcp\"">>}, <<>>}.
+```
+
+### Accessing Auth Info in Handlers
+
+Authentication info is available in the request context:
+
+```erlang
+my_tool_handler(Args) ->
+    %% Auth info is passed in the _auth key
+    case maps:get(<<"_auth">>, Args, undefined) of
+        undefined ->
+            <<"No auth info">>;
+        AuthInfo ->
+            Subject = maps:get(subject, AuthInfo),
+            <<"Hello ", Subject/binary>>
+    end.
+```
+
 ### Starting stdio Server (for Claude Desktop)
 
 ```erlang
@@ -257,6 +425,16 @@ Your application's entry point should call `barrel_mcp:start_stdio()`.
 | `barrel_mcp_client:list_prompts(Client)` | List available prompts |
 | `barrel_mcp_client:get_prompt(Client, Name, Args)` | Get a prompt |
 | `barrel_mcp_client:close(Client)` | Close connection |
+
+### Authentication
+
+| Function | Description |
+|----------|-------------|
+| `barrel_mcp_auth:extract_bearer_token(Headers)` | Extract Bearer token from headers |
+| `barrel_mcp_auth:extract_api_key(Headers, Opts)` | Extract API key from headers |
+| `barrel_mcp_auth:extract_basic_auth(Headers)` | Extract Basic auth credentials |
+| `barrel_mcp_auth_apikey:hash_key(Key)` | Hash an API key (SHA256) |
+| `barrel_mcp_auth_basic:hash_password(Password)` | Hash a password (SHA256) |
 
 ## MCP Protocol Support
 

@@ -1,8 +1,47 @@
 %%%-------------------------------------------------------------------
+%%% @author Benoit Chesneau
+%%% @copyright 2024 Benoit Chesneau
 %%% @doc Main API module for barrel_mcp.
 %%%
-%%% Provides a public facade for registering and managing MCP
-%%% tools, resources, and prompts, as well as starting transports.
+%%% This module provides the primary public interface for the barrel_mcp
+%%% library, implementing the Model Context Protocol (MCP) specification.
+%%%
+%%% == Overview ==
+%%%
+%%% barrel_mcp allows you to expose tools, resources, and prompts that
+%%% AI assistants (like Claude) can interact with. The library supports
+%%% both server mode (exposing your functionality) and client mode
+%%% (consuming external MCP servers).
+%%%
+%%% == Quick Start ==
+%%%
+%%% ```
+%%% %% Start the application
+%%% application:ensure_all_started(barrel_mcp).
+%%%
+%%% %% Register a simple tool
+%%% barrel_mcp:reg_tool(<<"greet">>, my_module, greet_handler, #{
+%%%     description => <<"Greet someone by name">>
+%%% }).
+%%%
+%%% %% Start HTTP server
+%%% {ok, _} = barrel_mcp:start_http(#{port => 9090}).
+%%% '''
+%%%
+%%% == Handler Functions ==
+%%%
+%%% All handlers (tools, resources, prompts) must be exported functions
+%%% with arity 1, receiving a map of arguments:
+%%%
+%%% ```
+%%% -module(my_module).
+%%% -export([greet_handler/1]).
+%%%
+%%% greet_handler(Args) ->
+%%%     Name = maps:get(<<"name">>, Args, <<"World">>),
+%%%     <<"Hello, ", Name/binary, "!">>.
+%%% '''
+%%%
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp).
@@ -53,25 +92,103 @@
 %% Tool API
 %%====================================================================
 
-%% @doc Register a tool.
-%% Opts can include:
-%%   - description :: binary() - Tool description
-%%   - input_schema :: map() - JSON Schema for input validation
--spec reg_tool(binary(), module(), atom(), map()) -> ok | {error, term()}.
+%% @doc Register a tool with the MCP server.
+%%
+%% Tools are functions that AI assistants can call to perform actions
+%% or retrieve information. Each tool has a unique name and a handler
+%% function that processes requests.
+%%
+%% == Options ==
+%%
+%% <ul>
+%%   <li>`description' - Human-readable description of the tool</li>
+%%   <li>`input_schema' - JSON Schema defining expected input format</li>
+%% </ul>
+%%
+%% == Handler Return Values ==
+%%
+%% The handler function can return:
+%% <ul>
+%%   <li>`binary()' - Returned as text content</li>
+%%   <li>`map()' - Automatically JSON encoded</li>
+%%   <li>`[map()]' - List of content blocks</li>
+%% </ul>
+%%
+%% == Example ==
+%%
+%% ```
+%% barrel_mcp:reg_tool(<<"search">>, my_mod, search, #{
+%%     description => <<"Search the database">>,
+%%     input_schema => #{
+%%         <<"type">> => <<"object">>,
+%%         <<"properties">> => #{
+%%             <<"query">> => #{<<"type">> => <<"string">>}
+%%         },
+%%         <<"required">> => [<<"query">>]
+%%     }
+%% }).
+%% '''
+%%
+%% @param Name Unique tool name (binary)
+%% @param Module Module containing the handler function
+%% @param Function Handler function name (must be exported with arity 1)
+%% @param Opts Registration options
+%% @returns `ok' on success, `{error, Reason}' on failure
+-spec reg_tool(Name, Module, Function, Opts) -> ok | {error, term()} when
+    Name :: binary(),
+    Module :: module(),
+    Function :: atom(),
+    Opts :: #{
+        description => binary(),
+        input_schema => map()
+    }.
 reg_tool(Name, Module, Function, Opts) ->
     barrel_mcp_registry:reg(tool, Name, Module, Function, Opts).
 
 %% @doc Unregister a tool.
--spec unreg_tool(binary()) -> ok.
+%%
+%% Removes a previously registered tool from the MCP server.
+%% After unregistration, the tool will no longer appear in
+%% `tools/list' responses.
+%%
+%% @param Name The tool name to unregister
+%% @returns `ok'
+-spec unreg_tool(Name :: binary()) -> ok.
 unreg_tool(Name) ->
     barrel_mcp_registry:unreg(tool, Name).
 
-%% @doc Call a tool.
--spec call_tool(binary(), map()) -> {ok, term()} | {error, term()}.
+%% @doc Call a tool locally.
+%%
+%% Executes a registered tool handler with the given arguments.
+%% Useful for testing tools without going through the MCP protocol.
+%%
+%% == Example ==
+%%
+%% ```
+%% {ok, Result} = barrel_mcp:call_tool(<<"search">>, #{
+%%     <<"query">> => <<"erlang">>
+%% }).
+%% '''
+%%
+%% @param Name Tool name to call
+%% @param Args Map of arguments to pass to the handler
+%% @returns `{ok, Result}' on success, `{error, Reason}' on failure
+-spec call_tool(Name :: binary(), Args :: map()) -> {ok, term()} | {error, term()}.
 call_tool(Name, Args) ->
     barrel_mcp_registry:run(tool, Name, Args).
 
 %% @doc List all registered tools.
+%%
+%% Returns a list of tuples containing tool names and their metadata.
+%%
+%% == Example ==
+%%
+%% ```
+%% Tools = barrel_mcp:list_tools(),
+%% %% Returns: [{<<"search">>, #{description => ...}}, ...]
+%% '''
+%%
+%% @returns List of `{Name, Metadata}' tuples
 -spec list_tools() -> [{binary(), map()}].
 list_tools() ->
     barrel_mcp_registry:all(tool).
@@ -80,27 +197,78 @@ list_tools() ->
 %% Resource API
 %%====================================================================
 
-%% @doc Register a resource.
-%% Opts can include:
-%%   - name :: binary() - Resource name
-%%   - uri :: binary() - Resource URI
-%%   - description :: binary() - Resource description
-%%   - mime_type :: binary() - MIME type (default: text/plain)
--spec reg_resource(binary(), module(), atom(), map()) -> ok | {error, term()}.
+%% @doc Register a resource with the MCP server.
+%%
+%% Resources expose data that AI assistants can read, such as
+%% configuration files, database records, or dynamic content.
+%%
+%% == Options ==
+%%
+%% <ul>
+%%   <li>`name' - Human-readable resource name</li>
+%%   <li>`uri' - Unique resource URI (e.g., `<<"file:///config">>')</li>
+%%   <li>`description' - Resource description</li>
+%%   <li>`mime_type' - MIME type (default: `<<"text/plain">>')</li>
+%% </ul>
+%%
+%% == Handler Return Values ==
+%%
+%% <ul>
+%%   <li>`binary()' - Text content</li>
+%%   <li>`map()' - JSON content (auto-encoded)</li>
+%%   <li>`#{blob => binary(), mimeType => binary()}' - Binary content</li>
+%% </ul>
+%%
+%% == Example ==
+%%
+%% ```
+%% barrel_mcp:reg_resource(<<"config">>, my_mod, get_config, #{
+%%     name => <<"App Configuration">>,
+%%     uri => <<"config://app/settings">>,
+%%     description => <<"Current application settings">>,
+%%     mime_type => <<"application/json">>
+%% }).
+%% '''
+%%
+%% @param Name Internal resource identifier
+%% @param Module Module containing the handler function
+%% @param Function Handler function name
+%% @param Opts Registration options
+%% @returns `ok' on success, `{error, Reason}' on failure
+-spec reg_resource(Name, Module, Function, Opts) -> ok | {error, term()} when
+    Name :: binary(),
+    Module :: module(),
+    Function :: atom(),
+    Opts :: #{
+        name => binary(),
+        uri => binary(),
+        description => binary(),
+        mime_type => binary()
+    }.
 reg_resource(Name, Module, Function, Opts) ->
     barrel_mcp_registry:reg(resource, Name, Module, Function, Opts).
 
 %% @doc Unregister a resource.
--spec unreg_resource(binary()) -> ok.
+%%
+%% @param Name The resource identifier to unregister
+%% @returns `ok'
+-spec unreg_resource(Name :: binary()) -> ok.
 unreg_resource(Name) ->
     barrel_mcp_registry:unreg(resource, Name).
 
-%% @doc Read a resource by name.
--spec read_resource(binary()) -> {ok, term()} | {error, term()}.
+%% @doc Read a resource locally.
+%%
+%% Executes the resource handler and returns its content.
+%%
+%% @param Name Resource identifier
+%% @returns `{ok, Content}' on success, `{error, Reason}' on failure
+-spec read_resource(Name :: binary()) -> {ok, term()} | {error, term()}.
 read_resource(Name) ->
     barrel_mcp_registry:run(resource, Name, #{}).
 
 %% @doc List all registered resources.
+%%
+%% @returns List of `{Name, Metadata}' tuples
 -spec list_resources() -> [{binary(), map()}].
 list_resources() ->
     barrel_mcp_registry:all(resource).
@@ -109,26 +277,84 @@ list_resources() ->
 %% Prompt API
 %%====================================================================
 
-%% @doc Register a prompt.
-%% Opts can include:
-%%   - name :: binary() - Prompt name
-%%   - description :: binary() - Prompt description
-%%   - arguments :: [#{name => binary(), description => binary(), required => boolean()}]
--spec reg_prompt(binary(), module(), atom(), map()) -> ok | {error, term()}.
+%% @doc Register a prompt with the MCP server.
+%%
+%% Prompts are pre-defined conversation templates that AI assistants
+%% can use. They support arguments for dynamic content generation.
+%%
+%% == Options ==
+%%
+%% <ul>
+%%   <li>`description' - Prompt description</li>
+%%   <li>`arguments' - List of argument definitions</li>
+%% </ul>
+%%
+%% Each argument definition is a map with:
+%% <ul>
+%%   <li>`name' - Argument name (binary)</li>
+%%   <li>`description' - Argument description</li>
+%%   <li>`required' - Whether the argument is required (boolean)</li>
+%% </ul>
+%%
+%% == Handler Return Value ==
+%%
+%% The handler must return a map with:
+%% <ul>
+%%   <li>`description' - Prompt description</li>
+%%   <li>`messages' - List of message maps with `role' and `content'</li>
+%% </ul>
+%%
+%% == Example ==
+%%
+%% ```
+%% barrel_mcp:reg_prompt(<<"summarize">>, my_mod, summarize, #{
+%%     description => <<"Summarize content">>,
+%%     arguments => [
+%%         #{name => <<"content">>, description => <<"Text to summarize">>, required => true},
+%%         #{name => <<"style">>, description => <<"Summary style">>, required => false}
+%%     ]
+%% }).
+%% '''
+%%
+%% @param Name Unique prompt name
+%% @param Module Module containing the handler
+%% @param Function Handler function name
+%% @param Opts Registration options
+%% @returns `ok' on success, `{error, Reason}' on failure
+-spec reg_prompt(Name, Module, Function, Opts) -> ok | {error, term()} when
+    Name :: binary(),
+    Module :: module(),
+    Function :: atom(),
+    Opts :: #{
+        description => binary(),
+        arguments => [#{name := binary(), description => binary(), required => boolean()}]
+    }.
 reg_prompt(Name, Module, Function, Opts) ->
     barrel_mcp_registry:reg(prompt, Name, Module, Function, Opts).
 
 %% @doc Unregister a prompt.
--spec unreg_prompt(binary()) -> ok.
+%%
+%% @param Name The prompt name to unregister
+%% @returns `ok'
+-spec unreg_prompt(Name :: binary()) -> ok.
 unreg_prompt(Name) ->
     barrel_mcp_registry:unreg(prompt, Name).
 
 %% @doc Get a prompt with arguments filled in.
--spec get_prompt(binary(), map()) -> {ok, term()} | {error, term()}.
+%%
+%% Executes the prompt handler with the provided arguments and
+%% returns the generated messages.
+%%
+%% @param Name Prompt name
+%% @param Args Map of argument values
+%% @returns `{ok, PromptResult}' on success, `{error, Reason}' on failure
+-spec get_prompt(Name :: binary(), Args :: map()) -> {ok, term()} | {error, term()}.
 get_prompt(Name, Args) ->
     barrel_mcp_registry:run(prompt, Name, Args).
 
 %% @doc List all registered prompts.
+%%
+%% @returns List of `{Name, Metadata}' tuples
 -spec list_prompts() -> [{binary(), map()}].
 list_prompts() ->
     barrel_mcp_registry:all(prompt).
@@ -137,21 +363,80 @@ list_prompts() ->
 %% Server API
 %%====================================================================
 
-%% @doc Start HTTP server for MCP.
-%% Opts:
-%%   - port :: integer() - Port to listen on (default: 9090)
-%%   - ip :: inet:ip_address() - IP to bind (default: {0,0,0,0})
--spec start_http(map()) -> {ok, pid()} | {error, term()}.
+%% @doc Start the HTTP server for MCP.
+%%
+%% Starts a Cowboy HTTP server that handles MCP JSON-RPC requests.
+%% The server listens for POST requests at `/mcp' and `/'.
+%%
+%% == Options ==
+%%
+%% <ul>
+%%   <li>`port' - Port number (default: 9090)</li>
+%%   <li>`ip' - IP address to bind (default: `{0, 0, 0, 0}')</li>
+%%   <li>`auth' - Authentication configuration (see {@link barrel_mcp_auth})</li>
+%% </ul>
+%%
+%% == Authentication Example ==
+%%
+%% ```
+%% barrel_mcp:start_http(#{
+%%     port => 9090,
+%%     auth => #{
+%%         provider => barrel_mcp_auth_bearer,
+%%         provider_opts => #{
+%%             secret => <<"your-jwt-secret">>
+%%         }
+%%     }
+%% }).
+%% '''
+%%
+%% @param Opts Server options
+%% @returns `{ok, Pid}' on success, `{error, Reason}' on failure
+%% @see barrel_mcp_http
+%% @see barrel_mcp_auth
+-spec start_http(Opts) -> {ok, pid()} | {error, term()} when
+    Opts :: #{
+        port => pos_integer(),
+        ip => inet:ip_address(),
+        auth => map()
+    }.
 start_http(Opts) ->
     barrel_mcp_http:start(Opts).
 
 %% @doc Stop the HTTP server.
+%%
+%% Stops the MCP HTTP server if running.
+%%
+%% @returns `ok' on success, `{error, not_found}' if not running
 -spec stop_http() -> ok | {error, not_found}.
 stop_http() ->
     barrel_mcp_http:stop().
 
-%% @doc Start stdio server for MCP (blocking).
-%% This is typically used for Claude Desktop integration.
+%% @doc Start the stdio server for MCP.
+%%
+%% Starts an MCP server that communicates over stdin/stdout.
+%% This is the transport used for Claude Desktop integration.
+%%
+%% <strong>Warning:</strong> This function blocks and runs the
+%% read-handle-respond loop until the input stream closes.
+%%
+%% == Claude Desktop Configuration ==
+%%
+%% Configure your `claude_desktop_config.json':
+%%
+%% ```
+%% {
+%%%   "mcpServers": {
+%%     "my-server": {
+%%       "command": "/path/to/my_app",
+%%       "args": ["mcp"]
+%%     }
+%%   }
+%% }
+%% '''
+%%
+%% @returns `ok' when the loop terminates
+%% @see barrel_mcp_stdio
 -spec start_stdio() -> ok.
 start_stdio() ->
     barrel_mcp_stdio:start().
@@ -160,27 +445,36 @@ start_stdio() ->
 %% Backward Compatible Aliases
 %%====================================================================
 
-%% @doc Register a tool (alias for reg_tool/4).
+%% @doc Register a tool (alias for {@link reg_tool/4}).
+%% @deprecated Use {@link reg_tool/4} instead.
 -spec reg(binary(), module(), atom(), map()) -> ok | {error, term()}.
 reg(Name, Module, Function, Opts) ->
     reg_tool(Name, Module, Function, Opts).
 
-%% @doc Unregister a tool (alias for unreg_tool/1).
+%% @doc Unregister a tool (alias for {@link unreg_tool/1}).
+%% @deprecated Use {@link unreg_tool/1} instead.
 -spec unreg(binary()) -> ok.
 unreg(Name) ->
     unreg_tool(Name).
 
-%% @doc Call a tool (alias for call_tool/2).
+%% @doc Call a tool (alias for {@link call_tool/2}).
+%% @deprecated Use {@link call_tool/2} instead.
 -spec run(binary(), map()) -> {ok, term()} | {error, term()}.
 run(Name, Args) ->
     call_tool(Name, Args).
 
-%% @doc List all tools (alias for list_tools/0).
+%% @doc List all tools (alias for {@link list_tools/0}).
+%% @deprecated Use {@link list_tools/0} instead.
 -spec all() -> [{binary(), map()}].
 all() ->
     list_tools().
 
 %% @doc Find a tool by name.
--spec find(binary()) -> {ok, map()} | error.
+%%
+%% Looks up a tool by name and returns its metadata if found.
+%%
+%% @param Name Tool name to find
+%% @returns `{ok, Metadata}' if found, `error' otherwise
+-spec find(Name :: binary()) -> {ok, map()} | error.
 find(Name) ->
     barrel_mcp_registry:find(tool, Name).

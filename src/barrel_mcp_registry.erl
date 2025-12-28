@@ -1,20 +1,48 @@
 %%%-------------------------------------------------------------------
+%%% @author Benoit Chesneau
+%%% @copyright 2024 Benoit Chesneau
 %%% @doc Handler registry for MCP tools, resources, and prompts.
 %%%
-%%% Uses a gen_statem to own the ETS table and handle registration
-%%% atomically. Reads use persistent_term for fast O(1) lookups
-%%% without going through the process.
+%%% This module manages the registration and lookup of MCP handlers
+%%% using a gen_statem for atomic write operations and persistent_term
+%%% for O(1) read operations.
 %%%
-%%% States:
-%%%   - not_ready: Initial state, waiting for external process or signal
-%%%   - ready: Registry is ready to accept registrations
+%%% == Architecture ==
 %%%
-%%% Configuration:
-%%%   {barrel_mcp, [{wait_for_proc, ProcessName}]}
-%%%   If wait_for_proc is set, registry waits for that process to be
-%%%   registered before becoming ready. Otherwise, becomes ready immediately.
+%%% The registry uses a two-tier storage approach:
+%%% <ul>
+%%%   <li>ETS table: Authoritative storage, owned by the gen_statem process</li>
+%%%   <li>persistent_term: Read-only copy for lock-free O(1) lookups</li>
+%%% </ul>
 %%%
-%%% Inspired by the hooks library pattern.
+%%% This ensures that write operations are atomic and supervised,
+%%% while reads are extremely fast and don't block on process calls.
+%%%
+%%% == States ==
+%%%
+%%% The registry has two states:
+%%% <ul>
+%%%   <li>`not_ready' - Initial state, waiting for initialization signal</li>
+%%%   <li>`ready' - Accepting registrations and lookups</li>
+%%% </ul>
+%%%
+%%% In `not_ready' state, all calls are postponed until the registry
+%%% transitions to `ready'.
+%%%
+%%% == Configuration ==
+%%%
+%%% The registry can be configured to wait for an external process
+%%% before becoming ready:
+%%%
+%%% ```
+%%% %% In sys.config
+%%% {barrel_mcp, [
+%%%     {wait_for_proc, my_init_process}
+%%% ]}.
+%%% '''
+%%%
+%%% If not configured, the registry becomes ready immediately after init.
+%%%
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_registry).
@@ -30,7 +58,6 @@
     reg/4,
     reg/5,
     unreg/2,
-    %% Read operations (no process call, use persistent_term)
     run/3,
     find/2,
     all/0,
@@ -54,17 +81,43 @@
 %%====================================================================
 
 %% @doc Start the registry server.
+%%
+%% This is called by the supervisor during application startup.
+%% You typically don't need to call this directly.
+%%
+%% @returns `{ok, Pid}' on success
 -spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
     gen_statem:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 %% @doc Wait for the registry to be ready.
+%%
+%% Blocks until the registry transitions to the `ready' state.
+%% Uses the default timeout of 5 seconds.
+%%
+%% This is useful during application startup to ensure the registry
+%% is ready before registering handlers.
+%%
+%% == Example ==
+%%
+%% ```
+%% application:ensure_all_started(barrel_mcp),
+%% ok = barrel_mcp_registry:wait_for_ready(),
+%% %% Now safe to register handlers
+%% '''
+%%
+%% @returns `ok' when ready, `{error, timeout}' on timeout
+%% @see wait_for_ready/1
 -spec wait_for_ready() -> ok | {error, timeout}.
 wait_for_ready() ->
     wait_for_ready(?DEFAULT_TIMEOUT).
 
-%% @doc Wait for the registry to be ready with timeout.
--spec wait_for_ready(timeout()) -> ok | {error, timeout}.
+%% @doc Wait for the registry to be ready with a custom timeout.
+%%
+%% @param Timeout Maximum time to wait in milliseconds, or `infinity'
+%% @returns `ok' when ready, `{error, timeout}' on timeout,
+%%          `{error, not_started}' if registry process not running
+-spec wait_for_ready(Timeout :: timeout()) -> ok | {error, timeout | not_started}.
 wait_for_ready(Timeout) ->
     try
         gen_statem:call(?SERVER, wait_for_ready, Timeout)
@@ -76,26 +129,108 @@ wait_for_ready(Timeout) ->
     end.
 
 %% @doc Register a handler with default options.
--spec reg(handler_type(), binary(), module(), atom()) -> ok | {error, term()}.
+%%
+%% Equivalent to `reg(Type, Name, Module, Function, #{})'.
+%%
+%% @param Type Handler type: `tool', `resource', or `prompt'
+%% @param Name Unique name for this handler
+%% @param Module Module containing the handler function
+%% @param Function Handler function name (must be exported with arity 1)
+%% @returns `ok' on success, `{error, Reason}' on failure
+%% @see reg/5
+-spec reg(Type, Name, Module, Function) -> ok | {error, term()} when
+    Type :: handler_type(),
+    Name :: binary(),
+    Module :: module(),
+    Function :: atom().
 reg(Type, Name, Module, Function) ->
     reg(Type, Name, Module, Function, #{}).
 
 %% @doc Register a handler with options.
-%% This is an atomic operation handled by the state machine.
--spec reg(handler_type(), binary(), module(), atom(), map()) ->
-    ok | {error, term()}.
+%%
+%% Registers a handler function with the MCP server. The handler
+%% will be callable via the corresponding MCP protocol methods
+%% (tools/call, resources/read, prompts/get).
+%%
+%% This is an atomic operation that goes through the gen_statem.
+%%
+%% == Options by Type ==
+%%%
+%%% For `tool':
+%%% <ul>
+%%%   <li>`description' - Tool description</li>
+%%%   <li>`input_schema' - JSON Schema for input validation</li>
+%%% </ul>
+%%%
+%%% For `resource':
+%%% <ul>
+%%%   <li>`name' - Resource display name</li>
+%%%   <li>`uri' - Resource URI</li>
+%%%   <li>`description' - Resource description</li>
+%%%   <li>`mime_type' - MIME type (default: text/plain)</li>
+%%% </ul>
+%%%
+%%% For `prompt':
+%%% <ul>
+%%%   <li>`description' - Prompt description</li>
+%%%   <li>`arguments' - List of argument definitions</li>
+%%% </ul>
+%%
+%% @param Type Handler type
+%% @param Name Unique name
+%% @param Module Handler module
+%% @param Function Handler function (must be exported with arity 1)
+%% @param Opts Type-specific options
+%% @returns `ok' on success, `{error, {function_not_exported, M, F, 1}}'
+%%          if the function doesn't exist
+-spec reg(Type, Name, Module, Function, Opts) -> ok | {error, term()} when
+    Type :: handler_type(),
+    Name :: binary(),
+    Module :: module(),
+    Function :: atom(),
+    Opts :: map().
 reg(Type, Name, Module, Function, Opts) when is_atom(Type), is_binary(Name) ->
     gen_statem:call(?SERVER, {reg, Type, Name, Module, Function, Opts}).
 
 %% @doc Unregister a handler.
-%% This is an atomic operation handled by the state machine.
--spec unreg(handler_type(), binary()) -> ok.
+%%
+%% Removes a previously registered handler. After unregistration,
+%% the handler will no longer appear in list operations and calls
+%% to it will return not_found errors.
+%%
+%% This is an atomic operation that goes through the gen_statem.
+%%
+%% @param Type Handler type
+%% @param Name Handler name to unregister
+%% @returns `ok' (always succeeds, even if handler didn't exist)
+-spec unreg(Type :: handler_type(), Name :: binary()) -> ok.
 unreg(Type, Name) ->
     gen_statem:call(?SERVER, {unreg, Type, Name}).
 
 %% @doc Execute a handler.
-%% This is a read operation - uses persistent_term directly.
--spec run(handler_type(), binary(), map()) -> {ok, term()} | {error, term()}.
+%%
+%% Looks up and executes a handler with the given arguments.
+%% This is a read operation that uses persistent_term directly,
+%% bypassing the gen_statem process for maximum performance.
+%%
+%% == Example ==
+%%
+%% ```
+%% {ok, Result} = barrel_mcp_registry:run(tool, <<"search">>, #{
+%%%     <<"query">> => <<"erlang">>
+%% }).
+%% '''
+%%
+%% @param Type Handler type
+%% @param Name Handler name
+%% @param Args Arguments to pass to the handler
+%% @returns `{ok, Result}' on success, `{error, {not_found, Type, Name}}'
+%%          if handler doesn't exist, `{error, {Class, Reason, Stack}}'
+%%          if handler throws
+-spec run(Type, Name, Args) -> {ok, term()} | {error, term()} when
+    Type :: handler_type(),
+    Name :: binary(),
+    Args :: map().
 run(Type, Name, Args) ->
     case find(Type, Name) of
         {ok, #{module := M, function := F}} ->
@@ -111,8 +246,14 @@ run(Type, Name, Args) ->
     end.
 
 %% @doc Find a handler by type and name.
-%% This is a read operation - uses persistent_term directly for O(1) lookup.
--spec find(handler_type(), binary()) -> {ok, map()} | error.
+%%
+%% Looks up handler metadata without executing it.
+%% This is a read operation using persistent_term for O(1) lookup.
+%%
+%% @param Type Handler type
+%% @param Name Handler name
+%% @returns `{ok, HandlerMap}' if found, `error' otherwise
+-spec find(Type :: handler_type(), Name :: binary()) -> {ok, map()} | error.
 find(Type, Name) ->
     Handlers = persistent_term:get(?REGISTRY_KEY, #{}),
     case maps:find({Type, Name}, Handlers) of
@@ -121,7 +262,21 @@ find(Type, Name) ->
     end.
 
 %% @doc List all handlers grouped by type.
-%% This is a read operation - uses persistent_term directly.
+%%
+%% Returns a map with handler types as keys and lists of
+%% `{Name, Metadata}' tuples as values.
+%%
+%% == Example ==
+%%
+%% ```
+%% All = barrel_mcp_registry:all(),
+%% %% Returns:
+%% %% #{tool => [{<<"search">>, #{...}}],
+%% %%   resource => [{<<"config">>, #{...}}],
+%% %%   prompt => []}
+%% '''
+%%
+%% @returns Map of type => handlers
 -spec all() -> #{handler_type() => [{binary(), map()}]}.
 all() ->
     Handlers = persistent_term:get(?REGISTRY_KEY, #{}),
@@ -131,8 +286,10 @@ all() ->
     end, #{}, maps:to_list(Handlers)).
 
 %% @doc List all handlers of a specific type.
-%% This is a read operation - uses persistent_term directly.
--spec all(handler_type()) -> [{binary(), map()}].
+%%
+%% @param Type Handler type to list
+%% @returns List of `{Name, Metadata}' tuples
+-spec all(Type :: handler_type()) -> [{binary(), map()}].
 all(Type) ->
     maps:get(Type, all(), []).
 
@@ -140,9 +297,11 @@ all(Type) ->
 %% gen_statem callbacks
 %%====================================================================
 
+%% @private
 callback_mode() ->
     state_functions.
 
+%% @private
 init([]) ->
     %% Create ETS table owned by this process
     ?REGISTRY_TABLE = ets:new(?REGISTRY_TABLE, [
@@ -166,34 +325,28 @@ init([]) ->
             {ok, not_ready, #{}}
     end.
 
-%% State: not_ready
-%% Registry is not yet ready to accept registrations
+%% @private
+%% State: not_ready - Registry is not yet ready to accept registrations
 
-%% Handle ready message - transition to ready state
 not_ready(info, ready, Data) ->
     {next_state, ready, Data};
 
-%% Wait for ready - postpone until we're ready
 not_ready({call, _From}, wait_for_ready, _Data) ->
     {keep_state_and_data, [postpone]};
 
-%% Registration requests - postpone until ready
 not_ready({call, _From}, {reg, _Type, _Name, _Module, _Function, _Opts}, _Data) ->
     {keep_state_and_data, [postpone]};
 
-%% Unregistration requests - postpone until ready
 not_ready({call, _From}, {unreg, _Type, _Name}, _Data) ->
     {keep_state_and_data, [postpone]};
 
-%% Other calls - postpone
 not_ready({call, _From}, _, _Data) ->
     {keep_state_and_data, [postpone]}.
 
-%% State: ready
-%% Registry is ready to accept registrations
+%% @private
+%% State: ready - Registry is ready to accept registrations
 
 ready(info, ready, _Data) ->
-    %% Already ready, ignore
     keep_state_and_data;
 
 ready({call, From}, wait_for_ready, _Data) ->
@@ -210,8 +363,8 @@ ready({call, From}, {unreg, Type, Name}, Data) ->
 ready({call, From}, _, _Data) ->
     {keep_state_and_data, [{reply, From, {error, unknown_request}}]}.
 
+%% @private
 terminate(_Reason, _State, _Data) ->
-    %% Clean up persistent_term on shutdown
     catch persistent_term:erase(?REGISTRY_KEY),
     ok.
 
@@ -219,7 +372,6 @@ terminate(_Reason, _State, _Data) ->
 %% Internal functions
 %%====================================================================
 
-%% Spawn a process that waits for Proc to be registered, then signals ready
 spawn_waiter(Parent, Proc) ->
     spawn_link(fun() -> wait_for_proc(Parent, Proc) end).
 
@@ -232,9 +384,7 @@ wait_for_proc(Parent, Proc) ->
             Parent ! ready
     end.
 
-%% Atomic registration operation
 do_reg(Type, Name, Module, Function, Opts) ->
-    %% Validate module/function exists
     case erlang:function_exported(Module, Function, 1) of
         true ->
             Handler = build_handler(Type, Module, Function, Opts),
@@ -245,13 +395,11 @@ do_reg(Type, Name, Module, Function, Opts) ->
             {error, {function_not_exported, Module, Function, 1}}
     end.
 
-%% Atomic unregistration operation
 do_unreg(Type, Name) ->
     true = ets:delete(?REGISTRY_TABLE, {Type, Name}),
     sync_persistent_term(),
     ok.
 
-%% Build handler map based on type
 build_handler(tool, Module, Function, Opts) ->
     #{
         module => Module,
@@ -277,7 +425,6 @@ build_handler(prompt, Module, Function, Opts) ->
         arguments => maps:get(arguments, Opts, [])
     }.
 
-%% Sync ETS table to persistent_term for fast lookups
 sync_persistent_term() ->
     Handlers = ets:foldl(fun({Key, Handler}, Acc) ->
         Acc#{Key => Handler}
