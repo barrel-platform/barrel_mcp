@@ -76,7 +76,8 @@
 -export([
     start_http/1,
     stop_http/0,
-    start_stdio/0
+    start_stdio/0,
+    start_stdio_link/0
 ]).
 
 %% Backward compatible aliases
@@ -437,9 +438,40 @@ stop_http() ->
 %%
 %% @returns `ok' when the loop terminates
 %% @see barrel_mcp_stdio
+%% @see start_stdio_link/0
 -spec start_stdio() -> ok.
 start_stdio() ->
     barrel_mcp_stdio:start().
+
+%% @doc Start the stdio server as a supervised gen_server.
+%%
+%% Starts an MCP stdio server that can be supervised. Unlike
+%% {@link start_stdio/0}, this function returns immediately after
+%% spawning the server process.
+%%
+%% The server registers locally as `barrel_mcp_stdio'.
+%%
+%% == Example ==
+%%
+%% ```
+%% %% In your supervisor:
+%% init([]) ->
+%%     SupFlags = #{strategy => one_for_one},
+%%     Children = [
+%%         #{id => mcp_stdio,
+%%           start => {barrel_mcp, start_stdio_link, []},
+%%           restart => permanent,
+%%           type => worker}
+%%     ],
+%%     {ok, {SupFlags, Children}}.
+%% '''
+%%
+%% @returns `{ok, Pid}' on success, or `{error, Reason}' on failure
+%% @see barrel_mcp_stdio
+%% @see start_stdio/0
+-spec start_stdio_link() -> {ok, pid()} | {error, term()}.
+start_stdio_link() ->
+    barrel_mcp_stdio:start_link().
 
 %%====================================================================
 %% Backward Compatible Aliases
