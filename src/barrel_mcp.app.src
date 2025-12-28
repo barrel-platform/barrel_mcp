@@ -1,0 +1,15 @@
+{application, barrel_mcp, [
+    {description, "MCP Protocol Library for Erlang"},
+    {vsn, "0.1.0"},
+    {registered, [barrel_mcp_registry, barrel_mcp_sup]},
+    {mod, {barrel_mcp_app, []}},
+    {applications, [kernel, stdlib, cowboy, hackney]},
+    {env, [
+        {server_name, <<"barrel">>},
+        {server_version, <<"1.0.0">>},
+        {protocol_version, <<"2024-11-05">>}
+    ]},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, []}
+]}.

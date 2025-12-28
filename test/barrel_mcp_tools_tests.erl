@@ -1,0 +1,243 @@
+%%%-------------------------------------------------------------------
+%%% @doc Tools tests for barrel_mcp.
+%%% Tests based on official MCP Python SDK test patterns.
+%%% @end
+%%%-------------------------------------------------------------------
+-module(barrel_mcp_tools_tests).
+
+-include_lib("eunit/include/eunit.hrl").
+
+%% Test handlers
+-export([
+    echo_tool/1,
+    error_tool/1,
+    map_result_tool/1,
+    list_result_tool/1
+]).
+
+%%====================================================================
+%% Test Fixtures
+%%====================================================================
+
+tools_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     [
+        {"List tools returns registered tools", fun test_list_tools/0},
+        {"List tools returns empty when none registered", fun test_list_tools_empty/0},
+        {"Call tool returns text result", fun test_call_tool_text/0},
+        {"Call tool returns map result as JSON", fun test_call_tool_map/0},
+        {"Call tool returns list of content blocks", fun test_call_tool_list/0},
+        {"Call non-existent tool returns error", fun test_call_tool_not_found/0},
+        {"Call tool with error returns error response", fun test_call_tool_error/0},
+        {"Tool with input schema is listed correctly", fun test_tool_input_schema/0}
+     ]
+    }.
+
+setup() ->
+    application:ensure_all_started(barrel_mcp),
+    ok = barrel_mcp_registry:wait_for_ready(),
+    ok.
+
+cleanup(_) ->
+    lists:foreach(fun({Name, _}) ->
+        barrel_mcp_registry:unreg(tool, Name)
+    end, barrel_mcp_registry:all(tool)),
+    ok.
+
+%%====================================================================
+%% Test Handlers
+%%====================================================================
+
+echo_tool(Args) ->
+    Input = maps:get(<<"input">>, Args, <<"default">>),
+    <<"Echo: ", Input/binary>>.
+
+error_tool(_Args) ->
+    error(intentional_error).
+
+map_result_tool(_Args) ->
+    #{<<"key">> => <<"value">>, <<"number">> => 42}.
+
+list_result_tool(_Args) ->
+    [
+        #{<<"type">> => <<"text">>, <<"text">> => <<"First">>},
+        #{<<"type">> => <<"text">>, <<"text">> => <<"Second">>}
+    ].
+
+%%====================================================================
+%% Tests
+%%====================================================================
+
+test_list_tools() ->
+    ok = barrel_mcp_registry:reg(tool, <<"tool1">>, ?MODULE, echo_tool, #{
+        description => <<"First tool">>
+    }),
+    ok = barrel_mcp_registry:reg(tool, <<"tool2">>, ?MODULE, map_result_tool, #{
+        description => <<"Second tool">>
+    }),
+
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"tools/list">>
+    },
+    Response = barrel_mcp_protocol:handle(Request),
+    Result = maps:get(<<"result">>, Response),
+    Tools = maps:get(<<"tools">>, Result),
+
+    ?assertEqual(2, length(Tools)),
+
+    %% Check tool structure
+    [Tool1 | _] = Tools,
+    ?assert(maps:is_key(<<"name">>, Tool1)),
+    ?assert(maps:is_key(<<"description">>, Tool1)),
+    ?assert(maps:is_key(<<"inputSchema">>, Tool1)),
+
+    barrel_mcp_registry:unreg(tool, <<"tool1">>),
+    barrel_mcp_registry:unreg(tool, <<"tool2">>).
+
+test_list_tools_empty() ->
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"tools/list">>
+    },
+    Response = barrel_mcp_protocol:handle(Request),
+    Result = maps:get(<<"result">>, Response),
+    Tools = maps:get(<<"tools">>, Result),
+    ?assertEqual([], Tools).
+
+test_call_tool_text() ->
+    ok = barrel_mcp_registry:reg(tool, <<"echo">>, ?MODULE, echo_tool, #{}),
+
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"tools/call">>,
+        <<"params">> => #{
+            <<"name">> => <<"echo">>,
+            <<"arguments">> => #{<<"input">> => <<"hello">>}
+        }
+    },
+    Response = barrel_mcp_protocol:handle(Request),
+    Result = maps:get(<<"result">>, Response),
+    Content = maps:get(<<"content">>, Result),
+
+    ?assertEqual(1, length(Content)),
+    [Block] = Content,
+    ?assertEqual(<<"text">>, maps:get(<<"type">>, Block)),
+    ?assertEqual(<<"Echo: hello">>, maps:get(<<"text">>, Block)),
+
+    barrel_mcp_registry:unreg(tool, <<"echo">>).
+
+test_call_tool_map() ->
+    ok = barrel_mcp_registry:reg(tool, <<"map_tool">>, ?MODULE, map_result_tool, #{}),
+
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"tools/call">>,
+        <<"params">> => #{
+            <<"name">> => <<"map_tool">>,
+            <<"arguments">> => #{}
+        }
+    },
+    Response = barrel_mcp_protocol:handle(Request),
+    Result = maps:get(<<"result">>, Response),
+    Content = maps:get(<<"content">>, Result),
+
+    ?assertEqual(1, length(Content)),
+    [Block] = Content,
+    ?assertEqual(<<"text">>, maps:get(<<"type">>, Block)),
+    %% Map should be JSON encoded
+    Text = maps:get(<<"text">>, Block),
+    ?assert(is_binary(Text)),
+
+    barrel_mcp_registry:unreg(tool, <<"map_tool">>).
+
+test_call_tool_list() ->
+    ok = barrel_mcp_registry:reg(tool, <<"list_tool">>, ?MODULE, list_result_tool, #{}),
+
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"tools/call">>,
+        <<"params">> => #{
+            <<"name">> => <<"list_tool">>,
+            <<"arguments">> => #{}
+        }
+    },
+    Response = barrel_mcp_protocol:handle(Request),
+    Result = maps:get(<<"result">>, Response),
+    Content = maps:get(<<"content">>, Result),
+
+    ?assertEqual(2, length(Content)),
+
+    barrel_mcp_registry:unreg(tool, <<"list_tool">>).
+
+test_call_tool_not_found() ->
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"tools/call">>,
+        <<"params">> => #{
+            <<"name">> => <<"nonexistent">>,
+            <<"arguments">> => #{}
+        }
+    },
+    Response = barrel_mcp_protocol:handle(Request),
+    ?assert(maps:is_key(<<"error">>, Response)),
+    Error = maps:get(<<"error">>, Response),
+    ?assertEqual(-32601, maps:get(<<"code">>, Error)).
+
+test_call_tool_error() ->
+    ok = barrel_mcp_registry:reg(tool, <<"error_tool">>, ?MODULE, error_tool, #{}),
+
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"tools/call">>,
+        <<"params">> => #{
+            <<"name">> => <<"error_tool">>,
+            <<"arguments">> => #{}
+        }
+    },
+    Response = barrel_mcp_protocol:handle(Request),
+    ?assert(maps:is_key(<<"error">>, Response)),
+    Error = maps:get(<<"error">>, Response),
+    ?assertEqual(-32000, maps:get(<<"code">>, Error)),
+
+    barrel_mcp_registry:unreg(tool, <<"error_tool">>).
+
+test_tool_input_schema() ->
+    Schema = #{
+        <<"type">> => <<"object">>,
+        <<"properties">> => #{
+            <<"query">> => #{<<"type">> => <<"string">>},
+            <<"limit">> => #{<<"type">> => <<"integer">>, <<"default">> => 10}
+        },
+        <<"required">> => [<<"query">>]
+    },
+    ok = barrel_mcp_registry:reg(tool, <<"search">>, ?MODULE, echo_tool, #{
+        description => <<"Search tool">>,
+        input_schema => Schema
+    }),
+
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"tools/list">>
+    },
+    Response = barrel_mcp_protocol:handle(Request),
+    Result = maps:get(<<"result">>, Response),
+    [Tool] = maps:get(<<"tools">>, Result),
+
+    ?assertEqual(<<"search">>, maps:get(<<"name">>, Tool)),
+    ?assertEqual(<<"Search tool">>, maps:get(<<"description">>, Tool)),
+    InputSchema = maps:get(<<"inputSchema">>, Tool),
+    ?assertEqual(<<"object">>, maps:get(<<"type">>, InputSchema)),
+    ?assert(maps:is_key(<<"properties">>, InputSchema)),
+
+    barrel_mcp_registry:unreg(tool, <<"search">>).

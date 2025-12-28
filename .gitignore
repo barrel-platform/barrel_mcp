@@ -1,0 +1,32 @@
+# Build artifacts
+_build/
+_checkouts/
+ebin/
+*.beam
+
+# Rebar3
+rebar.lock
+
+# IDE/Editor
+.idea/
+*.swp
+*~
+.vscode/
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+.eunit/
+cover/
+*.coverdata
+
+# Documentation
+doc/
+edoc/
+
+# Dialyzer
+.plt/
+*.plt
