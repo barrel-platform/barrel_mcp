@@ -49,7 +49,14 @@ auth_test_() ->
 
         %% Scope checking
         {"Scope check passes with required scopes", fun test_scope_check_pass/0},
-        {"Scope check fails with missing scopes", fun test_scope_check_fail/0}
+        {"Scope check fails with missing scopes", fun test_scope_check_fail/0},
+
+        %% Custom auth tests
+        {"Custom auth init calls module init", fun test_custom_init/0},
+        {"Custom auth with valid Bearer token", fun test_custom_bearer_valid/0},
+        {"Custom auth with valid X-API-Key", fun test_custom_apikey_valid/0},
+        {"Custom auth with invalid token", fun test_custom_invalid/0},
+        {"Custom auth missing module fails init", fun test_custom_missing_module/0}
      ]
     }.
 
@@ -349,3 +356,32 @@ base64url_encode(Data) ->
     NoPad = binary:replace(B64, <<"=">>, <<>>, [global]),
     Url1 = binary:replace(NoPad, <<"+">>, <<"-">>, [global]),
     binary:replace(Url1, <<"/">>, <<"_">>, [global]).
+
+%%====================================================================
+%% Custom Auth Tests
+%%====================================================================
+
+test_custom_init() ->
+    {ok, State} = barrel_mcp_auth_custom:init(#{module => test_auth_module}),
+    ?assertEqual(test_auth_module, maps:get(module, State)),
+    ?assert(maps:is_key(module_state, State)).
+
+test_custom_bearer_valid() ->
+    {ok, State} = barrel_mcp_auth_custom:init(#{module => test_auth_module}),
+    Request = #{headers => #{<<"authorization">> => <<"Bearer valid-token">>}},
+    {ok, AuthInfo} = barrel_mcp_auth_custom:authenticate(Request, State),
+    ?assertEqual(<<"test-user">>, maps:get(subject, AuthInfo)).
+
+test_custom_apikey_valid() ->
+    {ok, State} = barrel_mcp_auth_custom:init(#{module => test_auth_module}),
+    Request = #{headers => #{<<"x-api-key">> => <<"valid-token">>}},
+    {ok, AuthInfo} = barrel_mcp_auth_custom:authenticate(Request, State),
+    ?assertEqual(<<"test-user">>, maps:get(subject, AuthInfo)).
+
+test_custom_invalid() ->
+    {ok, State} = barrel_mcp_auth_custom:init(#{module => test_auth_module}),
+    Request = #{headers => #{<<"authorization">> => <<"Bearer invalid-token">>}},
+    ?assertEqual({error, invalid_token}, barrel_mcp_auth_custom:authenticate(Request, State)).
+
+test_custom_missing_module() ->
+    ?assertEqual({error, missing_module}, barrel_mcp_auth_custom:init(#{})).

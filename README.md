@@ -165,6 +165,7 @@ barrel_mcp provides pluggable authentication following OAuth 2.1 patterns as rec
 | `barrel_mcp_auth_bearer` | Bearer token (JWT or opaque) |
 | `barrel_mcp_auth_apikey` | API key authentication |
 | `barrel_mcp_auth_basic` | HTTP Basic authentication |
+| `barrel_mcp_auth_custom` | Custom auth module (simple interface) |
 
 ### Bearer Token (JWT) Authentication
 
@@ -268,9 +269,45 @@ HashedPwd = barrel_mcp_auth_basic:hash_password(<<"my-password">>),
 }).
 ```
 
-### Custom Authentication Provider
+### Custom Authentication (Simple Interface)
 
-Implement the `barrel_mcp_auth` behaviour:
+For integrating with existing auth systems, use `barrel_mcp_auth_custom` with a simple two-function module:
+
+```erlang
+-module(my_auth).
+-export([init/1, authenticate/2]).
+
+init(_Opts) ->
+    {ok, #{}}.
+
+authenticate(Token, State) ->
+    case my_key_store:validate(Token) of
+        {ok, Info} ->
+            {ok, #{subject => Info}, State};
+        error ->
+            {error, invalid_token, State}
+    end.
+```
+
+Configure it:
+
+```erlang
+{ok, _} = barrel_mcp:start_http(#{
+    port => 9090,
+    auth => #{
+        provider => barrel_mcp_auth_custom,
+        provider_opts => #{
+            module => my_auth
+        }
+    }
+}).
+```
+
+See `guides/custom-authentication.md` for full documentation.
+
+### Custom Authentication Provider (Full Behaviour)
+
+For more control, implement the full `barrel_mcp_auth` behaviour:
 
 ```erlang
 -module(my_auth_provider).
