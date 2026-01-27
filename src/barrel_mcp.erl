@@ -76,6 +76,8 @@
 -export([
     start_http/1,
     stop_http/0,
+    start_http_stream/1,
+    stop_http_stream/0,
     start_stdio/0,
     start_stdio_link/0
 ]).
@@ -412,6 +414,91 @@ start_http(Opts) ->
 -spec stop_http() -> ok | {error, not_found}.
 stop_http() ->
     barrel_mcp_http:stop().
+
+%% @doc Start the Streamable HTTP server for MCP (Protocol 2025-03-26).
+%%
+%% Starts a Cowboy HTTP server implementing the MCP Streamable HTTP transport.
+%% This transport supports:
+%% - POST for client requests with JSON or SSE streaming responses
+%% - GET for server-to-client notification streams (SSE)
+%% - DELETE for session termination
+%% - Session management via Mcp-Session-Id header
+%%
+%% This is the transport expected by Claude Code's `--transport http` option.
+%%
+%% == Options ==
+%%
+%% <ul>
+%%   <li>`port' - Port number (default: 9090)</li>
+%%   <li>`ip' - IP address to bind (default: `{0, 0, 0, 0}')</li>
+%%   <li>`auth' - Authentication configuration (see {@link barrel_mcp_auth})</li>
+%%   <li>`session_enabled' - Enable session management (default: true)</li>
+%%   <li>`ssl' - SSL/TLS configuration for HTTPS:
+%%     <ul>
+%%       <li>`certfile' - Path to certificate file</li>
+%%       <li>`keyfile' - Path to private key file</li>
+%%       <li>`cacertfile' - Path to CA certificate file (optional)</li>
+%%     </ul>
+%%   </li>
+%% </ul>
+%%
+%% == Example ==
+%%
+%% ```
+%% %% Start with API key authentication
+%% barrel_mcp:start_http_stream(#{
+%%     port => 9090,
+%%     auth => #{
+%%         provider => barrel_mcp_auth_apikey,
+%%         provider_opts => #{keys => [<<"my-api-key">>]}
+%%     }
+%% }).
+%%
+%% %% Start with HTTPS
+%% barrel_mcp:start_http_stream(#{
+%%     port => 9443,
+%%     ssl => #{
+%%         certfile => "/path/to/cert.pem",
+%%         keyfile => "/path/to/key.pem"
+%%     }
+%% }).
+%% '''
+%%
+%% == Claude Code Integration ==
+%%
+%% After starting the server, add it to Claude Code:
+%% ```
+%% claude mcp add my-server --transport http http://localhost:9090/mcp \
+%%   --header "X-API-Key: my-api-key"
+%% '''
+%%
+%% @param Opts Server options
+%% @returns `{ok, Pid}' on success, `{error, Reason}' on failure
+%% @see barrel_mcp_http_stream
+%% @see barrel_mcp_auth
+-spec start_http_stream(Opts) -> {ok, pid()} | {error, term()} when
+    Opts :: #{
+        port => pos_integer(),
+        ip => inet:ip_address(),
+        auth => map(),
+        session_enabled => boolean(),
+        ssl => #{
+            certfile := string(),
+            keyfile := string(),
+            cacertfile => string()
+        }
+    }.
+start_http_stream(Opts) ->
+    barrel_mcp_http_stream:start(Opts).
+
+%% @doc Stop the Streamable HTTP server.
+%%
+%% Stops the MCP Streamable HTTP server if running.
+%%
+%% @returns `ok' on success, `{error, not_found}' if not running
+-spec stop_http_stream() -> ok | {error, not_found}.
+stop_http_stream() ->
+    barrel_mcp_http_stream:stop().
 
 %% @doc Start the stdio server for MCP.
 %%

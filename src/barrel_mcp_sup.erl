@@ -40,4 +40,13 @@ init([]) ->
         modules => [barrel_mcp_registry]
     },
 
-    {ok, {SupFlags, [Registry]}}.
+    Session = #{
+        id => barrel_mcp_session,
+        start => {barrel_mcp_session, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [barrel_mcp_session]
+    },
+
+    {ok, {SupFlags, [Registry, Session]}}.

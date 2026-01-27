@@ -1,11 +1,11 @@
 # barrel_mcp
 
-MCP (Model Context Protocol) library for Erlang. Implements the full MCP 2024-11-05 specification for both server and client modes.
+MCP (Model Context Protocol) library for Erlang. Implements the MCP specification for both server and client modes, including the Streamable HTTP transport (protocol 2025-03-26) for Claude Code integration.
 
 ## Features
 
 - **Full MCP Protocol Support**: Tools, Resources, Prompts, and Sampling
-- **Multiple Transports**: HTTP (Cowboy) and stdio (for Claude Desktop)
+- **Multiple Transports**: Streamable HTTP (Claude Code), HTTP (Cowboy), and stdio (Claude Desktop)
 - **Pluggable Authentication**: Bearer JWT, API keys, Basic auth, or custom providers
 - **Supervised Registry**: gen_statem-based registry with atomic operations
 - **Fast Reads**: ETS + persistent_term for O(1) handler lookups (no process call)
@@ -143,7 +143,36 @@ summarize_prompt(Args) ->
     }.
 ```
 
-### Starting HTTP Server
+### Starting Streamable HTTP Server (Claude Code)
+
+For Claude Code integration, use the Streamable HTTP transport:
+
+```erlang
+%% Start Streamable HTTP server on port 9090
+{ok, _} = barrel_mcp:start_http_stream(#{port => 9090}).
+
+%% With API key authentication
+{ok, _} = barrel_mcp:start_http_stream(#{
+    port => 9090,
+    auth => #{
+        provider => barrel_mcp_auth_apikey,
+        provider_opts => #{
+            keys => #{<<"my-key">> => #{subject => <<"user">>}}
+        }
+    }
+}).
+```
+
+Then add to Claude Code:
+
+```bash
+claude mcp add my-server --transport http http://localhost:9090/mcp \
+  --header "X-API-Key: my-key"
+```
+
+See `guides/http-stream.md` for full documentation.
+
+### Starting HTTP Server (Legacy)
 
 ```erlang
 %% Start HTTP server on port 9090
@@ -445,7 +474,9 @@ Your application's entry point should call `barrel_mcp:start_stdio()`.
 
 | Function | Description |
 |----------|-------------|
-| `barrel_mcp:start_http(Opts)` | Start HTTP server |
+| `barrel_mcp:start_http_stream(Opts)` | Start Streamable HTTP server (Claude Code) |
+| `barrel_mcp:stop_http_stream()` | Stop Streamable HTTP server |
+| `barrel_mcp:start_http(Opts)` | Start HTTP server (legacy) |
 | `barrel_mcp:stop_http()` | Stop HTTP server |
 | `barrel_mcp:start_stdio()` | Start stdio server (blocking) |
 

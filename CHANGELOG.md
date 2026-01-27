@@ -5,15 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.0] - 2025-01-05
+## [1.1.0] - 2025-01-27
 
 ### Added
+
+- **MCP Streamable HTTP Transport** (`barrel_mcp_http_stream`)
+  - Protocol version 2025-03-26 support for Claude Code integration
+  - POST with JSON or SSE streaming responses
+  - GET for server-to-client notification streams (SSE)
+  - DELETE for session termination
+  - OPTIONS for CORS preflight
+  - HTTPS/TLS support
+  - See `guides/http-stream.md` for usage
+
+- **Session Management** (`barrel_mcp_session`)
+  - ETS-based session tracking for Streamable HTTP transport
+  - Sessions identified via `Mcp-Session-Id` header
+  - Configurable TTL with automatic cleanup (default: 30 minutes)
+  - SSE stream lifecycle management
 
 - **Custom Authentication Provider** (`barrel_mcp_auth_custom`)
   - Simplified interface for custom authentication modules
   - Only requires `init/1` and `authenticate/2` callbacks
   - Automatically extracts tokens from Bearer and X-API-Key headers
   - See `guides/custom-authentication.md` for usage
+
+### Changed
+
+- Protocol version updated to `2025-03-26` for Streamable HTTP transport
+- Supervisor now includes session manager child spec
+- Added `crypto` to application dependencies
 
 ## [1.0.0] - 2024-12-29
 
