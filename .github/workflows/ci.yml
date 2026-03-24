@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  compile:
+    name: Compile / OTP ${{ matrix.otp }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        otp: ['27', '28']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          rebar3-version: '3.24'
+      - name: Restore rebar3 cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/rebar3
+            _build
+          key: ${{ runner.os }}-rebar3-${{ matrix.otp }}-${{ hashFiles('rebar.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rebar3-${{ matrix.otp }}-
+      - name: Compile
+        run: rebar3 compile
+
+  tests:
+    name: Tests / OTP ${{ matrix.otp }}
+    needs: compile
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        otp: ['27', '28']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          rebar3-version: '3.24'
+      - name: Restore rebar3 cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/rebar3
+            _build
+          key: ${{ runner.os }}-rebar3-${{ matrix.otp }}-${{ hashFiles('rebar.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rebar3-${{ matrix.otp }}-
+      - name: Run tests
+        run: rebar3 eunit
+
+  check:
+    name: Check / OTP ${{ matrix.otp }}
+    needs: compile
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        otp: ['27', '28']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          rebar3-version: '3.24'
+      - name: Restore rebar3 cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/rebar3
+            _build
+          key: ${{ runner.os }}-rebar3-${{ matrix.otp }}-${{ hashFiles('rebar.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rebar3-${{ matrix.otp }}-
+      - name: Restore PLT cache
+        uses: actions/cache@v4
+        with:
+          path: _build/default/*_plt
+          key: ${{ runner.os }}-plt-${{ matrix.otp }}-${{ hashFiles('rebar.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-plt-${{ matrix.otp }}-
+      - name: Run xref
+        run: rebar3 xref
+      - name: Run dialyzer
+        run: rebar3 dialyzer
