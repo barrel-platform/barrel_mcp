@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @author Benoit Chesneau
-%%% @copyright 2024 Benoit Chesneau
+%%% @copyright 2024-2026 Benoit Chesneau
 %%% @doc Basic HTTP authentication provider for barrel_mcp.
 %%%
 %%% Implements HTTP Basic Authentication (RFC 7617).

@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @author Benoit Chesneau
-%%% @copyright 2024 Benoit Chesneau
+%%% @copyright 2024-2026 Benoit Chesneau
 %%% @doc HTTP transport for MCP using Cowboy.
 %%%
 %%% Implements a Cowboy handler for HTTP-based MCP communication.

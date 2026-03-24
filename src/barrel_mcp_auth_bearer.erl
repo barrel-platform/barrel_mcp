@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @author Benoit Chesneau
-%%% @copyright 2024 Benoit Chesneau
+%%% @copyright 2024-2026 Benoit Chesneau
 %%% @doc Bearer token authentication provider for barrel_mcp.
 %%%
 %%% Supports JWT validation (HS256 built-in, RS256/ES256 via custom verifier),

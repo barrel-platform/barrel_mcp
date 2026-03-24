@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @author Benoit Chesneau
-%%% @copyright 2024 Benoit Chesneau
+%%% @copyright 2024-2026 Benoit Chesneau
 %%% @doc API key authentication provider for barrel_mcp.
 %%%
 %%% Supports API key authentication via X-API-Key header, custom

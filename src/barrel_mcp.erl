@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @author Benoit Chesneau
-%%% @copyright 2024 Benoit Chesneau
+%%% @copyright 2024-2026 Benoit Chesneau
 %%% @doc Main API module for barrel_mcp.
 %%%
 %%% This module provides the primary public interface for the barrel_mcp

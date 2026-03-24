@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @author Benoit Chesneau
-%%% @copyright 2024-2025 Benoit Chesneau
+%%% @copyright 2024-2026 Benoit Chesneau
 %%% @doc MCP Session Management.
 %%%
 %%% Provides ETS-based session management for MCP Streamable HTTP transport.

@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @author Benoit Chesneau
-%%% @copyright 2024 Benoit Chesneau
+%%% @copyright 2024-2026 Benoit Chesneau
 %%% @doc Authentication behaviour and utilities for barrel_mcp.
 %%%
 %%% This module defines the `barrel_mcp_auth' behaviour for implementing

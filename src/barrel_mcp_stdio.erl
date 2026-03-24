@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @author Benoit Chesneau
-%%% @copyright 2024 Benoit Chesneau
+%%% @copyright 2024-2026 Benoit Chesneau
 %%% @doc stdio transport for MCP protocol.
 %%%
 %%% This module implements the stdio transport for the Model Context Protocol,

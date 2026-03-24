@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @author Benoit Chesneau
-%%% @copyright 2024 Benoit Chesneau
+%%% @copyright 2024-2026 Benoit Chesneau
 %%% @doc Handler registry for MCP tools, resources, and prompts.
 %%%
 %%% This module manages the registration and lookup of MCP handlers
