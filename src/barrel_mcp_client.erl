@@ -200,13 +200,11 @@ notify(Client, Method, Params) ->
 send_request(#client{transport = http, url = Url}, Body) ->
     Headers = [{<<"Content-Type">>, <<"application/json">>}],
     case hackney:post(Url, Headers, Body, []) of
-        {ok, 200, _RespHeaders, ClientRef} ->
-            {ok, ResponseBody} = hackney:body(ClientRef),
+        {ok, 200, _RespHeaders, ResponseBody} ->
             {ok, ResponseBody};
-        {ok, 204, _RespHeaders, _ClientRef} ->
+        {ok, 204, _RespHeaders, _ResponseBody} ->
             {ok, <<>>};
-        {ok, Status, _RespHeaders, ClientRef} ->
-            {ok, ResponseBody} = hackney:body(ClientRef),
+        {ok, Status, _RespHeaders, ResponseBody} ->
             {error, {http_error, Status, ResponseBody}};
         {error, Reason} ->
             {error, Reason}
