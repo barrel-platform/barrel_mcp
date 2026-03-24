@@ -76,7 +76,7 @@ test_initialize() ->
         <<"id">> => 1,
         <<"method">> => <<"initialize">>,
         <<"params">> => #{
-            <<"protocolVersion">> => <<"2024-11-05">>,
+            <<"protocolVersion">> => <<"2025-03-26">>,
             <<"capabilities">> => #{},
             <<"clientInfo">> => #{
                 <<"name">> => <<"test_client">>,
@@ -88,7 +88,7 @@ test_initialize() ->
     ?assertEqual(<<"2.0">>, maps:get(<<"jsonrpc">>, Response)),
     ?assertEqual(1, maps:get(<<"id">>, Response)),
     Result = maps:get(<<"result">>, Response),
-    ?assertEqual(<<"2024-11-05">>, maps:get(<<"protocolVersion">>, Result)),
+    ?assertEqual(<<"2025-03-26">>, maps:get(<<"protocolVersion">>, Result)),
     ?assert(maps:is_key(<<"capabilities">>, Result)).
 
 test_initialize_server_info() ->

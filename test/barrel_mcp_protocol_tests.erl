@@ -82,7 +82,7 @@ test_handle_initialize() ->
     ?assertEqual(<<"2.0">>, maps:get(<<"jsonrpc">>, Response)),
     ?assertEqual(1, maps:get(<<"id">>, Response)),
     Result = maps:get(<<"result">>, Response),
-    ?assertEqual(<<"2024-11-05">>, maps:get(<<"protocolVersion">>, Result)),
+    ?assertEqual(<<"2025-03-26">>, maps:get(<<"protocolVersion">>, Result)),
     ?assert(maps:is_key(<<"capabilities">>, Result)),
     ?assert(maps:is_key(<<"serverInfo">>, Result)).
 
