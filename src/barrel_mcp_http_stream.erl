@@ -52,7 +52,7 @@ start(Opts) ->
     SessionEnabled = maps:get(session_enabled, Opts, true),
 
     %% Ensure session manager is started if sessions are enabled
-    case SessionEnabled of
+    _ = case SessionEnabled of
         true ->
             ensure_session_manager();
         false ->
@@ -183,7 +183,7 @@ handle_post_authenticated(Req0, State) ->
     end,
 
     %% Update session activity
-    case SessionId of
+    _ = case SessionId of
         undefined -> ok;
         _ -> barrel_mcp_session:update_activity(SessionId)
     end,

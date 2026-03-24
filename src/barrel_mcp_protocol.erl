@@ -259,6 +259,4 @@ format_resource_result(Uri, Result) ->
     [#{<<"uri">> => Uri, <<"text">> => io_lib:format("~p", [Result])}].
 
 format_error({Class, Reason, _Stack}) ->
-    iolist_to_binary(io_lib:format("~p:~p", [Class, Reason]));
-format_error(Reason) ->
-    iolist_to_binary(io_lib:format("~p", [Reason])).
+    iolist_to_binary(io_lib:format("~p:~p", [Class, Reason])).

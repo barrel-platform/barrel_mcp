@@ -138,7 +138,7 @@ cleanup_expired(TTL) ->
 
 init([]) ->
     %% Create ETS table if it doesn't exist
-    case ets:whereis(?SESSION_TABLE) of
+    _ = case ets:whereis(?SESSION_TABLE) of
         undefined ->
             ets:new(?SESSION_TABLE, [
                 named_table,

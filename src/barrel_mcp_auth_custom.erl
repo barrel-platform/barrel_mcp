@@ -80,7 +80,7 @@ authenticate(Request, #{module := Module, module_state := ModuleState} = State) 
                 {error, Reason, _NewModuleState} ->
                     {error, Reason}
             end;
-        {error, no_token} ->
+        {error, _} ->
             {error, unauthorized}
     end.
 
