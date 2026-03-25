@@ -13,7 +13,7 @@
 %%% Accept header must include both application/json and text/event-stream.
 %%% Session management via Mcp-Session-Id header.
 %%%
-%%% @see https://spec.modelcontextprotocol.io/specification/basic/transports/
+%%% @reference <a href="https://spec.modelcontextprotocol.io/specification/basic/transports/">MCP Transport Specification</a>
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_http_stream).

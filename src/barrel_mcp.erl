@@ -428,19 +428,13 @@ stop_http() ->
 %%
 %% == Options ==
 %%
-%% <ul>
-%%   <li>`port' - Port number (default: 9090)</li>
-%%   <li>`ip' - IP address to bind (default: `{0, 0, 0, 0}')</li>
-%%   <li>`auth' - Authentication configuration (see {@link barrel_mcp_auth})</li>
-%%   <li>`session_enabled' - Enable session management (default: true)</li>
-%%   <li>`ssl' - SSL/TLS configuration for HTTPS:
-%%     <ul>
-%%       <li>`certfile' - Path to certificate file</li>
-%%       <li>`keyfile' - Path to private key file</li>
-%%       <li>`cacertfile' - Path to CA certificate file (optional)</li>
-%%     </ul>
-%%   </li>
-%% </ul>
+%% <dl>
+%%   <dt>port</dt><dd>Port number (default: 9090)</dd>
+%%   <dt>ip</dt><dd>IP address to bind (default: {0, 0, 0, 0})</dd>
+%%   <dt>auth</dt><dd>Authentication configuration (see {@link barrel_mcp_auth})</dd>
+%%   <dt>session_enabled</dt><dd>Enable session management (default: true)</dd>
+%%   <dt>ssl</dt><dd>SSL/TLS configuration for HTTPS: certfile, keyfile, cacertfile (optional)</dd>
+%% </dl>
 %%
 %% == Example ==
 %%
