@@ -82,9 +82,17 @@ notification_response() ->
 %% Request Handlers
 %%====================================================================
 
-handle_request(<<"initialize">>, _Params, Id, _State) ->
+handle_request(<<"initialize">>, Params, Id, State) ->
     ServerName = application:get_env(barrel_mcp, server_name, <<"barrel">>),
     ServerVersion = application:get_env(barrel_mcp, server_version, <<"1.0.0">>),
+    %% Persist client capabilities (notably `sampling') so the server can
+    %% later issue server-to-client requests via barrel_mcp_session.
+    case maps:find(session_id, State) of
+        {ok, SessionId} when is_binary(SessionId) ->
+            ClientCaps = maps:get(<<"capabilities">>, Params, #{}),
+            _ = barrel_mcp_session:set_client_capabilities(SessionId, ClientCaps);
+        _ -> ok
+    end,
     success_response(Id, #{
         <<"protocolVersion">> => ?MCP_PROTOCOL_VERSION,
         <<"capabilities">> => #{
@@ -158,6 +166,28 @@ handle_request(<<"resources/read">>, Params, Id, _State) ->
 handle_request(<<"resources/templates/list">>, _Params, Id, _State) ->
     %% Return empty list for now - templates can be added later
     success_response(Id, #{<<"resourceTemplates">> => []});
+
+handle_request(<<"resources/subscribe">>, Params, Id, State) ->
+    Uri = maps:get(<<"uri">>, Params, <<>>),
+    case maps:find(session_id, State) of
+        {ok, SessionId} when is_binary(SessionId), Uri =/= <<>> ->
+            barrel_mcp_session:subscribe_resource(SessionId, Uri),
+            success_response(Id, #{});
+        _ ->
+            error_response(Id, ?JSONRPC_INVALID_PARAMS,
+                           <<"Subscribe requires a session and a uri">>)
+    end;
+
+handle_request(<<"resources/unsubscribe">>, Params, Id, State) ->
+    Uri = maps:get(<<"uri">>, Params, <<>>),
+    case maps:find(session_id, State) of
+        {ok, SessionId} when is_binary(SessionId), Uri =/= <<>> ->
+            barrel_mcp_session:unsubscribe_resource(SessionId, Uri),
+            success_response(Id, #{});
+        _ ->
+            error_response(Id, ?JSONRPC_INVALID_PARAMS,
+                           <<"Unsubscribe requires a session and a uri">>)
+    end;
 
 %% Prompts
 handle_request(<<"prompts/list">>, _Params, Id, _State) ->

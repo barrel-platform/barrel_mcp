@@ -140,10 +140,22 @@ info({sse_event, EventId, Data}, Req, State) ->
     send_sse_event(Req, EventId, Data),
     {ok, Req, State};
 
+info({sse_send_message, Message}, Req, State) ->
+    %% Server-initiated message (e.g. sampling/createMessage request or a
+    %% notifications/resources/updated notification). Format as an SSE
+    %% event with a fresh id.
+    send_sse_event(Req, generate_event_id(), Message),
+    {ok, Req, State};
+
 info(_Info, Req, State) ->
     {ok, Req, State}.
 
-terminate(_Reason, _Req, _State) ->
+terminate(_Reason, _Req, State) ->
+    case maps:find(sse_session, State) of
+        {ok, SessionId} when is_binary(SessionId) ->
+            catch barrel_mcp_session:set_sse_pid(SessionId, undefined);
+        _ -> ok
+    end,
     ok.
 
 %%====================================================================
@@ -192,16 +204,34 @@ handle_post_authenticated(Req0, State) ->
     {ok, Body, Req1} = cowboy_req:read_body(Req0),
 
     case barrel_mcp_protocol:decode(Body) of
+        {ok, #{<<"id">> := RespId} = Request}
+                when is_map_key(<<"result">>, Request);
+                     is_map_key(<<"error">>, Request) ->
+            %% Inbound is a JSON-RPC RESPONSE (not a request) for an
+            %% earlier server-initiated call (e.g. sampling/createMessage).
+            %% Route to the waiting caller; reply 204.
+            _ = barrel_mcp_session:deliver_response(RespId, Request),
+            ResponseHeaders = add_session_header(cors_headers(), SessionId),
+            Req2 = cowboy_req:reply(204, ResponseHeaders, <<>>, Req1),
+            {ok, Req2, State1};
         {ok, Request} ->
             %% Add auth info to request context
             AuthInfo = maps:get(auth_info, State1, undefined),
+            ProtocolState = case SessionId of
+                undefined -> #{};
+                _ -> #{session_id => SessionId}
+            end,
+            ProtocolState1 = case AuthInfo of
+                undefined -> ProtocolState;
+                _ -> ProtocolState#{auth_info => AuthInfo}
+            end,
             RequestWithAuth = case AuthInfo of
                 undefined -> Request;
                 _ -> Request#{<<"_auth">> => AuthInfo}
             end,
 
             %% Handle the MCP request
-            case barrel_mcp_protocol:handle(RequestWithAuth) of
+            case barrel_mcp_protocol:handle(RequestWithAuth, ProtocolState1) of
                 no_response ->
                     %% Notification - return 204 No Content
                     ResponseHeaders = add_session_header(cors_headers(), SessionId),
@@ -264,6 +294,10 @@ handle_get_sse(Req0, State) ->
                             }, SessionId),
                             ResponseHeaders1 = maps:merge(ResponseHeaders, cors_headers()),
                             Req = cowboy_req:stream_reply(200, ResponseHeaders1, Req0),
+                            %% Register this process as the session's SSE
+                            %% pid so server-to-client primitives (sampling,
+                            %% notifications) can deliver messages here.
+                            _ = barrel_mcp_session:set_sse_pid(SessionId, self()),
                             %% Enter loop mode to handle SSE events
                             {cowboy_loop, Req, State#{sse_session => SessionId}};
                         {error, not_found} ->
