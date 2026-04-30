@@ -203,20 +203,20 @@ get_sse_pid(SessionId) ->
 -spec subscribe_resource(binary(), binary()) -> ok.
 subscribe_resource(SessionId, Uri)
         when is_binary(SessionId), is_binary(Uri) ->
-    ensure_subs_table(),
+    _ = ensure_subs_table(),
     true = ets:insert(?SUBSCRIPTIONS_TABLE, {{SessionId, Uri}}),
     ok.
 
 -spec unsubscribe_resource(binary(), binary()) -> ok.
 unsubscribe_resource(SessionId, Uri) ->
-    ensure_subs_table(),
+    _ = ensure_subs_table(),
     true = ets:delete(?SUBSCRIPTIONS_TABLE, {SessionId, Uri}),
     ok.
 
 %% @doc Return all session ids that subscribed to a URI.
 -spec subscribers_for(binary()) -> [binary()].
 subscribers_for(Uri) when is_binary(Uri) ->
-    ensure_subs_table(),
+    _ = ensure_subs_table(),
     %% match-spec to find all {SessionId, Uri} for the given Uri
     Pattern = {{'$1', Uri}},
     Match = [{Pattern, [], ['$1']}],
@@ -244,10 +244,10 @@ sampling_create_message(SessionId, Params, Opts) ->
 -spec deliver_response(binary() | integer(), map()) -> ok | {error, unknown_id}.
 deliver_response(Id, Response) ->
     Key = id_to_binary(Id),
-    ensure_pending_table(),
+    _ = ensure_pending_table(),
     case ets:lookup(?PENDING_TABLE, Key) of
         [{_, #pending{caller = Caller, caller_ref = Ref}}] ->
-            ets:delete(?PENDING_TABLE, Key),
+            true = ets:delete(?PENDING_TABLE, Key),
             Caller ! {sampling_response, Ref, Response},
             ok;
         [] ->
@@ -274,11 +274,11 @@ cleanup_expired(TTL) ->
 
 init([]) ->
     %% Create ETS tables if they don't exist
-    ensure_session_table(),
-    ensure_subs_table(),
-    ensure_pending_table(),
+    _ = ensure_session_table(),
+    _ = ensure_subs_table(),
+    _ = ensure_pending_table(),
     %% Schedule periodic cleanup
-    erlang:send_after(?CLEANUP_INTERVAL, self(), cleanup),
+    _ = erlang:send_after(?CLEANUP_INTERVAL, self(), cleanup),
     {ok, #{}}.
 
 handle_call(_Request, _From, State) ->
@@ -375,8 +375,8 @@ do_sampling(SessionId, SsePid, Params, Opts) ->
         caller_ref = Ref,
         expires_at = erlang:system_time(millisecond) + Timeout
     },
-    ensure_pending_table(),
-    ets:insert(?PENDING_TABLE, {RequestId, Pending}),
+    _ = ensure_pending_table(),
+    true = ets:insert(?PENDING_TABLE, {RequestId, Pending}),
     Request = #{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => RequestId,
@@ -391,7 +391,7 @@ do_sampling(SessionId, SsePid, Params, Opts) ->
         {sampling_response, Ref, #{<<"error">> := Err}} ->
             {error, {client_error, Err}}
     after Timeout ->
-        ets:delete(?PENDING_TABLE, RequestId),
+        true = ets:delete(?PENDING_TABLE, RequestId),
         {error, timeout}
     end.
 

@@ -87,10 +87,10 @@ handle_request(<<"initialize">>, Params, Id, State) ->
     ServerVersion = application:get_env(barrel_mcp, server_version, <<"1.0.0">>),
     %% Persist client capabilities (notably `sampling') so the server can
     %% later issue server-to-client requests via barrel_mcp_session.
-    case maps:find(session_id, State) of
+    _ = case maps:find(session_id, State) of
         {ok, SessionId} when is_binary(SessionId) ->
             ClientCaps = maps:get(<<"capabilities">>, Params, #{}),
-            _ = barrel_mcp_session:set_client_capabilities(SessionId, ClientCaps);
+            barrel_mcp_session:set_client_capabilities(SessionId, ClientCaps);
         _ -> ok
     end,
     success_response(Id, #{
