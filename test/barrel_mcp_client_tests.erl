@@ -27,6 +27,7 @@ client_test_() ->
      {timeout, 30, [
          {"initialize handshake + capabilities", fun test_initialize/0},
          {"list_tools includes registered tool", fun test_list_tools/0},
+         {"list_tools_all walks pagination", fun test_list_tools_all/0},
          {"call_tool returns content", fun test_call_tool/0},
          {"protocol version negotiates downward", fun test_version_downgrade/0},
          {"close shuts down cleanly", fun test_close/0}
@@ -77,6 +78,16 @@ test_call_tool() ->
     Content = maps:get(<<"content">>, Result),
     ?assert(is_list(Content)),
     [#{<<"type">> := <<"text">>, <<"text">> := <<"echoed">>}] = Content,
+    ok = barrel_mcp_client:close(Pid),
+    wait_dead(Pid).
+
+test_list_tools_all() ->
+    %% Server doesn't paginate today, so list_tools_all should return
+    %% the same set as list_tools in one page.
+    {ok, Pid} = start_client(),
+    {ok, All} = barrel_mcp_client:list_tools_all(Pid),
+    Names = [maps:get(<<"name">>, T) || T <- All],
+    ?assert(lists:member(<<"test_tool">>, Names)),
     ok = barrel_mcp_client:close(Pid),
     wait_dead(Pid).
 

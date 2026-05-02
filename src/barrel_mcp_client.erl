@@ -45,14 +45,18 @@
     close/1,
     %% Tools
     list_tools/1, list_tools/2,
+    list_tools_all/1,
     call_tool/3, call_tool/4,
     %% Resources
     list_resources/1, list_resources/2,
+    list_resources_all/1,
     list_resource_templates/1, list_resource_templates/2,
+    list_resource_templates_all/1,
     read_resource/2,
     subscribe/2, unsubscribe/2,
     %% Prompts
     list_prompts/1, list_prompts/2,
+    list_prompts_all/1,
     get_prompt/3,
     %% Misc
     complete/3,
@@ -135,6 +139,11 @@ list_tools(Pid) ->
 list_tools(Pid, Opts) ->
     paged(Pid, <<"tools/list">>, <<"tools">>, Opts).
 
+%% @doc Walk all `tools/list' pages and return the full list.
+-spec list_tools_all(pid()) -> {ok, [map()]} | {error, term()}.
+list_tools_all(Pid) ->
+    walk_all(fun(Cursor) -> list_tools(Pid, page_opts(Cursor)) end).
+
 %% @doc Call a tool. Args are forwarded as `arguments'.
 -spec call_tool(pid(), binary(), map()) -> {ok, map()} | {error, term()}.
 call_tool(Pid, Name, Args) ->
@@ -152,10 +161,20 @@ list_resources(Pid) -> list_resources(Pid, #{}).
 list_resources(Pid, Opts) ->
     paged(Pid, <<"resources/list">>, <<"resources">>, Opts).
 
+%% @doc Walk all `resources/list' pages.
+-spec list_resources_all(pid()) -> {ok, [map()]} | {error, term()}.
+list_resources_all(Pid) ->
+    walk_all(fun(Cursor) -> list_resources(Pid, page_opts(Cursor)) end).
+
 list_resource_templates(Pid) -> list_resource_templates(Pid, #{}).
 
 list_resource_templates(Pid, Opts) ->
     paged(Pid, <<"resources/templates/list">>, <<"resourceTemplates">>, Opts).
+
+%% @doc Walk all `resources/templates/list' pages.
+-spec list_resource_templates_all(pid()) -> {ok, [map()]} | {error, term()}.
+list_resource_templates_all(Pid) ->
+    walk_all(fun(Cursor) -> list_resource_templates(Pid, page_opts(Cursor)) end).
 
 read_resource(Pid, Uri) ->
     request(Pid, <<"resources/read">>, #{<<"uri">> => Uri}).
@@ -180,6 +199,11 @@ list_prompts(Pid) -> list_prompts(Pid, #{}).
 
 list_prompts(Pid, Opts) ->
     paged(Pid, <<"prompts/list">>, <<"prompts">>, Opts).
+
+%% @doc Walk all `prompts/list' pages.
+-spec list_prompts_all(pid()) -> {ok, [map()]} | {error, term()}.
+list_prompts_all(Pid) ->
+    walk_all(fun(Cursor) -> list_prompts(Pid, page_opts(Cursor)) end).
 
 get_prompt(Pid, Name, Args) ->
     request(Pid, <<"prompts/get">>, #{
@@ -591,6 +615,12 @@ request(Pid, Method, Params, Timeout) ->
                       T when is_integer(T) -> T + 5000
                   end,
     gen_statem:call(Pid, {request, Method, Params, Timeout}, CallTimeout).
+
+walk_all(Fetch) ->
+    barrel_mcp_pagination:walk(Fetch).
+
+page_opts(undefined) -> #{want_cursor => true};
+page_opts(Cursor) -> #{cursor => Cursor, want_cursor => true}.
 
 paged(Pid, Method, ResultKey, Opts) ->
     Params = case maps:get(cursor, Opts, undefined) of
