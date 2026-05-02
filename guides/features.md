@@ -73,8 +73,20 @@ by the spec.
 
 - `barrel_mcp_client_auth` behaviour.
 - `barrel_mcp_client_auth_bearer`: static token.
-- OAuth 2.1 + PKCE: planned (Protected Resource Metadata discovery,
-  RFC 8707 `resource` parameter).
+- `barrel_mcp_client_auth_oauth`: OAuth 2.1 + PKCE.
+  - Discovery: `parse_www_authenticate/1`, `discover_protected_resource/1`
+    (RFC 9728), `discover_authorization_server/1` (RFC 8414 with OpenID
+    Connect fallback).
+  - PKCE: `gen_code_verifier/0`, `code_challenge/1` (S256),
+    `build_authorization_url/2`.
+  - Token endpoint: `exchange_code/2`, `refresh_token/2`. Both attach
+    the RFC 8707 `resource` parameter; confidential clients use HTTP
+    Basic.
+  - As an auth handle: when used through `auth => {oauth, Config}` on
+    the client spec, the library attaches `Authorization: Bearer ...`
+    on every request and runs the refresh-token grant on 401 if a
+    `refresh_token` was supplied. The interactive authorization-code
+    redirect stays a host concern.
 
 ### Schema validation (`barrel_mcp_schema`)
 
@@ -93,5 +105,7 @@ end.
 
 ### Roadmap
 
-- OAuth 2.1 + PKCE auth (Protected Resource Metadata discovery,
-  RFC 8707 `resource` parameter).
+- Resumable Streamable HTTP via `Last-Event-ID` (transport buffers
+  the last id but does not yet replay missed events on reconnect).
+- Periodic deadline timer for in-flight requests beyond the per-call
+  timeout (today timeouts fire only when configured per-request).

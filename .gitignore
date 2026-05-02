@@ -4,6 +4,9 @@ _checkouts/
 ebin/
 *.beam
 
+# Claude Code scratch
+.claude/
+
 # Rebar3
 rebar.lock
 
