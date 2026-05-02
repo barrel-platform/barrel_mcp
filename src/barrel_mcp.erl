@@ -99,6 +99,14 @@
     notify_resource_updated/2
 ]).
 
+%% MCP client API (connecting to remote MCP servers).
+-export([
+    start_client/2,
+    stop_client/1,
+    whereis_client/1,
+    list_clients/0
+]).
+
 %%====================================================================
 %% Tool API
 %%====================================================================
@@ -642,3 +650,40 @@ notify_resource_updated(Uri, Extra) when is_binary(Uri) ->
         end
     end, Subscribers),
     ok.
+
+%%====================================================================
+%% MCP client API
+%%====================================================================
+
+%% @doc Start a supervised MCP client connecting to a remote server.
+%%
+%% `ServerId' is any term the host uses to identify the connection
+%% (typically a binary). `Spec' is a `barrel_mcp_client:connect_spec()':
+%%
+%% ```
+%% barrel_mcp:start_client(<<"github">>, #{
+%%     transport => {http, <<"https://mcp.github.com/">>},
+%%     handler => {my_handler_mod, []},
+%%     auth => {bearer, <<"ghp_xxx">>},
+%%     capabilities => #{sampling => true}
+%% }).
+%% '''
+-spec start_client(term(), barrel_mcp_client:connect_spec()) ->
+    {ok, pid()} | {error, term()}.
+start_client(ServerId, Spec) ->
+    barrel_mcp_clients:start_client(ServerId, Spec).
+
+%% @doc Stop a previously-started client.
+-spec stop_client(term()) -> ok | {error, not_found}.
+stop_client(ServerId) ->
+    barrel_mcp_clients:stop_client(ServerId).
+
+%% @doc Look up the pid of a connected client by `ServerId'.
+-spec whereis_client(term()) -> pid() | undefined.
+whereis_client(ServerId) ->
+    barrel_mcp_clients:whereis_client(ServerId).
+
+%% @doc List all currently connected clients as `[{ServerId, Pid}]'.
+-spec list_clients() -> [{term(), pid()}].
+list_clients() ->
+    barrel_mcp_clients:list_clients().

@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Spec-conformant MCP client** (`barrel_mcp_client`)
+  - Rewritten as a `gen_statem` (`connecting` → `initializing` → `ready` → `closing`).
+  - Async transports forward inbound JSON-RPC envelopes as `{mcp_in, _, _}` messages.
+  - Streamable HTTP client transport (`barrel_mcp_client_http`): POST with `application/json, text/event-stream`, parses SSE from POST and from a long-lived GET stream, captures `Mcp-Session-Id`, sends `MCP-Protocol-Version` after init, DELETE on close, 401 retry through pluggable auth.
+  - Stdio client transport (`barrel_mcp_client_stdio`) extracted into its own gen_server.
+  - Targets MCP `2025-11-25` and negotiates downward through `2025-06-18`, `2025-03-26`, `2024-11-05`.
+  - Server-initiated requests/notifications routed through a `barrel_mcp_client_handler` behaviour with sync, error, and async reply forms; default no-op handler ships in `barrel_mcp_client_handler_default`.
+  - Capability-shaped initialize payload (booleans become spec objects on the wire).
+  - Resource subscription notifications routed back to the subscribing process.
+  - Pagination, cancellation, and progress-token plumbing on `tools/call`.
+- **Federation registry** (`barrel_mcp_clients`): one supervised connection per server id, looked up via `barrel_mcp:start_client/2`, `whereis_client/1`, `list_clients/0`, `stop_client/1`.
+- **Auth behaviour** (`barrel_mcp_client_auth`) with a static-bearer implementation; OAuth 2.1 + PKCE planned for a follow-up.
+- **JSON-RPC envelope helpers** (`encode_request/3`, `encode_notification/2`, `encode_response/2`, `encode_error/3`, `decode_envelope/1`) shared between client and server.
+- New tests: `barrel_mcp_client_tests` (loopback handshake / call_tool / version downgrade), `barrel_mcp_client_handler_tests`, `barrel_mcp_clients_tests`, `barrel_mcp_protocol_envelope_tests`.
+- New doc: `guides/features.md` summarising the client surface and roadmap.
+
+### Changed
+
+- `notifications/initialized` is now the spec name; legacy bare `initialized` still accepted for one release.
+- CORS on `barrel_mcp_http_stream` exposes `mcp-protocol-version` and `last-event-id`.
+
 ## [1.1.0] - 2025-01-27
 
 ### Added

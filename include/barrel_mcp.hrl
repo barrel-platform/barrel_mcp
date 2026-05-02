@@ -6,10 +6,16 @@
 -ifndef(BARREL_MCP_HRL).
 -define(BARREL_MCP_HRL, true).
 
-%% MCP Protocol Version (Streamable HTTP transport)
+%% MCP Protocol Version (Streamable HTTP transport, server side)
 -define(MCP_PROTOCOL_VERSION, <<"2025-03-26">>).
 %% Legacy protocol version (JSON-RPC only transport)
 -define(MCP_PROTOCOL_VERSION_LEGACY, <<"2024-11-05">>).
+%% Latest protocol version targeted by the client; the client negotiates
+%% downward when the peer reports an older revision.
+-define(MCP_CLIENT_PROTOCOL_VERSION, <<"2025-11-25">>).
+%% Older revisions the client knows how to speak (in preference order).
+-define(MCP_CLIENT_SUPPORTED_VERSIONS,
+        [<<"2025-11-25">>, <<"2025-06-18">>, <<"2025-03-26">>, <<"2024-11-05">>]).
 
 %% JSON-RPC Error Codes
 -define(JSONRPC_PARSE_ERROR, -32700).

@@ -483,8 +483,8 @@ cors_headers() ->
     #{
         <<"access-control-allow-origin">> => <<"*">>,
         <<"access-control-allow-methods">> => <<"POST, GET, DELETE, OPTIONS">>,
-        <<"access-control-allow-headers">> => <<"content-type, authorization, x-api-key, mcp-session-id, accept">>,
-        <<"access-control-expose-headers">> => <<"www-authenticate, mcp-session-id">>
+        <<"access-control-allow-headers">> => <<"content-type, authorization, x-api-key, mcp-session-id, mcp-protocol-version, accept, last-event-id">>,
+        <<"access-control-expose-headers">> => <<"www-authenticate, mcp-session-id, mcp-protocol-version">>
     }.
 
 %%====================================================================

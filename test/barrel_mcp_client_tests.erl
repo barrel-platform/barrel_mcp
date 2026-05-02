@@ -1,133 +1,131 @@
 %%%-------------------------------------------------------------------
-%%% @doc Tests for barrel_mcp_client module.
+%%% @doc Tests for `barrel_mcp_client'.
+%%%
+%%% Drives the new gen_statem client against a loopback Streamable
+%%% HTTP server (the same `barrel_mcp_http_stream' the server side
+%%% exposes). Verifies handshake, tools/list, tools/call, version
+%%% downgrade, and graceful close.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_client_tests).
 
 -include_lib("eunit/include/eunit.hrl").
 
-%% Test handlers (exported for MCP registry)
 -export([test_handler/1]).
 
+-define(PORT, 19191).
+-define(URL, <<"http://127.0.0.1:19191/mcp">>).
+
 %%====================================================================
-%% Test Fixtures
+%% Fixtures
 %%====================================================================
 
 client_test_() ->
     {setup,
      fun setup/0,
      fun cleanup/1,
-     [
-        {"Connect HTTP client", fun test_connect_http/0},
-        {"Close HTTP client", fun test_close_http/0}
-     ]
-    }.
-
-%% Integration tests requiring running server
-integration_test_() ->
-    {setup,
-     fun setup_integration/0,
-     fun cleanup_integration/1,
      {timeout, 30, [
-        {"Initialize client", fun test_initialize/0},
-        {"List tools", fun test_list_tools/0},
-        {"Call tool", fun test_call_tool/0},
-        {"List resources", fun test_list_resources/0},
-        {"List prompts", fun test_list_prompts/0}
-     ]}
-    }.
+         {"initialize handshake + capabilities", fun test_initialize/0},
+         {"list_tools includes registered tool", fun test_list_tools/0},
+         {"call_tool returns content", fun test_call_tool/0},
+         {"protocol version negotiates downward", fun test_version_downgrade/0},
+         {"close shuts down cleanly", fun test_close/0}
+     ]}}.
 
 setup() ->
+    {ok, _} = application:ensure_all_started(barrel_mcp),
+    ok = barrel_mcp_registry:wait_for_ready(),
+    ok = barrel_mcp_registry:reg(tool, <<"test_tool">>, ?MODULE, test_handler, #{
+        description => <<"echo test tool">>
+    }),
+    {ok, _} = barrel_mcp_http_stream:start(#{port => ?PORT, session_enabled => true}),
+    timer:sleep(150),
     ok.
 
 cleanup(_) ->
+    catch barrel_mcp_http_stream:stop(),
+    catch barrel_mcp_registry:unreg(tool, <<"test_tool">>),
     ok.
-
-setup_integration() ->
-    %% Start the barrel_mcp application (which starts registry)
-    application:ensure_all_started(barrel_mcp),
-    ok = barrel_mcp_registry:wait_for_ready(),
-
-    %% Register a test tool
-    barrel_mcp_registry:reg(tool, <<"test_tool">>, ?MODULE, test_handler, #{
-        description => <<"Test tool">>
-    }),
-
-    %% Start HTTP server
-    {ok, _} = barrel_mcp_http:start(#{port => 19090}),
-    timer:sleep(100),
-    ok.
-
-cleanup_integration(_) ->
-    barrel_mcp_http:stop(),
-    barrel_mcp_registry:unreg(tool, <<"test_tool">>),
-    ok.
-
-%%====================================================================
-%% Test Helpers
-%%====================================================================
 
 test_handler(_Args) ->
-    <<"test result">>.
-
-get_test_client() ->
-    {ok, Client} = barrel_mcp_client:connect(#{
-        transport => {http, <<"http://localhost:19090/mcp">>}
-    }),
-    Client.
+    <<"echoed">>.
 
 %%====================================================================
-%% Unit Tests
-%%====================================================================
-
-test_connect_http() ->
-    {ok, _Client} = barrel_mcp_client:connect(#{
-        transport => {http, <<"http://localhost:9090/mcp">>}
-    }),
-    ok.
-
-test_close_http() ->
-    {ok, Client} = barrel_mcp_client:connect(#{
-        transport => {http, <<"http://localhost:9090/mcp">>}
-    }),
-    ?assertEqual(ok, barrel_mcp_client:close(Client)).
-
-%%====================================================================
-%% Integration Tests
+%% Tests
 %%====================================================================
 
 test_initialize() ->
-    Client = get_test_client(),
-    {ok, Result, Client1} = barrel_mcp_client:initialize(Client),
-    ?assert(maps:is_key(<<"protocolVersion">>, Result)),
-    ?assert(maps:is_key(<<"capabilities">>, Result)),
-    barrel_mcp_client:close(Client1).
+    {ok, Pid} = start_client(),
+    {ok, Caps} = barrel_mcp_client:server_capabilities(Pid),
+    ?assert(maps:is_key(<<"tools">>, Caps)),
+    {ok, Info} = barrel_mcp_client:server_info(Pid),
+    ?assert(maps:is_key(<<"name">>, Info)),
+    ok = barrel_mcp_client:close(Pid),
+    wait_dead(Pid).
 
 test_list_tools() ->
-    Client = get_test_client(),
-    {ok, _, Client1} = barrel_mcp_client:initialize(Client),
-    {ok, Tools, Client2} = barrel_mcp_client:list_tools(Client1),
-    ?assert(is_list(Tools)),
-    ?assert(length(Tools) >= 1),
-    barrel_mcp_client:close(Client2).
+    {ok, Pid} = start_client(),
+    {ok, Tools} = barrel_mcp_client:list_tools(Pid),
+    Names = [maps:get(<<"name">>, T) || T <- Tools],
+    ?assert(lists:member(<<"test_tool">>, Names)),
+    ok = barrel_mcp_client:close(Pid),
+    wait_dead(Pid).
 
 test_call_tool() ->
-    Client = get_test_client(),
-    {ok, _, Client1} = barrel_mcp_client:initialize(Client),
-    {ok, Result, Client2} = barrel_mcp_client:call_tool(Client1, <<"test_tool">>, #{}),
-    ?assert(maps:is_key(<<"content">>, Result)),
-    barrel_mcp_client:close(Client2).
+    {ok, Pid} = start_client(),
+    {ok, Result} = barrel_mcp_client:call_tool(Pid, <<"test_tool">>, #{}),
+    Content = maps:get(<<"content">>, Result),
+    ?assert(is_list(Content)),
+    [#{<<"type">> := <<"text">>, <<"text">> := <<"echoed">>}] = Content,
+    ok = barrel_mcp_client:close(Pid),
+    wait_dead(Pid).
 
-test_list_resources() ->
-    Client = get_test_client(),
-    {ok, _, Client1} = barrel_mcp_client:initialize(Client),
-    {ok, Resources, Client2} = barrel_mcp_client:list_resources(Client1),
-    ?assert(is_list(Resources)),
-    barrel_mcp_client:close(Client2).
+test_version_downgrade() ->
+    %% Server reports 2025-03-26; client targets 2025-11-25 by default.
+    {ok, Pid} = start_client(),
+    {ok, Version} = barrel_mcp_client:protocol_version(Pid),
+    ?assertEqual(<<"2025-03-26">>, Version),
+    ok = barrel_mcp_client:close(Pid),
+    wait_dead(Pid).
 
-test_list_prompts() ->
-    Client = get_test_client(),
-    {ok, _, Client1} = barrel_mcp_client:initialize(Client),
-    {ok, Prompts, Client2} = barrel_mcp_client:list_prompts(Client1),
-    ?assert(is_list(Prompts)),
-    barrel_mcp_client:close(Client2).
+test_close() ->
+    {ok, Pid} = start_client(),
+    Mon = erlang:monitor(process, Pid),
+    ok = barrel_mcp_client:close(Pid),
+    receive
+        {'DOWN', Mon, process, Pid, _} -> ok
+    after 5000 ->
+        ?assert(false)
+    end.
+
+%%====================================================================
+%% Helpers
+%%====================================================================
+
+start_client() ->
+    Spec = #{
+        transport => {http, ?URL},
+        capabilities => #{},
+        handler => {barrel_mcp_client_handler_default, []}
+    },
+    {ok, Pid} = barrel_mcp_client:start(Spec),
+    wait_ready(Pid, 30),
+    {ok, Pid}.
+
+wait_ready(_Pid, 0) -> error(client_not_ready);
+wait_ready(Pid, N) ->
+    case catch barrel_mcp_client:server_capabilities(Pid) of
+        {ok, _} -> ok;
+        _ ->
+            timer:sleep(100),
+            wait_ready(Pid, N - 1)
+    end.
+
+wait_dead(Pid) ->
+    Mon = erlang:monitor(process, Pid),
+    receive
+        {'DOWN', Mon, process, Pid, _} -> ok
+    after 5000 ->
+        erlang:demonitor(Mon, [flush]),
+        ok
+    end.
