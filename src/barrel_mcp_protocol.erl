@@ -18,6 +18,15 @@
     notification_response/0
 ]).
 
+%% JSON-RPC envelope helpers (shared by client + server)
+-export([
+    encode_request/3,
+    encode_notification/2,
+    encode_response/2,
+    encode_error/3,
+    decode_envelope/1
+]).
+
 %%====================================================================
 %% API
 %%====================================================================
@@ -234,6 +243,10 @@ handle_request(Method, _Params, Id, _State) ->
 %% Notification Handlers
 %%====================================================================
 
+%% Spec name (2025-03-26+).
+handle_notification(<<"notifications/initialized">>, _Params, _State) ->
+    ok;
+%% Legacy bare name kept for one release; older clients still send this.
 handle_notification(<<"initialized">>, _Params, _State) ->
     ok;
 
@@ -290,3 +303,72 @@ format_resource_result(Uri, Result) ->
 
 format_error({Class, Reason, _Stack}) ->
     iolist_to_binary(io_lib:format("~p:~p", [Class, Reason])).
+
+%%====================================================================
+%% JSON-RPC envelope helpers
+%%====================================================================
+
+%% @doc Build a JSON-RPC request envelope.
+-spec encode_request(term(), binary(), map()) -> map().
+encode_request(Id, Method, Params) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => Id,
+        <<"method">> => Method,
+        <<"params">> => Params
+    }.
+
+%% @doc Build a JSON-RPC notification envelope (no id).
+-spec encode_notification(binary(), map()) -> map().
+encode_notification(Method, Params) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"method">> => Method,
+        <<"params">> => Params
+    }.
+
+%% @doc Build a JSON-RPC success response.
+-spec encode_response(term(), term()) -> map().
+encode_response(Id, Result) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => Id,
+        <<"result">> => Result
+    }.
+
+%% @doc Build a JSON-RPC error response. Alias of `error_response/3'.
+-spec encode_error(term(), integer(), binary()) -> map().
+encode_error(Id, Code, Message) ->
+    error_response(Id, Code, Message).
+
+%% @doc Classify a decoded JSON-RPC envelope.
+%%
+%% Returns the kind so client and server agree on routing without each
+%% having to peek at the same keys.
+-spec decode_envelope(map()) ->
+    {request, Id :: term(), Method :: binary(), Params :: map()} |
+    {notification, Method :: binary(), Params :: map()} |
+    {response, Id :: term(), Result :: term()} |
+    {error, Id :: term(), Code :: integer(), Message :: binary(), Data :: term()} |
+    {invalid, term()}.
+decode_envelope(#{<<"jsonrpc">> := <<"2.0">>} = Msg) ->
+    case {maps:find(<<"method">>, Msg),
+          maps:find(<<"id">>, Msg),
+          maps:find(<<"result">>, Msg),
+          maps:find(<<"error">>, Msg)} of
+        {{ok, Method}, {ok, Id}, error, error} ->
+            {request, Id, Method, maps:get(<<"params">>, Msg, #{})};
+        {{ok, Method}, error, error, error} ->
+            {notification, Method, maps:get(<<"params">>, Msg, #{})};
+        {error, {ok, Id}, {ok, Result}, error} ->
+            {response, Id, Result};
+        {error, {ok, Id}, error, {ok, Err}} ->
+            Code = maps:get(<<"code">>, Err, ?JSONRPC_INTERNAL_ERROR),
+            Message = maps:get(<<"message">>, Err, <<>>),
+            Data = maps:get(<<"data">>, Err, undefined),
+            {error, Id, Code, Message, Data};
+        _ ->
+            {invalid, malformed}
+    end;
+decode_envelope(Other) ->
+    {invalid, Other}.
