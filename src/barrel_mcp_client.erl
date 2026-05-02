@@ -83,17 +83,22 @@
       auth => none | {bearer, binary()} | {oauth, map()},
       protocol_version => binary(),
       request_timeout => pos_integer(),
-      init_timeout => pos_integer()}.
+      init_timeout => pos_integer(),
+      ping_interval => pos_integer() | infinity,
+      ping_failure_threshold => pos_integer()}.
 
 -export_type([connect_spec/0]).
 
 -define(DEFAULT_REQUEST_TIMEOUT, 30000).
 -define(DEFAULT_INIT_TIMEOUT, 30000).
+-define(DEFAULT_PING_TIMEOUT, 5000).
+-define(DEFAULT_PING_FAILURE_THRESHOLD, 3).
 
 -record(pending, {
-    caller :: init | {pid(), term()},
+    caller :: init | ping | {pid(), term()},
     method :: binary(),
-    deadline :: integer() | infinity
+    deadline :: integer() | infinity,
+    progress_token :: binary() | undefined
 }).
 
 -record(data, {
@@ -105,6 +110,8 @@
     handler_state :: term(),
     async_replies = #{} :: #{barrel_mcp_client_handler:async_tag() => integer()},
     subscriptions = #{} :: #{binary() => [pid()]},
+    progress = #{} :: #{binary() => pid()},
+    ping_failures = 0 :: non_neg_integer(),
     server_capabilities :: map() | undefined,
     server_info :: map() | undefined,
     protocol_version :: binary() | undefined
@@ -318,14 +325,21 @@ ready({call, From}, {request, Method, Params, Timeout}, Data) ->
             {Id, Data1} = next_id(Data),
             send_envelope(Data1,
                 barrel_mcp_protocol:encode_request(Id, Method, Params)),
+            ProgressToken = progress_token_from_params(Params),
+            {CallerPid, _Tag} = From,
+            Data2 = case ProgressToken of
+                undefined -> Data1;
+                Tok -> Data1#data{progress = (Data1#data.progress)#{Tok => CallerPid}}
+            end,
             P = #pending{caller = From, method = Method,
-                         deadline = deadline(Timeout)},
-            Pending = (Data1#data.pending)#{Id => P},
+                         deadline = deadline(Timeout),
+                         progress_token = ProgressToken},
+            Pending = (Data2#data.pending)#{Id => P},
             Actions = case Timeout of
                           infinity -> [];
                           T -> [{{timeout, {req, Id}}, T, request_timeout}]
                       end,
-            {keep_state, Data1#data{pending = Pending}, Actions}
+            {keep_state, Data2#data{pending = Pending}, Actions}
     end;
 ready(cast, {cancel, Id}, Data) ->
     do_cancel(Id, Data);
@@ -337,6 +351,9 @@ ready(cast, {async_reply, Tag, Result}, Data) ->
     {keep_state, deliver_async_reply(Tag, Result, Data)};
 ready({timeout, {req, Id}}, request_timeout, Data) ->
     timeout_pending(Id, Data);
+ready(state_timeout, ping_tick, Data) ->
+    {Data1, Actions} = issue_ping(Data),
+    {keep_state, Data1, Actions};
 ready(info, {mcp_in, Pid, Json},
       #data{transport = {_, Pid}} = Data) ->
     handle_inbound(Json, ready, Data);
@@ -401,10 +418,13 @@ handle_response(Id, Result, initializing, Data) ->
     end;
 handle_response(Id, Result, _State, Data) ->
     case maps:take(Id, Data#data.pending) of
-        {#pending{caller = From}, Rest} when From =/= init ->
+        {#pending{caller = ping} = P, Rest} ->
+            Data1 = settle_data(P, Data#data{pending = Rest, ping_failures = 0}),
+            {keep_state, Data1, [drop_req_timeout(Id)]};
+        {#pending{caller = From} = P, Rest} when From =/= init ->
             gen_statem:reply(From, {ok, Result}),
-            {keep_state, Data#data{pending = Rest},
-             [{{timeout, {req, Id}}, infinity, request_timeout}]};
+            Data1 = settle_data(P, Data#data{pending = Rest}),
+            {keep_state, Data1, [drop_req_timeout(Id)]};
         _ ->
             keep_state_and_data
     end.
@@ -413,13 +433,26 @@ handle_error_response(_Id, Code, Message, initializing, _Data) ->
     {stop, {init_failed, Code, Message}};
 handle_error_response(Id, Code, Message, _State, Data) ->
     case maps:take(Id, Data#data.pending) of
-        {#pending{caller = From}, Rest} when From =/= init ->
+        {#pending{caller = ping} = P, Rest} ->
+            Data1 = settle_data(P, bump_ping_failures(Data#data{pending = Rest})),
+            maybe_close_on_ping_failures(Data1, Id);
+        {#pending{caller = From} = P, Rest} when From =/= init ->
             gen_statem:reply(From, {error, {Code, Message}}),
-            {keep_state, Data#data{pending = Rest},
-             [{{timeout, {req, Id}}, infinity, request_timeout}]};
+            Data1 = settle_data(P, Data#data{pending = Rest}),
+            {keep_state, Data1, [drop_req_timeout(Id)]};
         _ ->
             keep_state_and_data
     end.
+
+settle_data(#pending{progress_token = Tok}, Data) ->
+    drop_progress(Tok, Data).
+
+drop_progress(undefined, Data) -> Data;
+drop_progress(Tok, Data) ->
+    Data#data{progress = maps:remove(Tok, Data#data.progress)}.
+
+drop_req_timeout(Id) ->
+    {{timeout, {req, Id}}, infinity, request_timeout}.
 
 handle_server_request(Id, Method, Params, _State,
                       #data{handler_mod = Mod, handler_state = HS} = Data) ->
@@ -456,6 +489,10 @@ handle_server_notification(<<"notifications/resources/updated">> = Method, Param
     Uri = maps:get(<<"uri">>, Params, <<>>),
     notify_subscribers(Uri, Params, Data),
     dispatch_notification(Method, Params, Data);
+handle_server_notification(<<"notifications/progress">> = Method, Params,
+                           _State, Data) ->
+    notify_progress(Params, Data),
+    dispatch_notification(Method, Params, Data);
 handle_server_notification(Method, Params, _State, Data) ->
     dispatch_notification(Method, Params, Data).
 
@@ -473,6 +510,16 @@ notify_subscribers(Uri, Params, Data) ->
             lists:foreach(fun(P) -> P ! {mcp_resource_updated, Uri, Params} end,
                           Pids),
             ok
+    end.
+
+notify_progress(Params, Data) ->
+    case maps:get(<<"progressToken">>, Params, undefined) of
+        undefined -> ok;
+        Tok ->
+            case maps:get(Tok, Data#data.progress, undefined) of
+                undefined -> ok;
+                Pid -> Pid ! {mcp_progress, Tok, Params}, ok
+            end
     end.
 
 %%====================================================================
@@ -558,7 +605,7 @@ finish_initialize(Version, Result, Data) ->
         server_info = maps:get(<<"serverInfo">>, Result, #{}),
         protocol_version = Version
     },
-    {next_state, ready, Data1}.
+    {next_state, ready, Data1, [arm_ping_timer(Data1)]}.
 
 %%====================================================================
 %% Transport plumbing
@@ -654,6 +701,56 @@ maybe_attach_progress_token(Params, Opts) ->
         Tok -> Params#{<<"_meta">> => #{<<"progressToken">> => Tok}}
     end.
 
+progress_token_from_params(#{<<"_meta">> := #{<<"progressToken">> := Tok}}) ->
+    Tok;
+progress_token_from_params(_) ->
+    undefined.
+
+%%====================================================================
+%% Ping cadence
+%%====================================================================
+
+ping_interval(#data{spec = Spec}) ->
+    case maps:get(ping_interval, Spec, infinity) of
+        infinity -> infinity;
+        N when is_integer(N), N > 0 -> N
+    end.
+
+ping_failure_threshold(#data{spec = Spec}) ->
+    maps:get(ping_failure_threshold, Spec, ?DEFAULT_PING_FAILURE_THRESHOLD).
+
+bump_ping_failures(#data{ping_failures = N} = Data) ->
+    Data#data{ping_failures = N + 1}.
+
+maybe_close_on_ping_failures(Data, _Id) ->
+    case Data#data.ping_failures >= ping_failure_threshold(Data) of
+        true ->
+            case Data#data.transport of
+                {Mod, TPid} -> catch Mod:close(TPid);
+                _ -> ok
+            end,
+            {stop, ping_failed};
+        false ->
+            {keep_state, Data, [arm_ping_timer(Data)]}
+    end.
+
+arm_ping_timer(Data) ->
+    case ping_interval(Data) of
+        infinity -> {state_timeout, infinity, ping_tick};
+        N -> {state_timeout, N, ping_tick}
+    end.
+
+issue_ping(Data) ->
+    {Id, Data1} = next_id(Data),
+    send_envelope(Data1,
+        barrel_mcp_protocol:encode_request(Id, <<"ping">>, #{})),
+    P = #pending{caller = ping, method = <<"ping">>,
+                 deadline = deadline(?DEFAULT_PING_TIMEOUT)},
+    Pending = (Data1#data.pending)#{Id => P},
+    {Data1#data{pending = Pending},
+     [{{timeout, {req, Id}}, ?DEFAULT_PING_TIMEOUT, request_timeout},
+      arm_ping_timer(Data1)]}.
+
 is_supported(<<"initialize">>, _) -> true;
 is_supported(<<"ping">>, _) -> true;
 is_supported(<<"notifications/", _/binary>>, _) -> true;
@@ -672,25 +769,32 @@ is_supported(_, _) -> true.
 
 do_cancel(Id, #data{pending = Pending} = Data) ->
     case maps:take(Id, Pending) of
-        {#pending{caller = From}, Rest} when From =/= init ->
+        {#pending{caller = From} = P, Rest} when From =/= init, From =/= ping ->
             gen_statem:reply(From, {error, cancelled}),
             send_envelope(Data, barrel_mcp_protocol:encode_notification(
                 <<"notifications/cancelled">>,
                 #{<<"requestId">> => Id, <<"reason">> => <<"cancelled by client">>})),
-            {keep_state, Data#data{pending = Rest},
-             [{{timeout, {req, Id}}, infinity, request_timeout}]};
+            Data1 = settle_data(P, Data#data{pending = Rest}),
+            {keep_state, Data1, [drop_req_timeout(Id)]};
         _ ->
             keep_state_and_data
     end.
 
 timeout_pending(Id, #data{pending = Pending} = Data) ->
     case maps:take(Id, Pending) of
-        {#pending{caller = From}, Rest} when From =/= init ->
+        {#pending{caller = ping} = P, Rest} ->
+            Data1 = settle_data(P, bump_ping_failures(Data#data{pending = Rest})),
+            send_envelope(Data1, barrel_mcp_protocol:encode_notification(
+                <<"notifications/cancelled">>,
+                #{<<"requestId">> => Id, <<"reason">> => <<"timeout">>})),
+            maybe_close_on_ping_failures(Data1, Id);
+        {#pending{caller = From} = P, Rest} when From =/= init ->
             gen_statem:reply(From, {error, timeout}),
             send_envelope(Data, barrel_mcp_protocol:encode_notification(
                 <<"notifications/cancelled">>,
                 #{<<"requestId">> => Id, <<"reason">> => <<"timeout">>})),
-            {keep_state, Data#data{pending = Rest}};
+            Data1 = settle_data(P, Data#data{pending = Rest}),
+            {keep_state, Data1};
         _ ->
             keep_state_and_data
     end.

@@ -44,7 +44,13 @@ by the spec.
   page via `barrel_mcp_pagination:walk/1`.
 - Cancellation: `barrel_mcp_client:cancel/2` sends
   `notifications/cancelled` and unblocks the caller.
-- Progress: callers may pass `progress_token` in `tools/call`.
+- Progress: pass `progress_token` to `call_tool/4` and the caller
+  receives `{mcp_progress, Token, Params}` for every matching
+  `notifications/progress` until the request settles.
+- Periodic ping: opt-in via `ping_interval` (and
+  `ping_failure_threshold`) in the connect spec; the connection is
+  closed with reason `ping_failed` after the configured number of
+  consecutive failures.
 - Server→client requests dispatched through the
   `barrel_mcp_client_handler` behaviour. `{reply, _, _}`,
   `{error, _, _, _}`, and `{async, Tag, _}` reply forms; the host
@@ -87,6 +93,5 @@ end.
 
 ### Roadmap
 
-- Periodic `ping` cadence and deadline timers for outstanding
-  requests.
-- OAuth 2.1 + PKCE auth.
+- OAuth 2.1 + PKCE auth (Protected Resource Metadata discovery,
+  RFC 8707 `resource` parameter).
