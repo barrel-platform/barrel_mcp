@@ -37,8 +37,11 @@ by the spec.
   `resources/templates/list`, `resources/subscribe`,
   `resources/unsubscribe`, `prompts/list`, `prompts/get`,
   `completion/complete`, `logging/setLevel`, `ping`.
-- Pagination via `cursor` / `nextCursor` (single page by default;
-  `want_cursor => true` to follow paging).
+- Pagination via `cursor` / `nextCursor`. Single page by default
+  (`want_cursor => true` to follow paging by hand). The sugar helpers
+  `list_tools_all/1`, `list_resources_all/1`,
+  `list_resource_templates_all/1`, `list_prompts_all/1` walk every
+  page via `barrel_mcp_pagination:walk/1`.
 - Cancellation: `barrel_mcp_client:cancel/2` sends
   `notifications/cancelled` and unblocks the caller.
 - Progress: callers may pass `progress_token` in `tools/call`.
@@ -63,15 +66,27 @@ by the spec.
 ### Auth
 
 - `barrel_mcp_client_auth` behaviour.
-- `barrel_mcp_client_auth_bearer` — static token.
-- OAuth 2.1 + PKCE: planned for Phase D (Protected Resource Metadata
-  discovery, RFC 8707 `resource` parameter).
+- `barrel_mcp_client_auth_bearer`: static token.
+- OAuth 2.1 + PKCE: planned (Protected Resource Metadata discovery,
+  RFC 8707 `resource` parameter).
+
+### Schema validation (`barrel_mcp_schema`)
+
+Pure-Erlang JSON Schema subset validator hosts can use to pre-flight
+LLM-generated tool args before calling the server. Covers `type`,
+`properties`, `required`, `enum`, `items`, `oneOf`/`anyOf`/`allOf`,
+`additionalProperties: false`, string `minLength`/`maxLength`/`pattern`,
+number bounds, and array `minItems`/`maxItems`/`uniqueItems`.
+
+```
+case barrel_mcp_schema:validate(Args, ToolInputSchema) of
+    ok -> barrel_mcp_client:call_tool(Pid, Name, Args);
+    {error, Errors} -> reject(Errors)
+end.
+```
 
 ### Roadmap
 
-- Phase B: deeper notifications + ergonomics — logging stream,
-  resources/list_changed callbacks, completion routing, schema
-  validation against `inputSchema` (opt-in).
-- Phase C: refined control plane — periodic `ping`, deadline timers,
-  progress notification dispatch.
-- Phase D: OAuth 2.1 + PKCE auth.
+- Periodic `ping` cadence and deadline timers for outstanding
+  requests.
+- OAuth 2.1 + PKCE auth.
