@@ -50,9 +50,11 @@ new({bearer, Token}) when is_binary(Token) ->
         {ok, H} -> {barrel_mcp_client_auth_bearer, H};
         Err -> Err
     end;
-new({oauth, _Config}) ->
-    %% Phase D.
-    {error, oauth_not_yet_supported}.
+new({oauth, Config}) when is_map(Config) ->
+    case barrel_mcp_client_auth_oauth:init(Config) of
+        {ok, H} -> {barrel_mcp_client_auth_oauth, H};
+        Err -> Err
+    end.
 
 %% @doc Lookup the Authorization header for the current state.
 -spec header(t()) -> {ok, binary()} | none | {error, term()}.
