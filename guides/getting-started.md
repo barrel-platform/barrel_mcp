@@ -113,4 +113,6 @@ For Claude Desktop integration, use the stdio transport:
 
 - [Tools, Resources & Prompts](tools-resources-prompts.md) - Learn about MCP primitives
 - [Authentication](authentication.md) - Secure your MCP server
-- [MCP Client](client.md) - Connect to external MCP servers
+- [Building a client](building-a-client.md) - Task-oriented walkthrough for hosting MCP clients (recommended)
+- [Client internals](internals.md) - Architecture and behaviour contracts
+- [MCP Client (reference)](client.md) - Older API reference, kept for cross-linking

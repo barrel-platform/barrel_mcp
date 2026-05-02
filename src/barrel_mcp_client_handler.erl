@@ -31,6 +31,37 @@
 %%% `barrel_mcp_client:reply_async(ClientPid, Tag, Result)' from any
 %%% process. The client's state machine will not block while the
 %%% handler is computing.
+%%%
+%%% == Example ==
+%%%
+%%% A handler that answers `sampling/createMessage' synchronously:
+%%%
+%%% ```
+%%% -module(my_sampler).
+%%% -behaviour(barrel_mcp_client_handler).
+%%% -export([init/1, handle_request/3, handle_notification/3,
+%%%          terminate/2]).
+%%%
+%%% init(Args) -> {ok, Args}.
+%%%
+%%% handle_request(<<"sampling/createMessage">>, Params, S) ->
+%%%     Reply = call_my_llm(Params),  %% your provider integration
+%%%     Result = #{<<"content">> => #{<<"type">> => <<"text">>,
+%%%                                    <<"text">> => Reply},
+%%%                <<"model">> => <<"my-model">>,
+%%%                <<"role">> => <<"assistant">>},
+%%%     {reply, Result, S};
+%%% handle_request(Method, _Params, S) ->
+%%%     {error, -32601, <<"Method not found: ", Method/binary>>, S}.
+%%%
+%%% handle_notification(_Method, _Params, S) -> {ok, S}.
+%%% terminate(_Reason, _State) -> ok.
+%%% '''
+%%%
+%%% Wire the handler in via the connect spec:
+%%% `#{handler => {my_sampler, []}}'.
+%%%
+%%% See `examples/sampling_host/' for a runnable end-to-end version.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_client_handler).

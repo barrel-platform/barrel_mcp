@@ -395,26 +395,25 @@ barrel_mcp:start_stdio().
 
 ### Using as Client
 
-```erlang
-%% Connect to an MCP server
-{ok, Client} = barrel_mcp_client:connect(#{
+`barrel_mcp_client` is a `gen_statem`. Start it, wait for the
+handshake to complete, call tools.
+
+```erl
+{ok, Pid} = barrel_mcp_client:start_link(#{
     transport => {http, <<"http://localhost:9090/mcp">>}
-}).
-
-%% Initialize connection
-{ok, ServerInfo, Client1} = barrel_mcp_client:initialize(Client).
-
-%% List available tools
-{ok, Tools, Client2} = barrel_mcp_client:list_tools(Client1).
-
-%% Call a tool
-{ok, Result, Client3} = barrel_mcp_client:call_tool(Client2, <<"search">>, #{
-    <<"query">> => <<"hello world">>
-}).
-
-%% Close connection
-ok = barrel_mcp_client:close(Client3).
+}),
+{ok, Tools}  = barrel_mcp_client:list_tools(Pid),
+{ok, Result} = barrel_mcp_client:call_tool(Pid, <<"search">>,
+                                           #{<<"query">> => <<"hello">>}),
+ok = barrel_mcp_client:close(Pid).
 ```
+
+For the full task-oriented walkthrough — transport choice, auth,
+OAuth, server-to-client handlers, federation, schema validation —
+see [Building a client](guides/building-a-client.md). For
+architecture and behaviour contracts, see
+[Internals](guides/internals.md). Two runnable examples live under
+[`examples/`](examples/).
 
 ## Claude Desktop Configuration
 

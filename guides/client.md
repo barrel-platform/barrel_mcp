@@ -1,4 +1,10 @@
-# MCP Client
+# MCP Client (reference)
+
+> **Looking for a walkthrough?** Read
+> [Building a client](building-a-client.md) for the task-oriented
+> guide; this file is the older API reference and stays for cross
+> linking. The new guide covers the gen_statem API, OAuth,
+> handlers, federation, and runnable examples.
 
 barrel_mcp includes a client library for connecting to external MCP servers.
 This allows your Erlang application to consume tools, resources, and prompts

@@ -33,21 +33,35 @@
 %% Public API
 %%====================================================================
 
+%% @doc Start the registry. Called by `barrel_mcp_sup'; you don't
+%% normally call this directly.
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-%% @doc Start a supervised client worker for `ServerId'. Fails if a
-%% worker is already registered for that id.
+%% @doc Start a supervised `barrel_mcp_client' worker registered as
+%% `ServerId'. Fails with `{already_registered, Pid}' if a worker
+%% already holds that id.
+%%
+%% Example:
+%% ```
+%% {ok, _} = barrel_mcp_clients:start_client(<<"github">>, #{
+%%     transport => {http, <<"https://mcp.github.example/">>},
+%%     auth => {bearer, GhToken}
+%% }).
+%% '''
 -spec start_client(term(), barrel_mcp_client:connect_spec()) ->
     {ok, pid()} | {error, term()}.
 start_client(ServerId, Spec) ->
     gen_server:call(?MODULE, {start_client, ServerId, Spec}).
 
-%% @doc Stop the client worker for `ServerId'.
+%% @doc Stop the client worker registered as `ServerId'. Returns
+%% `{error, not_found}' if no worker holds that id.
 -spec stop_client(term()) -> ok | {error, not_found}.
 stop_client(ServerId) ->
     gen_server:call(?MODULE, {stop_client, ServerId}).
 
+%% @doc Look up a worker pid by its `ServerId'. Returns `undefined' if
+%% none is registered. ETS-backed; safe to call from any process.
 -spec whereis_client(term()) -> pid() | undefined.
 whereis_client(ServerId) ->
     case ets:lookup(?TABLE, ServerId) of
@@ -55,6 +69,7 @@ whereis_client(ServerId) ->
         [] -> undefined
     end.
 
+%% @doc Snapshot the registry as `[{ServerId, Pid}]'. ETS-backed.
 -spec list_clients() -> [{term(), pid()}].
 list_clients() ->
     ets:foldl(fun({Id, Pid, _}, Acc) -> [{Id, Pid} | Acc] end, [], ?TABLE).

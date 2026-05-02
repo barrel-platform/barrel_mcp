@@ -24,18 +24,18 @@
 -type t() :: {module(), pid()}.
 -export_type([t/0]).
 
-%% @doc Open a transport. `Owner' will receive `mcp_in' / `mcp_closed'
+%% Open a transport. `Owner' will receive `mcp_in' / `mcp_closed'
 %% messages from the spawned transport process.
 -callback connect(Owner :: pid(), Opts :: map()) ->
     {ok, pid()} | {error, term()}.
 
-%% @doc Send a fully-encoded JSON-RPC envelope (binary JSON) to the
-%% peer. Implementations may add transport framing (newline, SSE) but
-%% must not modify the JSON content.
+%% Send a fully-encoded JSON-RPC envelope (binary JSON) to the peer.
+%% Implementations may add transport framing (newline, SSE) but must
+%% not modify the JSON content.
 -callback send(TransportPid :: pid(), JsonBinary :: iodata()) ->
     ok | {error, term()}.
 
-%% @doc Close the transport.
+%% Close the transport.
 -callback close(TransportPid :: pid()) -> ok.
 
 %%====================================================================
