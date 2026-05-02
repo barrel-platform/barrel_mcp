@@ -91,6 +91,14 @@
     find/1
 ]).
 
+%% Server-to-client primitives (sampling + resource notifications).
+-export([
+    sampling_create_message/3,
+    list_sessions_with_sampling/0,
+    notify_resource_updated/1,
+    notify_resource_updated/2
+]).
+
 %%====================================================================
 %% Tool API
 %%====================================================================
@@ -591,3 +599,46 @@ all() ->
 -spec find(Name :: binary()) -> {ok, map()} | error.
 find(Name) ->
     barrel_mcp_registry:find(tool, Name).
+
+%%====================================================================
+%% Server -> Client primitives
+%%====================================================================
+
+%% @doc Send `sampling/createMessage' to the client behind a session.
+%% Requires the client to have declared sampling capability in its
+%% `initialize' request and an active SSE stream. Blocks until the
+%% client responds or `timeout_ms' (default 30s) elapses.
+-spec sampling_create_message(binary(), map(), map()) ->
+    {ok, Result :: map(), Usage :: map()}
+  | {error, timeout | not_supported | no_sse | not_found | term()}.
+sampling_create_message(SessionId, Params, Opts) ->
+    barrel_mcp_session:sampling_create_message(SessionId, Params, Opts).
+
+%% @doc Return the ids of currently connected sessions whose client
+%% declared sampling capability.
+-spec list_sessions_with_sampling() -> [binary()].
+list_sessions_with_sampling() ->
+    barrel_mcp_session:list_sampling_capable().
+
+%% @doc Notify all subscribers of a resource that it has changed.
+%% The notification body is a JSON-RPC notification with no params; the
+%% client is expected to issue a `resources/read' to fetch the new state.
+-spec notify_resource_updated(binary()) -> ok.
+notify_resource_updated(Uri) ->
+    notify_resource_updated(Uri, #{}).
+
+-spec notify_resource_updated(binary(), map()) -> ok.
+notify_resource_updated(Uri, Extra) when is_binary(Uri) ->
+    Subscribers = barrel_mcp_session:subscribers_for(Uri),
+    Notification = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"method">> => <<"notifications/resources/updated">>,
+        <<"params">> => maps:merge(#{<<"uri">> => Uri}, Extra)
+    },
+    lists:foreach(fun(SessionId) ->
+        case barrel_mcp_session:get_sse_pid(SessionId) of
+            {ok, Pid} -> Pid ! {sse_send_message, Notification};
+            _ -> ok
+        end
+    end, Subscribers),
+    ok.
