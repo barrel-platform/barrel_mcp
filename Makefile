@@ -1,4 +1,4 @@
-.PHONY: all compile test ct eunit dialyzer docs examples-setup examples-test clean
+.PHONY: all compile test ct eunit dialyzer docs examples-setup examples-test interop-setup interop-test clean
 
 all: compile
 
@@ -33,6 +33,18 @@ examples-test: examples-setup
 	    (cd "$$ex" && rebar3 ct) || exit 1; \
 	done
 
+# Python MCP SDK interop. `interop-setup' is idempotent. The CT
+# suite skips when INTEROP_PYTHON is unset, so plain `rebar3 ct'
+# remains independent of Python.
+interop-setup:
+	python3 -m venv test/interop/.venv
+	./test/interop/.venv/bin/pip install --upgrade pip
+	./test/interop/.venv/bin/pip install -r test/interop/requirements.txt
+
+interop-test: interop-setup
+	INTEROP_PYTHON=$(CURDIR)/test/interop/.venv/bin/python \
+	    rebar3 ct --suite=test/barrel_mcp_python_interop_SUITE
+
 clean:
 	rebar3 clean
-	rm -rf examples/*/_build examples/*/_checkouts
+	rm -rf examples/*/_build examples/*/_checkouts test/interop/.venv
