@@ -114,3 +114,59 @@ handle_batch_returns_invalid_request_test() ->
                                     <<"message">> :=
                                         <<"Batch requests are not supported">>}},
                  Resp).
+
+%%====================================================================
+%% drive_async_plan/2
+%%====================================================================
+
+drive_async_plan_result_test() ->
+    %% Stand in for `barrel_mcp_registry:run_tool/3': spawn a worker
+    %% that immediately reports a string result.
+    Plan = #{
+        request_id => 42,
+        spawn => fun(Ctx) ->
+            ReplyTo = maps:get(reply_to, Ctx),
+            Id = maps:get(request_id, Ctx),
+            spawn(fun() -> ReplyTo ! {tool_result, Id, <<"hello">>} end)
+        end
+    },
+    Resp = barrel_mcp_protocol:drive_async_plan(Plan, 1000),
+    ?assertEqual(42, maps:get(<<"id">>, Resp)),
+    Result = maps:get(<<"result">>, Resp),
+    [Block] = maps:get(<<"content">>, Result),
+    ?assertEqual(<<"hello">>, maps:get(<<"text">>, Block)).
+
+drive_async_plan_tool_error_test() ->
+    Content = [#{<<"type">> => <<"text">>, <<"text">> => <<"boom">>}],
+    Plan = #{
+        request_id => 7,
+        spawn => fun(Ctx) ->
+            ReplyTo = maps:get(reply_to, Ctx),
+            spawn(fun() -> ReplyTo ! {tool_error, 7, Content} end)
+        end
+    },
+    Resp = barrel_mcp_protocol:drive_async_plan(Plan, 1000),
+    Result = maps:get(<<"result">>, Resp),
+    ?assertEqual(true, maps:get(<<"isError">>, Result)),
+    ?assertEqual(Content, maps:get(<<"content">>, Result)).
+
+drive_async_plan_tool_failed_test() ->
+    Plan = #{
+        request_id => 9,
+        spawn => fun(Ctx) ->
+            ReplyTo = maps:get(reply_to, Ctx),
+            spawn(fun() -> ReplyTo ! {tool_failed, 9, {error, kaboom}} end)
+        end
+    },
+    Resp = barrel_mcp_protocol:drive_async_plan(Plan, 1000),
+    ?assertMatch(#{<<"error">> := #{<<"code">> := -32000}}, Resp).
+
+drive_async_plan_timeout_test() ->
+    Plan = #{
+        request_id => 13,
+        spawn => fun(_Ctx) -> spawn(fun() -> timer:sleep(infinity) end) end
+    },
+    Resp = barrel_mcp_protocol:drive_async_plan(Plan, 50),
+    ?assertMatch(#{<<"error">> := #{<<"code">> := -32000,
+                                    <<"message">> := <<"Tool timed out">>}},
+                 Resp).

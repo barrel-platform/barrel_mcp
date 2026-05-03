@@ -238,6 +238,13 @@ process_request(Line) ->
                 no_response ->
                     %% Notification - no response needed
                     ok;
+                {async, Plan} ->
+                    %% tools/call returns an async plan; drive it
+                    %% synchronously here. stdio is single-threaded;
+                    %% the worker reports back via mailbox.
+                    Response = barrel_mcp_protocol:drive_async_plan(
+                                 Plan, 60000),
+                    send_response(Response);
                 Response ->
                     send_response(Response)
             end;

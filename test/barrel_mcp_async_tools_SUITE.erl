@@ -63,7 +63,7 @@ cancel_returns_empty_body(Config) ->
     Caller = spawn_link(fun() ->
         {ok, S, _, B} = hackney:request(post, url(Port),
             [{<<"content-type">>, <<"application/json">>},
-             {<<"accept">>, <<"application/json">>},
+             {<<"accept">>, <<"application/json, text/event-stream">>},
              {<<"mcp-session-id">>, SessionId}],
             tool_call_body(<<"slow">>, 7), [with_body]),
         Self ! {tool_call_returned, S, B}
@@ -78,7 +78,7 @@ cancel_returns_empty_body(Config) ->
                            <<"params">> => #{<<"requestId">> => 7}}),
     {ok, 202, _, _} = hackney:request(post, url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
          {<<"mcp-session-id">>, SessionId}],
         Cancel, [with_body]),
 
@@ -121,7 +121,7 @@ progress_emits_events(Config) ->
     Body = tool_call_with_progress(<<"prog">>, 11, <<"tok-1">>),
     {ok, 200, _, RespBody} = hackney:request(post, url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
          {<<"mcp-session-id">>, SessionId}],
         Body, [with_body]),
     Resp = json:decode(RespBody),
@@ -155,7 +155,7 @@ tool_error_returns_isError(Config) ->
     Body = tool_call_body(<<"err">>, 21),
     {ok, 200, _, RB} = hackney:request(post, url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
          {<<"mcp-session-id">>, SessionId}],
         Body, [with_body]),
     Resp = json:decode(RB),
@@ -210,7 +210,7 @@ post_init(Port) ->
     }),
     {ok, S, H, B} = hackney:request(post, url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
+         {<<"accept">>, <<"application/json, text/event-stream">>}],
         Body, [with_body]),
     {S, H, B}.
 

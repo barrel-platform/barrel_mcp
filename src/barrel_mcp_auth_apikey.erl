@@ -33,7 +33,8 @@
 -export([
     hash_key/1,
     hash_key/2,
-    verify_key/2
+    verify_key/2,
+    verify_key/3
 ]).
 
 %%====================================================================
@@ -48,7 +49,8 @@ init(Opts) ->
         keys => Keys,
         verifier => maps:get(verifier, Opts, undefined),
         header_name => maps:get(header_name, Opts, <<"x-api-key">>),
-        hash_keys => maps:get(hash_keys, Opts, false)
+        hash_keys => maps:get(hash_keys, Opts, false),
+        pepper => maps:get(pepper, Opts, undefined)
     },
     {ok, State}.
 
@@ -171,29 +173,49 @@ hash_key(Key, _) ->
     legacy_sha256_hex(Key).
 
 %% @doc Constant-time comparison of a presented `Key' against a
-%% `Stored' format. Accepts the legacy hex SHA-256 digest and the
-%% new `hmac-sha256$...' format. Hosts may also pass
-%% `{Key, Pepper, Stored}' via `hash_key/2' equivalence; this
-%% helper is for stored-vs-presented checks.
+%% `Stored' digest. Accepts only the legacy hex SHA-256 format —
+%% the modern `hmac-sha256$...' format requires the server-side
+%% pepper, which {@link verify_key/3} takes explicitly. This shim
+%% rejects HMAC-format inputs so callers don't accidentally treat
+%% them as verified.
 -spec verify_key(Key :: binary(), Stored :: binary()) ->
-    ok | {error, invalid_credentials}.
-verify_key(_Key, <<"hmac-sha256$", _/binary>> = Stored) ->
-    %% The server's pepper is needed to reproduce the hash; without
-    %% it we cannot verify. The provider's authenticate path uses
-    %% `verify_against_state' which knows the pepper. Public callers
-    %% that just want format-level verification should call
-    %% `hash_key/2' and compare the binaries themselves; here we
-    %% only assert format equality with constant-time compare.
-    case crypto:hash_equals(Stored, Stored) of
-        true -> ok;  %% format ok; pepper-aware verification is host's job
-        false -> {error, invalid_credentials}
-    end;
+    ok | {error, invalid_credentials} | {error, pepper_required}.
+verify_key(_Key, <<"hmac-sha256$", _/binary>>) ->
+    {error, pepper_required};
 verify_key(Key, Stored) when byte_size(Stored) =:= 64 ->
     case crypto:hash_equals(legacy_sha256_hex(Key), Stored) of
         true -> ok;
         false -> {error, invalid_credentials}
     end;
 verify_key(_Key, _Stored) ->
+    {error, invalid_credentials}.
+
+%% @doc Constant-time comparison of a presented `Key' against a
+%% `Stored' digest, with the server-side `Pepper' used for the
+%% `hmac-sha256$...' format. The `Pepper' is ignored for legacy
+%% hex SHA-256 digests (they were produced without a pepper). Use
+%% this from any code that owns the pepper (config tooling,
+%% tests) — the auth provider's internal authenticate path goes
+%% through `verify_against_state/2' which already has the pepper
+%% in state.
+-spec verify_key(Key :: binary(), Stored :: binary(),
+                 Pepper :: binary() | undefined) ->
+    ok | {error, invalid_credentials}.
+verify_key(Key, <<"hmac-sha256$", _/binary>> = Stored, Pepper)
+  when is_binary(Pepper) ->
+    Computed = hmac_format(Key, Pepper),
+    case crypto:hash_equals(Computed, Stored) of
+        true -> ok;
+        false -> {error, invalid_credentials}
+    end;
+verify_key(_Key, <<"hmac-sha256$", _/binary>>, undefined) ->
+    {error, invalid_credentials};
+verify_key(Key, Stored, _Pepper) when byte_size(Stored) =:= 64 ->
+    case crypto:hash_equals(legacy_sha256_hex(Key), Stored) of
+        true -> ok;
+        false -> {error, invalid_credentials}
+    end;
+verify_key(_Key, _Stored, _Pepper) ->
     {error, invalid_credentials}.
 
 %% Internal: build the new stored format `hmac-sha256$<b64(hash)>'.

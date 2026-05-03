@@ -32,7 +32,9 @@
 -export([
     is_loopback/1,
     resolve_allowed_origins/2,
-    validate_origin/2
+    validate_origin/2,
+    cors_response_headers/3,
+    extract_headers/2
 ]).
 
 %% Cowboy loop handler callbacks
@@ -409,7 +411,11 @@ handle_long_running_call(Req0, State, SessionId, RequestId, ToolName,
         emit_progress => emit_progress_fun(SessionId, ProgressToken),
         reply_to => Collector
     },
-    _Worker = Spawn(Ctx),
+    Worker = Spawn(Ctx),
+    %% Record the worker so a later `tasks/cancel' can signal it.
+    _ = barrel_mcp_tasks:set_worker(SessionId, TaskId,
+                                     #{worker => Worker,
+                                       request_id => RequestId}),
     Result = #{<<"taskId">> => TaskId,
                <<"status">> => <<"running">>},
     send_tool_envelope(Req0, State, SessionId, RequestId, Result).
@@ -545,11 +551,12 @@ lookup_session_for_request(Req, State, true, Method) ->
             _ = barrel_mcp_session:set_sse_buffer_max(SessionId, BufMax),
             {ok, SessionId, State#{session_id => SessionId}};
         {<<"initialize">>, SessionId} ->
+            %% Per the spec a terminated/unknown session id must
+            %% yield 404 and force the client to re-initialize
+            %% without one. Resuming an existing session is fine.
             case barrel_mcp_session:get(SessionId) of
                 {ok, _} -> {ok, SessionId, State#{session_id => SessionId}};
-                {error, not_found} ->
-                    {ok, NewSid} = barrel_mcp_session:create(#{}),
-                    {ok, NewSid, State#{session_id => NewSid}}
+                {error, not_found} -> {error, unknown_session}
             end;
         {_, undefined} ->
             {error, missing_session_id};
@@ -752,21 +759,19 @@ add_session_header(Headers, SessionId) ->
 %%====================================================================
 
 validate_accept_header(Req) ->
+    %% MCP Streamable HTTP requires the POST client to advertise it
+    %% can handle BOTH application/json (for a JSON response) and
+    %% text/event-stream (for a streamed response). Accept `*/*` as
+    %% a shorthand for "anything".
     Accept = cowboy_req:header(<<"accept">>, Req, <<"*/*">>),
-    %% Accept header should include application/json and/or text/event-stream
-    %% or be */* (accept anything)
-    case Accept of
-        <<"*/*">> ->
-            ok;
-        _ ->
-            HasJson = binary:match(Accept, <<"application/json">>) =/= nomatch,
-            HasSse = binary:match(Accept, <<"text/event-stream">>) =/= nomatch,
-            HasWildcard = binary:match(Accept, <<"*/*">>) =/= nomatch,
-            %% Allow any of: wildcard, JSON, or SSE
-            case HasWildcard orelse HasJson orelse HasSse of
-                true -> ok;
-                false -> {error, <<"Accept header must include application/json or text/event-stream">>}
-            end
+    HasWildcard = binary:match(Accept, <<"*/*">>) =/= nomatch,
+    HasJson = binary:match(Accept, <<"application/json">>) =/= nomatch,
+    HasSse = binary:match(Accept, <<"text/event-stream">>) =/= nomatch,
+    case HasWildcard orelse (HasJson andalso HasSse) of
+        true -> ok;
+        false ->
+            {error, <<"Accept header must include both application/json"
+                      " and text/event-stream">>}
     end.
 
 wants_sse_response(Req) ->
