@@ -28,6 +28,8 @@
     list_sampling_capable/0,
     has_elicitation/1,
     list_elicitation_capable/0,
+    has_roots/1,
+    list_roots_capable/0,
     %% Negotiated protocol version (after `initialize').
     set_protocol_version/2,
     get_protocol_version/1,
@@ -42,6 +44,7 @@
     %% Server -> client request via the session's SSE channel.
     sampling_create_message/3,
     elicit_create/3,
+    roots_list/2,
     deliver_response/2,
     %% Server -> client notifications.
     broadcast_list_changed/1,
@@ -219,6 +222,27 @@ list_elicitation_capable() ->
         end
     end, [], ?SESSION_TABLE).
 
+%% @doc Whether a session declared roots capability in its initialize
+%% request.
+-spec has_roots(binary()) -> boolean().
+has_roots(SessionId) ->
+    case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, #mcp_session{client_capabilities = Caps}}] ->
+            maps:is_key(<<"roots">>, Caps);
+        [] ->
+            false
+    end.
+
+%% @doc List session ids whose client declared roots capability.
+-spec list_roots_capable() -> [binary()].
+list_roots_capable() ->
+    ets:foldl(fun({Id, #mcp_session{client_capabilities = Caps}}, Acc) ->
+        case maps:is_key(<<"roots">>, Caps) of
+            true -> [Id | Acc];
+            false -> Acc
+        end
+    end, [], ?SESSION_TABLE).
+
 %% @doc Set the SSE process pid for a session.
 -spec set_sse_pid(binary(), pid() | undefined) -> ok | {error, not_found}.
 set_sse_pid(SessionId, Pid) ->
@@ -280,6 +304,22 @@ elicit_create(SessionId, Params, Opts) ->
             case get_sse_pid(SessionId) of
                 {error, _} = E -> E;
                 {ok, Pid} -> do_elicit(SessionId, Pid, Params, Opts)
+            end
+    end.
+
+%% @doc Send `roots/list' to the client behind a session and wait for
+%% the response. The session must (a) exist, (b) have an active sse_pid,
+%% and (c) have declared roots capability in initialize.
+-spec roots_list(binary(), map()) ->
+    {ok, [map()]}
+  | {error, timeout | not_supported | no_sse | not_found | term()}.
+roots_list(SessionId, Opts) ->
+    case has_roots(SessionId) of
+        false -> {error, not_supported};
+        true ->
+            case get_sse_pid(SessionId) of
+                {error, _} = E -> E;
+                {ok, Pid} -> do_roots_list(SessionId, Pid, Opts)
             end
     end.
 
@@ -744,6 +784,37 @@ do_elicit(SessionId, SsePid, Params, Opts) ->
         {elicitation_response, Ref, #{<<"result">> := Result}} ->
             {ok, Result};
         {elicitation_response, Ref, #{<<"error">> := Err}} ->
+            {error, {client_error, Err}}
+    after Timeout ->
+        _ = gen_server:call(?MODULE, {discard_pending, RequestId}),
+        {error, timeout}
+    end.
+
+do_roots_list(SessionId, SsePid, Opts) ->
+    Timeout = maps:get(timeout_ms, Opts, ?DEFAULT_SAMPLING_TIMEOUT),
+    RequestId = generate_request_id(<<"roots-">>),
+    Ref = make_ref(),
+    ok = gen_server:call(?MODULE,
+        {register_pending, RequestId, #pending{
+            id = RequestId,
+            session_id = SessionId,
+            caller = self(),
+            caller_ref = Ref,
+            expires_at = erlang:system_time(millisecond) + Timeout,
+            tag = roots_response
+        }}),
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => RequestId,
+        <<"method">> => <<"roots/list">>,
+        <<"params">> => #{}
+    },
+    SsePid ! {sse_send_message, Request},
+    receive
+        {roots_response, Ref, #{<<"result">> := Result}} ->
+            Roots = maps:get(<<"roots">>, Result, []),
+            {ok, Roots};
+        {roots_response, Ref, #{<<"error">> := Err}} ->
             {error, {client_error, Err}}
     after Timeout ->
         _ = gen_server:call(?MODULE, {discard_pending, RequestId}),
