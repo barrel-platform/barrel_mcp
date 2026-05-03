@@ -416,8 +416,15 @@ handle_long_running_call(Req0, State, SessionId, RequestId, ToolName,
     _ = barrel_mcp_tasks:set_worker(SessionId, TaskId,
                                      #{worker => Worker,
                                        request_id => RequestId}),
-    Result = #{<<"taskId">> => TaskId,
-               <<"status">> => <<"working">>},
+    %% Spec / reference SDK shape: CreateTaskResult wraps the full
+    %% Task envelope under `task'. A flat {taskId, status} map fails
+    %% pydantic validation in the reference Python client.
+    Task = case barrel_mcp_tasks:get(SessionId, TaskId) of
+               {ok, T} -> T;
+               _ -> #{<<"taskId">> => TaskId,
+                      <<"status">> => <<"working">>}
+           end,
+    Result = #{<<"task">> => Task},
     send_tool_envelope(Req0, State, SessionId, RequestId, Result).
 
 %% Tiny worker that funnels tool outcomes into the task registry.
@@ -427,9 +434,15 @@ spawn_task_collector(SessionId, TaskId) ->
 task_collector_loop(SessionId, TaskId) ->
     receive
         {tool_result, _ReqId, Result} ->
-            barrel_mcp_tasks:finish(SessionId, TaskId, Result);
-        {tool_structured, _ReqId, Data, _Content} ->
-            barrel_mcp_tasks:finish(SessionId, TaskId, Data);
+            %% Store the spec-shaped CallToolResult so `tasks/result'
+            %% returns a payload the reference Python SDK accepts.
+            Content = barrel_mcp_protocol:format_tool_result_external(Result),
+            barrel_mcp_tasks:finish(SessionId, TaskId,
+                                    #{<<"content">> => Content});
+        {tool_structured, _ReqId, Data, Content} ->
+            barrel_mcp_tasks:finish(SessionId, TaskId,
+                                    #{<<"content">> => Content,
+                                      <<"structuredContent">> => Data});
         {tool_error, _ReqId, Content} ->
             barrel_mcp_tasks:fail(SessionId, TaskId, {tool_error, Content});
         {tool_failed, _ReqId, Reason} ->
