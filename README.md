@@ -93,6 +93,96 @@ To make the registry wait for an external process before becoming ready:
 
 If `wait_for_proc` is not set, the registry becomes ready immediately after init.
 
+## Usage by role
+
+barrel_mcp covers the three MCP roles in one library:
+
+- **server** — exposes tools, resources, prompts to MCP clients.
+- **client** — connects to one MCP server, calls tools, reads
+  resources, handles server-initiated requests.
+- **host (agent)** — drives one or more clients on behalf of an
+  LLM; collects each server's tool catalog, hands it to the
+  model, routes the model's tool call back through the right
+  client.
+
+The three short examples below cover the typical wiring; deeper
+guides live under `guides/` (`getting-started.md`,
+`tools-resources-prompts.md`, `building-a-client.md`).
+
+### Server — expose a tool over Streamable HTTP
+
+```erlang
+-module(my_server).
+-export([start/0, search/1]).
+
+start() ->
+    {ok, _} = application:ensure_all_started(barrel_mcp),
+    ok = barrel_mcp:reg_tool(<<"search">>, ?MODULE, search, #{
+        description => <<"Search the index">>,
+        input_schema => #{<<"type">> => <<"object">>,
+                           <<"required">> => [<<"q">>]}
+    }),
+    {ok, _} = barrel_mcp:start_http_stream(#{port => 8080,
+                                              session_enabled => true}),
+    ok.
+
+search(#{<<"q">> := Q}) ->
+    iolist_to_binary([<<"results for ">>, Q]).
+```
+
+That's a complete MCP server. Point any MCP client (Claude Code,
+Claude Desktop via stdio, the `barrel_mcp_client` below, …) at
+`http://127.0.0.1:8080/mcp`.
+
+### Client — connect and call a tool
+
+```erlang
+client_demo() ->
+    {ok, _} = application:ensure_all_started(barrel_mcp),
+    {ok, Pid} = barrel_mcp_client:start(#{
+        transport => {http, <<"http://127.0.0.1:8080/mcp">>}
+    }),
+    {ok, Result} = barrel_mcp_client:call_tool(
+                     Pid, <<"search">>, #{<<"q">> => <<"hello">>}),
+    barrel_mcp_client:close(Pid),
+    Result.
+```
+
+The transport tuple selects the wire (`{http, Url}`,
+`{stdio, [Cmd | Args]}`). Auth and OAuth options live on the same
+spec — see `guides/building-a-client.md`.
+
+### Host (agent) — hand many MCP servers to an LLM
+
+```erlang
+agent_loop() ->
+    {ok, _} = application:ensure_all_started(barrel_mcp),
+    {ok, _} = barrel_mcp:start_client(<<"github">>, #{
+        transport => {http, <<"https://mcp.github.example/mcp">>},
+        auth => {bearer, GhToken}
+    }),
+    {ok, _} = barrel_mcp:start_client(<<"shell">>, #{
+        transport => {stdio, ["mcp-shell-server"]}
+    }),
+    %% Hand every connected server's tools to the model:
+    AnthropicTools = barrel_mcp_agent:to_anthropic(),
+    %% ... call the LLM with AnthropicTools and capture the
+    %%     tool_use block it returned ...
+    Block = ask_llm(AnthropicTools),
+    {NsName, Args} = barrel_mcp_tool_format:from_anthropic_call(Block),
+    %% Routes "github:..." to the github client, "shell:..." to
+    %% the shell client.
+    barrel_mcp_agent:call_tool(NsName, Args).
+```
+
+`barrel_mcp_agent` namespaces tool names as
+`<<"ServerId:ToolName">>` across the federation.
+`barrel_mcp_tool_format` translates between MCP tool maps and the
+provider shapes (Anthropic Messages API, OpenAI Chat Completions);
+swap `to_anthropic/0` and `from_anthropic_call/1` for the OpenAI
+counterparts to use a different model. `ask_llm/1` is your own
+LLM HTTP call — barrel_mcp does not bundle an LLM SDK.
+
 ## Quick Start
 
 ### Starting the Application
