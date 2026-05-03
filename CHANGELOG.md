@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Interop coverage: full feature surface
+
+Direction A (Python client → Erlang server) now exercises every wire surface defined by the MCP spec:
+
+- `ping`, `prompts/get`, `resources/templates/list`, `completion/complete`.
+- Tool result variants: `structuredContent` and `isError: true`.
+- `notifications/tools/list_changed` (auto-emitted by `reg`/`unreg`).
+- `notifications/cancelled` end-to-end: start a long-running task, cancel mid-flight via `experimental.cancel_task`, verify the cooperative arity-2 worker observes `{cancel, RequestId}` in its mailbox.
+- `notifications/tasks/status` captured via the `message_handler` while running other long-running tools.
+
+Direction B (Erlang client → Python FastMCP server) now exercises:
+
+- `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`, `ping`.
+
+Together with sampling / elicitation / roots / progress / subscribe / tasks already covered, every spec wire surface is now verified against the reference SDK on every CI run.
+
 ### `notifications/tasks/changed` renamed to `notifications/tasks/status`
 
 - The Task status-change notification was emitted under method `notifications/tasks/changed`. The reference Python SDK's `ServerNotification` discriminated union uses the spec method name `notifications/tasks/status`. Renamed everywhere to match. Hosts that subscribed to `notifications/tasks/changed` need to switch to the new name.
