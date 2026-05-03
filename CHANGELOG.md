@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Interop coverage: elicitation/create + roots/list
+
+- Direction A now exercises the remaining two server-to-client primitives end-to-end against the reference SDK: a server-side tool calls `barrel_mcp:elicit_create/3` (form-mode payload), the Python `elicitation_callback` returns an `accept` action with a fixed colour, and the tool surfaces that colour as text. Same shape for `roots/list`: a tool calls `barrel_mcp:roots_list/1`, the Python `list_roots_callback` returns one fixed root, and the tool surfaces its name. With sampling already covered, every server-to-client primitive is now wire-validated against the reference implementation on every CI run.
+
 ### Interop coverage: server-to-client sampling/createMessage
 
 - Direction A of the Python interop suite now exercises the full sampling round-trip against the reference SDK: a server-side tool calls `barrel_mcp:sampling_create_message/3`, the Python `sampling_callback` returns a canned reply, the tool surfaces that text as its result. Verifies that the pending-request map, SSE delivery, response correlation, and capability gating all interoperate with the reference implementation.

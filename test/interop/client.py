@@ -15,7 +15,14 @@ import traceback
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from mcp.types import CreateMessageResult, TextContent
+from mcp.types import (
+    CreateMessageResult,
+    ElicitResult,
+    ListRootsResult,
+    Root,
+    TextContent,
+)
+from pydantic import FileUrl
 
 
 EXPECTED_TOOL = "echo"
@@ -29,6 +36,9 @@ def fail(msg: str) -> None:
 
 
 SAMPLED_REPLY = "the canned answer"
+ELICITED_COLOUR = "blue"
+ROOT_NAME = "interop-root"
+ROOT_URI = "file:///tmp/interop"
 
 
 async def sampling_callback(_context, _params):
@@ -38,6 +48,19 @@ async def sampling_callback(_context, _params):
         role="assistant",
         content=TextContent(type="text", text=SAMPLED_REPLY),
         model="canned-test-model",
+    )
+
+
+async def elicitation_callback(_context, _params):
+    """Server-to-client elicitation/create handler. Always accepts
+    with a fixed colour so the round-trip is deterministic."""
+    return ElicitResult(action="accept", content={"colour": ELICITED_COLOUR})
+
+
+async def list_roots_callback(_context):
+    """Server-to-client roots/list handler. Returns one fixed root."""
+    return ListRootsResult(
+        roots=[Root(uri=FileUrl(ROOT_URI), name=ROOT_NAME)]
     )
 
 
@@ -63,6 +86,8 @@ async def run(url: str) -> None:
             read, write,
             message_handler=on_message,
             sampling_callback=sampling_callback,
+            elicitation_callback=elicitation_callback,
+            list_roots_callback=list_roots_callback,
         ) as session:
             await session.initialize()
 
@@ -127,6 +152,28 @@ async def run(url: str) -> None:
             ]
             if not text_blocks or text_blocks[0].text != SAMPLED_REPLY:
                 fail(f"sampling round-trip failed: {sampling_result}")
+
+            # Server-to-client elicitation/create round-trip.
+            elicit_result = await session.call_tool(
+                "ask_user", arguments={}
+            )
+            text_blocks = [
+                b for b in elicit_result.content
+                if getattr(b, "text", None)
+            ]
+            if not text_blocks or text_blocks[0].text != ELICITED_COLOUR:
+                fail(f"elicitation round-trip failed: {elicit_result}")
+
+            # Server-to-client roots/list round-trip.
+            roots_result = await session.call_tool(
+                "list_roots", arguments={}
+            )
+            text_blocks = [
+                b for b in roots_result.content
+                if getattr(b, "text", None)
+            ]
+            if not text_blocks or text_blocks[0].text != ROOT_NAME:
+                fail(f"roots round-trip failed: {roots_result}")
 
     print("OK")
 

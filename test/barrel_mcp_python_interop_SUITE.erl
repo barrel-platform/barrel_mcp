@@ -28,7 +28,8 @@
 
 %% Tool / resource / prompt handlers exported for the registry.
 -export([echo_tool/1, slow_tool/2, trigger_update_tool/1,
-         ask_llm_tool/1, greeting_resource/1, hello_prompt/1]).
+         ask_llm_tool/1, ask_user_tool/1, list_roots_tool/1,
+         greeting_resource/1, hello_prompt/1]).
 
 -define(PORT, 22451).
 
@@ -132,6 +133,16 @@ ensure_fixture() ->
         description => <<"Ask the connected client to sample a message">>,
         input_schema => #{<<"type">> => <<"object">>}
     }),
+    ok = barrel_mcp_registry:reg(tool, <<"ask_user">>, ?MODULE,
+                                  ask_user_tool, #{
+        description => <<"Ask the connected client to elicit user input">>,
+        input_schema => #{<<"type">> => <<"object">>}
+    }),
+    ok = barrel_mcp_registry:reg(tool, <<"list_roots">>, ?MODULE,
+                                  list_roots_tool, #{
+        description => <<"Ask the connected client for its roots">>,
+        input_schema => #{<<"type">> => <<"object">>}
+    }),
     ok = barrel_mcp_registry:reg(resource, <<"greeting">>, ?MODULE,
                                   greeting_resource, #{
         name => <<"Greeting">>,
@@ -151,6 +162,8 @@ cleanup_fixture() ->
     catch barrel_mcp_registry:unreg(tool, <<"slow_echo">>),
     catch barrel_mcp_registry:unreg(tool, <<"trigger_update">>),
     catch barrel_mcp_registry:unreg(tool, <<"ask_llm">>),
+    catch barrel_mcp_registry:unreg(tool, <<"ask_user">>),
+    catch barrel_mcp_registry:unreg(tool, <<"list_roots">>),
     catch barrel_mcp_registry:unreg(resource, <<"greeting">>),
     catch barrel_mcp_registry:unreg(prompt, <<"hello_prompt">>),
     ok.
@@ -176,6 +189,36 @@ ask_llm_tool(_) ->
         barrel_mcp:sampling_create_message(SessionId, Params,
                                            #{timeout_ms => 5000}),
     maps:get(<<"text">>, maps:get(<<"content">>, Result)).
+
+%% Ask the only elicitation-capable session for a structured
+%% answer and return what the user picked. Form-mode payload
+%% per the spec.
+ask_user_tool(_) ->
+    [SessionId | _] = barrel_mcp:list_sessions_with_elicitation(),
+    Params = #{
+        <<"mode">> => <<"form">>,
+        <<"message">> => <<"Pick a colour">>,
+        <<"requestedSchema">> =>
+            #{<<"type">> => <<"object">>,
+              <<"properties">> =>
+                  #{<<"colour">> =>
+                        #{<<"type">> => <<"string">>}}}
+    },
+    {ok, Result} = barrel_mcp:elicit_create(SessionId, Params,
+                                             #{timeout_ms => 5000}),
+    %% The Python callback returns action=accept,
+    %% content={"colour": "blue"}. Surface the colour as text.
+    Content = maps:get(<<"content">>, Result, #{}),
+    maps:get(<<"colour">>, Content, <<"unset">>).
+
+%% Ask the only roots-capable session for its roots and return the
+%% first root's name (so we have a deterministic string to assert on).
+list_roots_tool(_) ->
+    [SessionId | _] = barrel_mcp:list_sessions_with_roots(),
+    {ok, Roots} = barrel_mcp:roots_list(SessionId,
+                                         #{timeout_ms => 5000}),
+    [#{<<"name">> := N} | _] = Roots,
+    N.
 
 %% Long-running arity-2 handler. Sleeps briefly then echoes back so
 %% the Python client can see the task transition through `working' →
