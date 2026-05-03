@@ -1,17 +1,38 @@
 # barrel_mcp
 
-MCP (Model Context Protocol) library for Erlang. Implements the MCP specification for both server and client modes, including the Streamable HTTP transport (protocol 2025-03-26) for Claude Code integration.
+MCP (Model Context Protocol) library for Erlang. Implements the
+MCP specification (protocol `2025-11-25` with downward negotiation
+through `2024-11-05`) for both server and client modes, including
+the Streamable HTTP transport for Claude Code and any other MCP
+client.
 
 ## Features
 
-- **Full MCP Protocol Support**: Tools, Resources, Prompts, and Sampling
-- **Multiple Transports**: Streamable HTTP (Claude Code), HTTP (Cowboy), and stdio (Claude Desktop)
-- **Pluggable Authentication**: Bearer JWT, API keys, Basic auth, or custom providers
-- **Supervised Registry**: gen_statem-based registry with atomic operations
-- **Fast Reads**: ETS + persistent_term for O(1) handler lookups (no process call)
-- **Ready/Not-Ready States**: Flexible initialization pattern
-- **Client Library**: Connect to external MCP servers
-- **Zero-dependency JSON**: Uses OTP 27+ built-in `json` module
+- **Full MCP Protocol**: tools, resources, resource templates,
+  prompts, completions, sampling, **tasks** (long-running
+  operations), notifications (`*/list_changed`, `progress`,
+  `cancelled`, `resources/updated`, `tasks/changed`,
+  `replay_truncated`).
+- **Tool handlers**: arity 1 or arity 2 (`(Args, Ctx)`) with
+  `Ctx`-driven progress and cancel hooks. Return shapes:
+  plain content, `{tool_error, ...}` (→ `isError: true`), or
+  `{structured, Data, ...}` (→ `structuredContent`).
+- **Schema validation**: opt-in `validate_input` /
+  `validate_output` against registered JSON Schemas
+  (`barrel_mcp_schema`).
+- **Transports**: Streamable HTTP (Claude Code), legacy HTTP
+  (Cowboy), stdio (Claude Desktop). Streamable HTTP defaults to
+  `127.0.0.1`, validates `Origin`, and replays SSE events via
+  `Last-Event-ID`.
+- **Authentication**: bearer (JWT/opaque), API keys (peppered
+  HMAC-SHA-256), basic (PBKDF2-SHA256), custom providers.
+  Constant-time hash comparison; legacy SHA-256 hex digests still
+  verify for one release.
+- **Client library** (`barrel_mcp_client`): supervised
+  `gen_statem` with stdio + Streamable HTTP transports, OAuth 2.1
+  + PKCE, federation registry (one connection per server id),
+  pagination, schema pre-flight.
+- **Zero JSON dependency**: uses OTP 27+ built-in `json` module.
 
 ## Installation
 

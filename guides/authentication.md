@@ -139,12 +139,16 @@ barrel_mcp:start_http(#{
 
 ### Hashed Keys (Recommended for Production)
 
-Store hashed keys to protect against database leaks:
+The recommended format is a peppered HMAC-SHA-256 digest. The
+`pepper` is a server-side secret mixed into the hash so a leak of
+the stored hash table on its own isn't enough to forge keys.
 
 ```erlang
-%% Generate hashed keys (do this once, store the hash)
-Hash1 = barrel_mcp_auth_apikey:hash_key(<<"ak_prod_abc123">>),
-Hash2 = barrel_mcp_auth_apikey:hash_key(<<"ak_prod_xyz789">>),
+Pepper = <<"random-32-byte-pepper-loaded-from-env">>,
+Hash1 = barrel_mcp_auth_apikey:hash_key(<<"ak_prod_abc123">>,
+                                         #{pepper => Pepper}),
+Hash2 = barrel_mcp_auth_apikey:hash_key(<<"ak_prod_xyz789">>,
+                                         #{pepper => Pepper}),
 
 barrel_mcp:start_http(#{
     port => 9090,
@@ -155,11 +159,30 @@ barrel_mcp:start_http(#{
                 Hash1 => #{subject => <<"service-a">>},
                 Hash2 => #{subject => <<"service-b">>}
             },
-            hash_keys => true  %% Enable hash comparison
+            hash_keys => true,
+            pepper => Pepper
         }
     }
 }).
 ```
+
+Stored values look like
+`<<"hmac-sha256$<base64-encoded-hash>">>`.
+
+For verification outside the auth pipeline (config tooling,
+tests), use `barrel_mcp_auth_apikey:verify_key/2` — it does a
+constant-time comparison and accepts both the new format and
+legacy unsalted hex SHA-256 digests for one release.
+
+#### Migrating from legacy SHA-256
+
+`hash_key/1` (no pepper) still produces the legacy hex SHA-256
+format and is still accepted by the verifier. To migrate:
+
+1. Generate a `pepper` and load it from a secret store.
+2. Re-hash each existing key with `hash_key/2`.
+3. Replace the entries in your `keys` map.
+4. Drop the legacy entries.
 
 ### Custom Header Name
 
@@ -221,10 +244,15 @@ barrel_mcp:start_http(#{
 
 ### Hashed Passwords
 
+`hash_password/1,2` defaults to **PBKDF2-SHA256** (100k
+iterations, random 16-byte salt). Stored values look like
+`<<"pbkdf2-sha256$<iters>$<base64(salt)>$<base64(hash)>">>`.
+
 ```erlang
-%% Hash passwords (store these, not plain text)
+%% Hash passwords once, store the resulting binary, use that in
+%% the credentials map.
 AdminHash = barrel_mcp_auth_basic:hash_password(<<"secret123">>),
-UserHash = barrel_mcp_auth_basic:hash_password(<<"viewer456">>),
+UserHash  = barrel_mcp_auth_basic:hash_password(<<"viewer456">>),
 
 barrel_mcp:start_http(#{
     port => 9090,
@@ -232,7 +260,7 @@ barrel_mcp:start_http(#{
         provider => barrel_mcp_auth_basic,
         provider_opts => #{
             credentials => #{
-                <<"admin">> => AdminHash,
+                <<"admin">>    => AdminHash,
                 <<"readonly">> => UserHash
             },
             hash_passwords => true
@@ -240,6 +268,17 @@ barrel_mcp:start_http(#{
     }
 }).
 ```
+
+`hash_password/2` accepts an options map:
+
+- `algorithm` — `pbkdf2-sha256` (default) or `sha256-hex` (legacy,
+  for migration only).
+- `iterations` — PBKDF2 iteration count (default 100000).
+
+The verification path is the public `verify_password/2`. It
+accepts the modern format and legacy hex SHA-256 digests for one
+release; the legacy code path logs a deprecation warning on every
+match.
 
 ### With Scopes and Metadata
 

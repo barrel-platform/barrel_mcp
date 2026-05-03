@@ -5,15 +5,101 @@ Erlang MCP library. See `CHANGELOG.md` for release-by-release detail.
 
 ## Server
 
-- HTTP transport (`barrel_mcp_http`) — JSON-RPC over POST.
-- Streamable HTTP transport (`barrel_mcp_http_stream`) — protocol
-  `2025-03-26`. POST (JSON or SSE), GET (SSE), DELETE, OPTIONS.
+### Transports
+
+- HTTP transport (`barrel_mcp_http`) — JSON-RPC over POST. Legacy.
+- Streamable HTTP transport (`barrel_mcp_http_stream`) — MCP
+  `2025-11-25` with downward negotiation to `2025-06-18`,
+  `2025-03-26`, `2024-11-05`. POST (JSON or SSE), GET (SSE),
+  DELETE, OPTIONS. Default bind `127.0.0.1`; public binds require
+  `allowed_origins`. `Origin` is validated structurally on every
+  method (POST/GET/DELETE/OPTIONS); literal `Origin: null` is
+  rejected unless explicitly allowed. CORS echoes the validated
+  origin (no wildcard); `Access-Control-Allow-Headers` is derived
+  from the configured auth provider.
 - stdio transport (`barrel_mcp_stdio`).
-- Tool / resource / prompt registries.
-- Session management with `Mcp-Session-Id` and TTL.
-- Authentication providers: bearer, API key, basic, custom.
-- Server-to-client sampling (`sampling/createMessage`) and resource
-  update notifications.
+
+### Wire-level conformance
+
+- POSTed JSON-RPC requests return either a JSON envelope or an SSE
+  stream. Notifications and POSTed responses to server-initiated
+  requests return HTTP 202 with empty body.
+- Missing `Mcp-Session-Id` on a non-`initialize` request → 400;
+  unknown id → 404.
+- `MCP-Protocol-Version` validated server-side: missing falls back
+  to the session-stored negotiated version; unsupported → 400.
+- JSON-RPC `id` must be string or integer; `null` and other shapes
+  rejected with -32600. Top-level JSON arrays (batches) explicitly
+  rejected — MCP removed batching.
+- `notifications/cancelled` aborts the in-flight tool call; the
+  cancelled HTTP request closes with 200 and an empty body (no
+  JSON-RPC envelope, per spec).
+- Per-session SSE ring buffer (default 256 entries) for
+  `Last-Event-ID` replay; out-of-window ids surface a synthetic
+  `notifications/replay_truncated` event.
+
+### Registries
+
+- **Tools** — handlers may be arity 1 or arity 2. Arity-2
+  handlers receive a `Ctx` map with `session_id`, `request_id`,
+  `progress_token`, and an `emit_progress` function.
+- **Resources** — text/binary content, MIME types,
+  `notifications/resources/updated` for live updates.
+- **Resource templates** — RFC 6570 URI templates, surfaced via
+  `resources/templates/list`.
+- **Prompts** — multi-message conversation templates with
+  arguments.
+- **Completions** — keyed by `{prompt, Name, Arg}` or
+  `{resource_template, Uri, Arg}`; advertised via the
+  `completions` capability when at least one is registered.
+- All registrations accept optional `title` and `icons`.
+
+### Tool features
+
+- Return shapes: plain (text / map / list / image), `{tool_error,
+  Content}` (→ `isError: true`), `{structured, Data}` /
+  `{structured, Data, Content}` (→ `structuredContent`).
+- `validate_input` and `validate_output` opt-in schema validation
+  via `barrel_mcp_schema`.
+- `long_running => true` returns a `taskId` immediately and runs
+  the worker in the background. Backed by `barrel_mcp_tasks` —
+  surfaces `tasks/list`, `tasks/get`, `tasks/cancel`, and
+  `notifications/tasks/changed`.
+- Cancellation: cooperative arity-2 handlers see
+  `{cancel, RequestId}` in their mailbox; arity-1 handlers run to
+  completion but their result is discarded.
+- Progress: handlers call `(maps:get(emit_progress, Ctx))(Done,
+  Total, MessageOrUndef)`; out-of-band code can use
+  `barrel_mcp:notify_progress/3,4`.
+
+### Sessions
+
+- ETS tables are `protected`; mutators run in
+  `barrel_mcp_session`'s gen_server.
+- `Mcp-Session-Id` lifecycle with TTL-based cleanup.
+- Server-to-client sampling (`sampling/createMessage`) and
+  resource update notifications.
+
+### Authentication
+
+- Providers: `barrel_mcp_auth_bearer`, `barrel_mcp_auth_apikey`,
+  `barrel_mcp_auth_basic`, `barrel_mcp_auth_none`,
+  `barrel_mcp_auth_custom`.
+- Hashing: `barrel_mcp_auth_basic:hash_password/1,2` defaults to
+  PBKDF2-SHA256 (100k iterations, 16-byte salt).
+  `barrel_mcp_auth_apikey:hash_key/2` produces a peppered HMAC-SHA-256
+  digest. Both verifiers accept legacy hex SHA-256 digests for one
+  release. All comparisons are constant-time.
+
+### Server-to-client primitives
+
+| Façade | Effect |
+| --- | --- |
+| `barrel_mcp:notify_resource_updated/1,2` | `notifications/resources/updated` to every subscriber. |
+| `barrel_mcp:notify_progress/3,4` | `notifications/progress` to a session. |
+| `barrel_mcp:notify_list_changed/1` | `notifications/tools/list_changed`, `.../resources/list_changed`, or `.../prompts/list_changed` to every active SSE session. Auto-emitted on `reg_*`/`unreg_*`. |
+| `barrel_mcp:sampling_create_message/3` | Server→client `sampling/createMessage` (requires the client to declare `sampling` capability). |
+| `barrel_mcp_tasks:create/3`, `finish/3`, `fail/3`, `cancel/2` | Long-running operation lifecycle. |
 
 ## Client (`barrel_mcp_client`)
 
@@ -105,7 +191,8 @@ end.
 
 ### Roadmap
 
-- Resumable Streamable HTTP via `Last-Event-ID` (transport buffers
-  the last id but does not yet replay missed events on reconnect).
 - Periodic deadline timer for in-flight requests beyond the per-call
   timeout (today timeouts fire only when configured per-request).
+- Client-side `Last-Event-ID` resume (server-side replay is shipped;
+  client transport tracks the last id but does not yet replay on
+  reconnect from its own state).

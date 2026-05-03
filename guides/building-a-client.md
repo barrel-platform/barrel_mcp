@@ -192,6 +192,34 @@ timeout).
 The full echo-client example lives in
 [`examples/echo_client/src/echo_client.erl`](https://github.com/barrel-platform/barrel_mcp/tree/main/examples/echo_client/src/echo_client.erl).
 
+### Tool results
+
+`call_tool/3,4` returns the server's `result` map. Three shapes
+the spec allows:
+
+```erlang
+classify(#{<<"isError">> := true} = R) ->
+    {error, maps:get(<<"content">>, R)};
+classify(#{<<"structuredContent">> := Data} = R) ->
+    {structured, Data, maps:get(<<"content">>, R, [])};
+classify(#{<<"content">> := Content}) ->
+    {ok, Content}.
+```
+
+- `isError: true` → the tool reported a domain-level failure
+  (validation, business rule). The `content` is human-readable.
+- `structuredContent` → typed payload, optionally paired with
+  human-readable `content` blocks. When the tool registered an
+  `outputSchema`, the typed payload conforms to it.
+- Plain `content` → standard MCP content blocks.
+
+### Tasks
+
+If the server registered the tool with `long_running => true`,
+`call_tool` returns immediately with `#{<<"taskId">> := Id,
+<<"status">> := <<"running">>}`. Track progress with the methods
+in section 12.
+
 ---
 
 ## 8. Read and subscribe to resources
@@ -317,7 +345,7 @@ handle_request(<<"sampling/createMessage">>, Params, State) ->
 
 ---
 
-## 12. Notifications
+## 12. Notifications and tasks
 
 The handler's `handle_notification/3` callback receives every inbound
 notification with its raw `params` map. Common methods:
@@ -327,12 +355,37 @@ notification with its raw `params` map. Common methods:
 - `notifications/progress` — also dispatched to the caller of the
   request that owns the progress token (see section 7).
 - `notifications/tools/list_changed`, `.../resources/list_changed`,
-  `.../prompts/list_changed` — surface only via the handler.
-- `notifications/message` — server logging stream. Surface in the
-  handler.
+  `.../prompts/list_changed` — catalogue updated; re-fetch or
+  invalidate caches.
+- `notifications/tasks/changed` — a long-running task transitioned
+  state. The full task record is in `params`.
+- `notifications/message` — server logging stream.
+- `notifications/replay_truncated` — your `Last-Event-ID` was
+  outside the server's replay window; resync rather than trust the
+  partial stream.
 
 The handler is the right place to integrate with your application's
 metrics, logs, or UI.
+
+### Task methods
+
+When a tool was registered as `long_running` on the server, the
+initial `call_tool` returns a `taskId`. Track it via the
+`tasks/*` request methods (see the spec for shapes; on the wire
+they are `tasks/list`, `tasks/get`, `tasks/cancel`). The client's
+public API exposes them as direct `request/3` calls:
+
+```erlang
+poll_task(Pid, TaskId) ->
+    %% `tasks/get' is just another spec method; until the client
+    %% adds a typed wrapper you can call it via the request shape.
+    barrel_mcp_client:request(Pid, <<"tasks/get">>,
+                              #{<<"taskId">> => TaskId}).
+```
+
+When you registered a `progress_token` on the originating call,
+the same task usually emits `notifications/progress` updates that
+arrive through your handler, so polling is rarely required.
 
 ---
 
