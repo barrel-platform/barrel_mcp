@@ -44,7 +44,11 @@ Erlang MCP library. See `CHANGELOG.md` for release-by-release detail.
   handlers receive a `Ctx` map with `session_id`, `request_id`,
   `progress_token`, and an `emit_progress` function.
 - **Resources** — text/binary content, MIME types,
-  `notifications/resources/updated` for live updates.
+  `notifications/resources/updated` for live updates. Handlers
+  may return a single block (`#{text := _}` /
+  `#{blob := _, mimeType := _}`, with optional `mimeType` and
+  `annotations`) or a list of pre-built content blocks for
+  multi-part responses.
 - **Resource templates** — RFC 6570 URI templates, surfaced via
   `resources/templates/list`.
 - **Prompts** — multi-message conversation templates with

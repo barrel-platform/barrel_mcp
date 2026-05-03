@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### `resources/read` content-block flexibility
+
+- Resource handlers may now return a list of pre-built content blocks; each block is passed through verbatim, with `uri` auto-injected when the handler omits it.
+- The `#{text := _}` and `#{blob := _, mimeType := _}` map shapes accept optional `mimeType` (text only — blob already requires it) and `annotations` keys, matching the spec's per-content metadata. Both flow through to the wire under `mimeType` / `annotations`.
+
 ### Tool, resource, prompt, and resource-template annotations
 
 - `reg_tool/4`, `reg_resource/4`, `reg_prompt/4`, and `reg_resource_template/4` accept a new `annotations` option — a free-form map surfaced verbatim under `annotations` in the matching `*/list` payload. The MCP spec defines `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint` for tools, and `audience` / `priority` for resources, prompts, and templates. Registrations without annotations omit the field on the wire.
