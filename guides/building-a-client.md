@@ -435,7 +435,7 @@ notification with its raw `params` map. Common methods:
 - `notifications/tools/list_changed`, `.../resources/list_changed`,
   `.../prompts/list_changed` — catalogue updated; re-fetch or
   invalidate caches.
-- `notifications/tasks/changed` — a long-running task transitioned
+- `notifications/tasks/status` — a long-running task transitioned
   state. The full task record is in `params`.
 - `notifications/message` — server logging stream.
 - `notifications/replay_truncated` — your `Last-Event-ID` was
@@ -475,7 +475,7 @@ and `cancelled`; `createdAt` and `lastUpdatedAt` are RFC 3339 strings.
 When you registered a `progress_token` on the originating call,
 the same task usually emits `notifications/progress` updates that
 arrive through your handler, so polling is rarely required. Prefer
-subscribing to `notifications/tasks/changed` in the handler over
+subscribing to `notifications/tasks/status` in the handler over
 busy-polling `tasks_get/2`, then fetch the payload once with
 `tasks_result/2` when the status reaches `completed`.
 

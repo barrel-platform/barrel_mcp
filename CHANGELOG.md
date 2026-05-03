@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### `notifications/tasks/changed` renamed to `notifications/tasks/status`
+
+- The Task status-change notification was emitted under method `notifications/tasks/changed`. The reference Python SDK's `ServerNotification` discriminated union uses the spec method name `notifications/tasks/status`. Renamed everywhere to match. Hosts that subscribed to `notifications/tasks/changed` need to switch to the new name.
+
+### Interop coverage: notifications/progress
+
+- Direction A of the Python interop suite now exercises `notifications/progress` end-to-end. A server-side `progress_echo` tool emits three progress events through the arity-2 handler's `Ctx.emit_progress`; the reference Python SDK auto-attaches a progress token on `call_tool` and routes the inbound notifications to a `progress_callback`. Verifies the progress token plumbing, SSE delivery of progress notifications, and the SDK's progress dispatch.
+
 ### Long-running tools: spec-shaped CreateTaskResult + CallToolResult on tasks/result
 
 - **Wire change.** `tools/call` for `long_running => true` tools now returns the spec-shaped `CreateTaskResult` envelope `{<<"task">> => Task}` (the full Task object with taskId, status, createdAt, lastUpdatedAt, ttl) instead of the flat `{taskId, status}` shape that was rejected by the reference Python SDK with a pydantic ValidationError. Hosts that previously read `Result.taskId` need to read `Result.task.taskId`.

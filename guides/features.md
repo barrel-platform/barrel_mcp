@@ -74,7 +74,7 @@ Erlang MCP library. See `CHANGELOG.md` for release-by-release detail.
 - `long_running => true` returns a `taskId` immediately and runs
   the worker in the background. Backed by `barrel_mcp_tasks` —
   surfaces `tasks/list`, `tasks/get`, `tasks/cancel`, and
-  `notifications/tasks/changed`.
+  `notifications/tasks/status`.
 - Cancellation: cooperative arity-2 handlers see
   `{cancel, RequestId}` in their mailbox; arity-1 handlers run to
   completion but their result is discarded.

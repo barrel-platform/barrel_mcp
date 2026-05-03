@@ -204,6 +204,33 @@ async def run(url: str) -> None:
             if not payload_text or "from-task" not in payload_text[0]:
                 fail(f"tasks/result payload mismatch: {payload}")
 
+            # Progress notifications round-trip. The server-side
+            # progress_echo tool emits three events; the Python SDK
+            # auto-attaches a progress token on call_tool and routes
+            # the inbound notifications/progress to our callback.
+            progress_seen = []
+
+            async def progress_cb(progress, total, _message):
+                progress_seen.append((progress, total))
+
+            await session.call_tool(
+                "progress_echo", arguments={},
+                progress_callback=progress_cb,
+            )
+            # Progress events arrive on the GET SSE channel
+            # asynchronously. call_tool returns when the POST
+            # response lands, which can race with the last few
+            # progress notifications. Wait briefly for the SSE pid
+            # to drain.
+            for _ in range(20):
+                if len(progress_seen) >= 3:
+                    break
+                await asyncio.sleep(0.05)
+            if not progress_seen:
+                fail("no progress events received")
+            if progress_seen[-1] != (3, 3):
+                fail(f"unexpected progress sequence: {progress_seen}")
+
     print("OK")
 
 

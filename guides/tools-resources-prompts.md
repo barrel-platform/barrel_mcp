@@ -151,7 +151,7 @@ Set `long_running => true` on `reg_tool/4` and the tool returns
 immediately to the client with a `taskId`. The handler keeps
 running in the background and the runtime stores its eventual
 outcome on the task. Clients track progress via `tasks/get`,
-`tasks/list`, or `notifications/tasks/changed`.
+`tasks/list`, or `notifications/tasks/status`.
 
 ```erlang
 barrel_mcp:reg_tool(<<"render_video">>, my_tools, render_video, #{
@@ -483,7 +483,7 @@ as at least one completion handler is registered.
 
 The `barrel_mcp_tasks` module backs the `tasks/list`, `tasks/get`,
 `tasks/cancel`, and `tasks/result` MCP methods, plus the
-`notifications/tasks/changed` notifications.
+`notifications/tasks/status` notifications.
 
 You don't usually call this module directly: registering a tool
 with `long_running => true` (see above) wires the lifecycle for
@@ -515,7 +515,7 @@ SSE channel:
 | `notifications/resources/updated` | `barrel_mcp:notify_resource_updated/1,2` |
 | `notifications/tools/list_changed`<br>`notifications/resources/list_changed`<br>`notifications/prompts/list_changed` | `barrel_mcp:notify_list_changed/1` (tool, resource, prompt). `reg_tool/4`/`unreg_tool/1` and friends emit it automatically; call the façade if you mutate the catalogue out of band. |
 | `notifications/progress` | `barrel_mcp:notify_progress/3,4` (or via `Ctx` from an arity-2 tool handler). |
-| `notifications/tasks/changed` | Emitted by `barrel_mcp_tasks` on every status transition. |
+| `notifications/tasks/status` | Emitted by `barrel_mcp_tasks` on every status transition. |
 | `notifications/message` (logging) | Emitted by `barrel_mcp_session` when a host calls `logger`-style helpers. |
 
 ## Handler Best Practices

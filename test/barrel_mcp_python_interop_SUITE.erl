@@ -29,6 +29,7 @@
 %% Tool / resource / prompt handlers exported for the registry.
 -export([echo_tool/1, slow_tool/2, trigger_update_tool/1,
          ask_llm_tool/1, ask_user_tool/1, list_roots_tool/1,
+         progress_tool/2,
          greeting_resource/1, hello_prompt/1]).
 
 -define(PORT, 22451).
@@ -143,6 +144,11 @@ ensure_fixture() ->
         description => <<"Ask the connected client for its roots">>,
         input_schema => #{<<"type">> => <<"object">>}
     }),
+    ok = barrel_mcp_registry:reg(tool, <<"progress_echo">>, ?MODULE,
+                                  progress_tool, #{
+        description => <<"Emit a few progress events then return">>,
+        input_schema => #{<<"type">> => <<"object">>}
+    }),
     ok = barrel_mcp_registry:reg(resource, <<"greeting">>, ?MODULE,
                                   greeting_resource, #{
         name => <<"Greeting">>,
@@ -164,6 +170,7 @@ cleanup_fixture() ->
     catch barrel_mcp_registry:unreg(tool, <<"ask_llm">>),
     catch barrel_mcp_registry:unreg(tool, <<"ask_user">>),
     catch barrel_mcp_registry:unreg(tool, <<"list_roots">>),
+    catch barrel_mcp_registry:unreg(tool, <<"progress_echo">>),
     catch barrel_mcp_registry:unreg(resource, <<"greeting">>),
     catch barrel_mcp_registry:unreg(prompt, <<"hello_prompt">>),
     ok.
@@ -219,6 +226,19 @@ list_roots_tool(_) ->
                                          #{timeout_ms => 5000}),
     [#{<<"name">> := N} | _] = Roots,
     N.
+
+%% Arity-2 handler that emits three progress events through Ctx
+%% before returning. Used to verify notifications/progress
+%% interop with the reference SDK's progress_callback.
+progress_tool(_Args, Ctx) ->
+    Emit = maps:get(emit_progress, Ctx),
+    %% Brief sleeps between emits so the SSE writer flushes each
+    %% notification ahead of the synchronous tool response, which
+    %% otherwise wins the race in the reference Python client.
+    Emit(1, 3, undefined), timer:sleep(20),
+    Emit(2, 3, undefined), timer:sleep(20),
+    Emit(3, 3, undefined), timer:sleep(20),
+    <<"progressed">>.
 
 %% Long-running arity-2 handler. Sleeps briefly then echoes back so
 %% the Python client can see the task transition through `working' →

@@ -319,7 +319,7 @@ tasks_get(Pid, TaskId) ->
 
 %% @doc Cancel a long-running task by id. Returns `{ok, _}' on
 %% acceptance; the task transitions to `cancelled' status, which the
-%% server then broadcasts via `notifications/tasks/changed'.
+%% server then broadcasts via `notifications/tasks/status'.
 -spec tasks_cancel(pid(), binary()) -> {ok, map()} | {error, term()}.
 tasks_cancel(Pid, TaskId) ->
     request(Pid, <<"tasks/cancel">>, #{<<"taskId">> => TaskId}).
