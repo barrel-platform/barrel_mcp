@@ -7,10 +7,17 @@ transport used by Claude Desktop and other MCP clients that spawn server process
 
 Unlike HTTP transport, stdio transport:
 
-- Uses newline-delimited JSON-RPC messages
-- Runs as a child process spawned by the MCP client
-- Is ideal for local integrations (no network overhead)
-- Is the primary transport for Claude Desktop
+- Uses newline-delimited JSON-RPC messages.
+- Runs as a child process spawned by the MCP client.
+- Is ideal for local integrations (no network overhead).
+- Is the primary transport for Claude Desktop.
+
+The same registries (tools, resources, prompts, resource
+templates, completions, tasks) work over stdio. Tool handlers may
+be arity 1 or arity 2 (`(Args, Ctx)`) — the `emit_progress` and
+cancellation hooks in `Ctx` interleave on stdout in stdio just
+like they do on the SSE channel for HTTP. See the
+[Tools guide](tools-resources-prompts.md) for the handler shape.
 
 ## Quick Start
 

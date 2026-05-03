@@ -70,25 +70,25 @@ barrel_mcp:reg_tool(<<"calculate">>, my_tools, calculate, #{
 
 ### Tool Return Values
 
-Tools can return different types:
+Tools can return any of:
 
 ```erlang
-%% Binary - returned as text content
+%% Binary -> single text content block.
 text_tool(_Args) ->
     <<"Hello, World!">>.
 
-%% Map - automatically JSON encoded
+%% Map -> JSON-encoded text content block.
 json_tool(_Args) ->
     #{<<"key">> => <<"value">>, <<"count">> => 42}.
 
-%% List of content blocks - for multiple outputs
+%% List of content blocks -> verbatim.
 multi_tool(_Args) ->
     [
         #{<<"type">> => <<"text">>, <<"text">> => <<"First result">>},
         #{<<"type">> => <<"text">>, <<"text">> => <<"Second result">>}
     ].
 
-%% Image content
+%% Image content block.
 image_tool(_Args) ->
     ImageData = base64:encode(read_image_file()),
     #{
@@ -96,23 +96,109 @@ image_tool(_Args) ->
         <<"data">> => ImageData,
         <<"mimeType">> => <<"image/png">>
     }.
+
+%% Tool-level error: rendered as `{ "isError": true, "content": [...] }'
+%% on the wire. Use this for failures that are part of the tool's
+%% domain (validation, business rules) rather than infrastructure.
+flaky_tool(_Args) ->
+    {tool_error, [#{<<"type">> => <<"text">>,
+                    <<"text">> => <<"Quota exceeded">>}]}.
+
+%% Structured output: machine-readable data plus optional human-readable
+%% content blocks. Surfaces as `structuredContent' on the wire.
+%% Pair with the `output_schema' option to validate the data shape.
+weather(_Args) ->
+    {structured, #{<<"tempF">> => 72, <<"sky">> => <<"clear">>},
+     [#{<<"type">> => <<"text">>, <<"text">> => <<"72°F, clear">>}]}.
 ```
 
-### Error Handling
+`{tool_error, Content}` and `{structured, Data, Content}` are the
+recommended shapes. Plain returns still work; raised exceptions are
+caught and surfaced as a JSON-RPC error to the client.
 
-Return errors for graceful failure:
+### Async handlers (`Ctx`-aware)
+
+Tools may be exported as arity 2 instead of arity 1. The second
+argument is a context map the runtime fills in:
 
 ```erlang
-safe_divide(Args) ->
-    A = maps:get(<<"a">>, Args),
-    B = maps:get(<<"b">>, Args),
-    case B of
-        0 -> error(division_by_zero);
-        _ -> #{<<"result">> => A / B}
-    end.
+%% (Args, Ctx) -> Result. Ctx holds:
+%%   session_id     :: binary() | undefined,
+%%   request_id     :: integer() | binary(),
+%%   progress_token :: binary() | undefined,
+%%   emit_progress  :: fun((Done, Total, Message | undefined) -> ok)
+download(Args, Ctx) ->
+    Url = maps:get(<<"url">>, Args),
+    Emit = maps:get(emit_progress, Ctx),
+    Emit(0.0, 1.0, undefined),
+    {ok, Body} = fetch(Url),
+    Emit(1.0, 1.0, undefined),
+    Body.
 ```
 
-Errors are caught and returned as MCP error responses.
+Arity-2 handlers are needed for tools that:
+
+- emit `notifications/progress` updates,
+- cooperate with `notifications/cancelled` (the worker receives
+  `{cancel, RequestId}` in its mailbox),
+- need the calling session id for server→client primitives.
+
+Arity-1 handlers continue to work; pick whichever arity you need.
+
+### Long-running tools (tasks)
+
+Set `long_running => true` on `reg_tool/4` and the tool returns
+immediately to the client with a `taskId`. The handler keeps
+running in the background and the runtime stores its eventual
+outcome on the task. Clients track progress via `tasks/get`,
+`tasks/list`, or `notifications/tasks/changed`.
+
+```erlang
+barrel_mcp:reg_tool(<<"render_video">>, my_tools, render_video, #{
+    long_running => true,
+    description => <<"Render a video on the GPU farm">>
+}).
+```
+
+The same handler shape (arity 1 or arity 2) applies. Long-running
+handlers may emit progress just like any other tool.
+
+### Schema validation
+
+Two opt-in flags on `reg_tool/4`:
+
+```erlang
+barrel_mcp:reg_tool(<<"search">>, my_tools, search, #{
+    input_schema => #{<<"type">> => <<"object">>,
+                       <<"required">> => [<<"query">>]},
+    output_schema => #{<<"type">> => <<"object">>,
+                        <<"required">> => [<<"results">>]},
+    validate_input  => true,
+    validate_output => true
+}).
+```
+
+`validate_input` checks the call's `arguments` against
+`input_schema` before invoking the handler. `validate_output`
+checks the structured `Data` from `{structured, Data, _}` returns
+against `output_schema`. Failures surface to the client as
+`isError: true` content. The validator subset is documented under
+`barrel_mcp_schema`.
+
+### Metadata: `title` and `icons`
+
+Every registration accepts a human-readable `title` and a list of
+`icons` (each `#{src, sizes?, mime_type?}`). Both surface in the
+matching `*/list` response. Empty fields are omitted from the
+wire.
+
+```erlang
+barrel_mcp:reg_tool(<<"search">>, my_tools, search, #{
+    title => <<"Knowledge Base Search">>,
+    icons => [#{<<"src">> => <<"https://example.com/icon.png">>,
+                 <<"sizes">> => <<"32x32">>}]
+}).
+```
 
 ### Managing Tools
 
@@ -348,6 +434,87 @@ PromptResult = barrel_mcp:get_prompt(<<"summarize">>, #{
 %% Unregister
 barrel_mcp:unreg_prompt(<<"summarize">>).
 ```
+
+## Resource Templates
+
+URI templates (RFC 6570) advertise families of resources without
+enumerating every URI. Register one handler per template:
+
+```erlang
+barrel_mcp:reg_resource_template(<<"file">>, my_resources, read_file_uri, #{
+    name => <<"File Reader">>,
+    uri_template => <<"file:///{path}">>,
+    description => <<"Read any file on the local FS">>,
+    mime_type => <<"text/plain">>
+}).
+```
+
+`barrel_mcp:list_resource_templates/0` lists registrations.
+Templates surface on the wire via `resources/templates/list`. The
+matching `resources/read` request still goes through your normal
+resource handler (or directly through the template handler if you
+implement URI parsing yourself).
+
+## Completions
+
+Completion handlers suggest values for a prompt argument or a
+resource-template argument. Register them keyed by the parent
+plus the argument name:
+
+```erlang
+suggest_lengths(<<"sh">>, _Ctx) -> {ok, [<<"short">>]};
+suggest_lengths(_, _Ctx)        -> {ok, [<<"short">>, <<"medium">>, <<"long">>]}.
+
+barrel_mcp:reg_completion(
+    {prompt, <<"summarize">>, <<"length">>},
+    my_completions, suggest_lengths, #{}).
+```
+
+Handlers are arity 2: `(PartialValue, Ctx)`. Return one of:
+
+- `{ok, [Suggestion]}` — full list.
+- `{ok, [Suggestion], #{has_more => true}}` — more available; the
+  client can issue another `completion/complete` to drill in.
+
+The `completions` capability is advertised in `initialize` as soon
+as at least one completion handler is registered.
+
+## Tasks (long-running operations)
+
+The `barrel_mcp_tasks` module backs the `tasks/list`, `tasks/get`,
+and `tasks/cancel` MCP methods, plus the
+`notifications/tasks/changed` notifications.
+
+You don't usually call this module directly: registering a tool
+with `long_running => true` (see above) wires the lifecycle for
+you. The collector process records the worker's eventual outcome
+as a task transition (`running` → `success | error | cancelled`)
+and emits the matching notification on the session's SSE channel.
+
+Hosts that drive their own long-running operations outside the
+tool path can use the public API:
+
+```erlang
+{ok, TaskId} = barrel_mcp_tasks:create(SessionId, <<"reindex">>, #{}),
+%% later:
+ok = barrel_mcp_tasks:finish(SessionId, TaskId, #{<<"reindexed">> => 12000}).
+```
+
+Tasks are evicted from memory one hour after they reach a terminal
+state (success / error / cancelled).
+
+## Server → client notifications
+
+Every notification the server can emit goes through the session's
+SSE channel:
+
+| Notification | Façade |
+| --- | --- |
+| `notifications/resources/updated` | `barrel_mcp:notify_resource_updated/1,2` |
+| `notifications/tools/list_changed`<br>`notifications/resources/list_changed`<br>`notifications/prompts/list_changed` | `barrel_mcp:notify_list_changed/1` (tool, resource, prompt). `reg_tool/4`/`unreg_tool/1` and friends emit it automatically; call the façade if you mutate the catalogue out of band. |
+| `notifications/progress` | `barrel_mcp:notify_progress/3,4` (or via `Ctx` from an arity-2 tool handler). |
+| `notifications/tasks/changed` | Emitted by `barrel_mcp_tasks` on every status transition. |
+| `notifications/message` (logging) | Emitted by `barrel_mcp_session` when a host calls `logger`-style helpers. |
 
 ## Handler Best Practices
 

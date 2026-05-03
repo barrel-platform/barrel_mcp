@@ -1,17 +1,24 @@
 # Streamable HTTP Transport
 
-MCP Streamable HTTP transport (protocol 2025-03-26) for Claude Code integration.
+MCP Streamable HTTP transport for Claude Code (and any other MCP
+client speaking the same protocol).
 
 ## Overview
 
-The Streamable HTTP transport implements the MCP protocol version 2025-03-26, which is the transport expected by Claude Code's `--transport http` option.
+The Streamable HTTP transport implements MCP `2025-11-25` and
+negotiates downward to `2025-06-18`, `2025-03-26`, and
+`2024-11-05` based on the client's `initialize` request. It is the
+transport expected by Claude Code's `--transport http` option.
 
 This transport supports:
-- **POST** for client requests with JSON or SSE streaming responses
-- **GET** for server-to-client notification streams (SSE)
-- **DELETE** for session termination
-- **OPTIONS** for CORS preflight
-- **Session management** via `Mcp-Session-Id` header
+
+- **POST** for client requests with JSON or SSE streaming responses.
+- **GET** for server-to-client notification streams (SSE).
+- **DELETE** for session termination.
+- **OPTIONS** for CORS preflight.
+- **Session management** via `Mcp-Session-Id` header.
+- **Replay on reconnect** via `Last-Event-ID`.
+- **Origin validation** with operator-controlled allow-list.
 
 ## Starting the Server
 
@@ -52,11 +59,38 @@ barrel_mcp:start_http_stream(#{
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `port` | `pos_integer()` | `9090` | Port number |
-| `ip` | `inet:ip_address()` | `{0,0,0,0}` | IP address to bind |
-| `auth` | `map()` | `#{}` | Authentication configuration |
-| `session_enabled` | `boolean()` | `true` | Enable session management |
-| `ssl` | `map()` | `undefined` | TLS configuration |
+| `port` | `pos_integer()` | `9090` | Port number. |
+| `ip` | `inet:ip_address()` | `{127,0,0,1}` | Bind address. **Default is loopback.** Public binds require `allowed_origins` (see below). |
+| `auth` | `map()` | `#{}` | Authentication configuration. |
+| `session_enabled` | `boolean()` | `true` | Enable session management. |
+| `ssl` | `map()` | `undefined` | TLS configuration. |
+| `allowed_origins` | `[binary()] \| any` | loopback set on loopback bind; required on public bind | List of allowed `Origin` values, structurally matched (scheme + host + port). Use `any` to disable validation. The literal `<<"null">>` may be included to allow sandboxed-frame origins. |
+| `allow_missing_origin` | `boolean()` | `true` on loopback, `false` otherwise | Whether to accept requests with no `Origin` header. Non-browser clients typically don't send one. |
+| `sse_buffer_size` | `pos_integer()` | `256` | Per-session ring buffer of recent SSE events for `Last-Event-ID` replay. |
+
+### Security defaults
+
+The transport binds to `127.0.0.1` by default. Public binds (any
+non-loopback IP) require an explicit `allowed_origins`; the start
+function refuses with `{error, allowed_origins_required}`
+otherwise. This avoids accidental exposure to DNS-rebinding and
+CORS-style attacks.
+
+```erlang
+%% Public bind — must list allowed origins explicitly.
+{ok, _} = barrel_mcp:start_http_stream(#{
+    port => 9090,
+    ip => {0, 0, 0, 0},
+    allowed_origins => [<<"https://app.example.com">>]
+}).
+```
+
+CORS responses echo the validated `Origin` (no wildcard) and add
+`Vary: Origin`. The `Access-Control-Allow-Headers` list is
+derived from the configured auth provider via the optional
+`auth_headers/1` callback on `barrel_mcp_auth`, so a custom
+`header_name` on `barrel_mcp_auth_apikey` flows through both the
+preflight allow-list and the request handler's header extraction.
 
 ## Claude Code Integration
 
@@ -205,14 +239,43 @@ Then use HTTPS URL with Claude Code:
 claude mcp add my-server --transport http https://my-server.example.com:9443/mcp
 ```
 
-## CORS
+## CORS and request validation
 
-The server includes CORS headers for browser-based clients:
+The server validates `Origin` on every request method (POST, GET,
+DELETE, OPTIONS) and replies with 403 on mismatch. When the
+request's `Origin` validates, the response includes:
 
-- `Access-Control-Allow-Origin: *`
+- `Access-Control-Allow-Origin: <validated origin>`
+- `Vary: Origin`
 - `Access-Control-Allow-Methods: POST, GET, DELETE, OPTIONS`
-- `Access-Control-Allow-Headers: content-type, authorization, x-api-key, mcp-session-id, accept`
-- `Access-Control-Expose-Headers: www-authenticate, mcp-session-id`
+- `Access-Control-Allow-Headers: content-type, accept,
+  mcp-session-id, mcp-protocol-version, last-event-id` plus any
+  auth headers declared by the configured provider.
+- `Access-Control-Expose-Headers: www-authenticate,
+  mcp-session-id, mcp-protocol-version`
+
+When the request has no `Origin` header (typical of non-browser
+clients) and `allow_missing_origin` is `true`, the response omits
+`Access-Control-Allow-Origin` entirely rather than synthesising a
+value.
+
+## Wire-level conformance
+
+The transport implements MCP `2025-11-25` conformance points
+explicitly:
+
+| Wire | Behaviour |
+| --- | --- |
+| `MCP-Protocol-Version` request header | Required after init. Unsupported value → 400; missing falls back to the session-stored negotiated version; pre-init missing assumes `2025-03-26`. |
+| `Mcp-Session-Id` request header | Required on every non-`initialize` request when `session_enabled` is true. Missing → 400; unknown id → 404. `initialize` is the only request that creates a session. |
+| Notifications and posted server-bound responses | HTTP 202 Accepted, empty body. |
+| JSON-RPC ids | Must be string or integer. `null` or any other shape → -32600 Invalid Request. |
+| JSON-RPC batches | Top-level JSON arrays explicitly rejected with -32600 (MCP removed batching). |
+| `notifications/cancelled` | Cancels the in-flight tool call; the originating HTTP request closes with 200 and an empty body (no JSON-RPC envelope, per spec). |
+
+The session, subscription, and pending-request ETS tables are
+`protected`; mutators run in the session manager so a non-owning
+process cannot tamper with the table.
 
 ## Protocol Differences
 
@@ -220,12 +283,13 @@ The server includes CORS headers for browser-based clients:
 
 | Feature | Legacy (`start_http`) | Streamable (`start_http_stream`) |
 |---------|----------------------|----------------------------------|
-| Protocol Version | 2024-11-05 | 2025-03-26 |
+| Protocol Version | 2024-11-05 | 2025-11-25 (negotiates downward) |
 | Claude Code | Not supported | Supported |
 | Sessions | No | Yes |
 | SSE Responses | No | Yes |
 | GET for streams | No | Yes |
 | DELETE for cleanup | No | Yes |
+| Origin validation | Yes | Yes |
 
 ### When to Use
 
