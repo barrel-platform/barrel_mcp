@@ -74,7 +74,9 @@ test_start_stop() ->
     ok = barrel_mcp:stop_http_stream().
 
 test_post_json() ->
-    {ok, _} = barrel_mcp:start_http_stream(#{port => 19091}),
+    %% Sessions disabled — `ping' goes through without one.
+    {ok, _} = barrel_mcp:start_http_stream(#{port => 19091,
+                                             session_enabled => false}),
 
     Request = json:encode(#{
         <<"jsonrpc">> => <<"2.0">>,
@@ -90,11 +92,9 @@ test_post_json() ->
 
     ?assertEqual(200, Status),
 
-    %% Check content type
     ContentType = proplists:get_value(<<"content-type">>, Headers),
     ?assertEqual(<<"application/json">>, ContentType),
 
-    %% Parse response
     Response = json:decode(Body),
     ?assertEqual(<<"2.0">>, maps:get(<<"jsonrpc">>, Response)),
     ?assertEqual(1, maps:get(<<"id">>, Response)),
@@ -102,7 +102,8 @@ test_post_json() ->
     barrel_mcp:stop_http_stream().
 
 test_post_default_accept() ->
-    {ok, _} = barrel_mcp:start_http_stream(#{port => 19092}),
+    {ok, _} = barrel_mcp:start_http_stream(#{port => 19092,
+                                             session_enabled => false}),
 
     Request = json:encode(#{
         <<"jsonrpc">> => <<"2.0">>,
@@ -110,7 +111,6 @@ test_post_default_accept() ->
         <<"method">> => <<"ping">>
     }),
 
-    %% Request without Accept header should default to JSON
     {ok, Status, Headers, _Body} = hackney:request(post,
         <<"http://localhost:19092/mcp">>,
         [{<<"content-type">>, <<"application/json">>}],
@@ -123,103 +123,88 @@ test_post_default_accept() ->
     barrel_mcp:stop_http_stream().
 
 test_options_cors() ->
-    {ok, _} = barrel_mcp:start_http_stream(#{port => 19093}),
+    {ok, _} = barrel_mcp:start_http_stream(#{port => 19093,
+                                             session_enabled => false}),
 
-    {ok, Status, Headers, _Body} = hackney:request(options,
+    %% No Origin header: server omits Access-Control-Allow-Origin.
+    {ok, Status1, H1, _} = hackney:request(options,
         <<"http://localhost:19093/mcp">>,
         [], <<>>, []),
+    ?assertEqual(204, Status1),
+    ?assertEqual(undefined,
+                 proplists:get_value(<<"access-control-allow-origin">>, H1)),
 
-    ?assertEqual(204, Status),
-
-    %% Check CORS headers
-    ?assertEqual(<<"*">>, proplists:get_value(<<"access-control-allow-origin">>, Headers)),
-    ?assertMatch(<<"POST", _/binary>>, proplists:get_value(<<"access-control-allow-methods">>, Headers)),
+    %% With a loopback Origin: server echoes it back.
+    {ok, Status2, H2, _} = hackney:request(options,
+        <<"http://localhost:19093/mcp">>,
+        [{<<"origin">>, <<"http://localhost:5173">>}], <<>>, []),
+    ?assertEqual(204, Status2),
+    ?assertEqual(<<"http://localhost:5173">>,
+                 proplists:get_value(<<"access-control-allow-origin">>, H2)),
+    ?assertMatch(<<"POST", _/binary>>,
+                 proplists:get_value(<<"access-control-allow-methods">>, H2)),
 
     barrel_mcp:stop_http_stream().
 
 test_session_created() ->
     {ok, _} = barrel_mcp:start_http_stream(#{port => 19094, session_enabled => true}),
-
-    Request = json:encode(#{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => 1,
-        <<"method">> => <<"ping">>
-    }),
-
-    {ok, 200, Headers, _Body} = hackney:request(post,
-        <<"http://localhost:19094/mcp">>,
-        [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
-        Request, []),
-
-    %% Should have session ID in response
+    {200, Headers, _} = post_initialize(<<"http://localhost:19094/mcp">>),
     SessionId = proplists:get_value(<<"mcp-session-id">>, Headers),
     ?assertMatch(<<"mcp_", _/binary>>, SessionId),
-
     barrel_mcp:stop_http_stream().
 
 test_session_header() ->
     {ok, _} = barrel_mcp:start_http_stream(#{port => 19095, session_enabled => true}),
-
-    Request = json:encode(#{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => 1,
-        <<"method">> => <<"ping">>
-    }),
-
-    %% First request creates session
-    {ok, 200, Headers1, _Body1} = hackney:request(post,
-        <<"http://localhost:19095/mcp">>,
-        [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
-        Request, []),
-
+    %% First request: initialize creates a session.
+    {200, Headers1, _} = post_initialize(<<"http://localhost:19095/mcp">>),
     SessionId = proplists:get_value(<<"mcp-session-id">>, Headers1),
-
-    %% Second request with session ID
-    {ok, 200, Headers2, _Body2} = hackney:request(post,
+    %% Subsequent ping with the same id reuses the session.
+    Ping = json:encode(#{<<"jsonrpc">> => <<"2.0">>,
+                         <<"id">> => 2,
+                         <<"method">> => <<"ping">>}),
+    {ok, 200, Headers2, _} = hackney:request(post,
         <<"http://localhost:19095/mcp">>,
         [{<<"content-type">>, <<"application/json">>},
          {<<"accept">>, <<"application/json">>},
          {<<"mcp-session-id">>, SessionId}],
-        Request, []),
-
-    %% Should return same session ID
+        Ping, []),
     ?assertEqual(SessionId, proplists:get_value(<<"mcp-session-id">>, Headers2)),
-
     barrel_mcp:stop_http_stream().
 
 test_delete_session() ->
     {ok, _} = barrel_mcp:start_http_stream(#{port => 19096, session_enabled => true}),
+    {200, Headers, _} = post_initialize(<<"http://localhost:19096/mcp">>),
+    SessionId = proplists:get_value(<<"mcp-session-id">>, Headers),
+    {ok, Status, _, _} = hackney:request(delete,
+        <<"http://localhost:19096/mcp">>,
+        [{<<"mcp-session-id">>, SessionId}], <<>>, []),
+    ?assertEqual(204, Status),
+    barrel_mcp:stop_http_stream().
 
-    %% Create session
-    Request = json:encode(#{
+%% Helper: send an `initialize' request and return
+%% `{Status, Headers, Body}'.
+post_initialize(Url) ->
+    Body = json:encode(#{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => 1,
-        <<"method">> => <<"ping">>
+        <<"method">> => <<"initialize">>,
+        <<"params">> => #{
+            <<"protocolVersion">> => <<"2025-11-25">>,
+            <<"capabilities">> => #{},
+            <<"clientInfo">> => #{<<"name">> => <<"test">>,
+                                  <<"version">> => <<"1.0">>}
+        }
     }),
-
-    {ok, 200, Headers, _Body} = hackney:request(post,
-        <<"http://localhost:19096/mcp">>,
+    {ok, S, H, Resp} = hackney:request(post, Url,
         [{<<"content-type">>, <<"application/json">>},
          {<<"accept">>, <<"application/json">>}],
-        Request, []),
-
-    SessionId = proplists:get_value(<<"mcp-session-id">>, Headers),
-
-    %% Delete session
-    {ok, Status, _, _Body2} = hackney:request(delete,
-        <<"http://localhost:19096/mcp">>,
-        [{<<"mcp-session-id">>, SessionId}],
-        <<>>, []),
-
-    ?assertEqual(204, Status),
-
-    barrel_mcp:stop_http_stream().
+        Body, [with_body]),
+    {S, H, Resp}.
 
 test_auth_required() ->
     {ok, _} = barrel_mcp:start_http_stream(#{
         port => 19097,
+        session_enabled => false,
         auth => #{
             provider => barrel_mcp_auth_apikey,
             provider_opts => #{
@@ -234,7 +219,6 @@ test_auth_required() ->
         <<"method">> => <<"ping">>
     }),
 
-    %% Request without API key should fail
     {ok, Status, _, _Body} = hackney:request(post,
         <<"http://localhost:19097/mcp">>,
         [{<<"content-type">>, <<"application/json">>},
@@ -248,6 +232,7 @@ test_auth_required() ->
 test_auth_valid() ->
     {ok, _} = barrel_mcp:start_http_stream(#{
         port => 19098,
+        session_enabled => false,
         auth => #{
             provider => barrel_mcp_auth_apikey,
             provider_opts => #{
@@ -262,7 +247,6 @@ test_auth_valid() ->
         <<"method">> => <<"ping">>
     }),
 
-    %% Request with valid API key should succeed
     {ok, Status, _, _Body} = hackney:request(post,
         <<"http://localhost:19098/mcp">>,
         [{<<"content-type">>, <<"application/json">>},

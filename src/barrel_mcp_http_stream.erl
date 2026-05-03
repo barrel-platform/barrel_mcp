@@ -28,6 +28,13 @@
     stop/0
 ]).
 
+%% Helpers re-used by the legacy `barrel_mcp_http' transport.
+-export([
+    is_loopback/1,
+    resolve_allowed_origins/2,
+    validate_origin/2
+]).
+
 %% Cowboy loop handler callbacks
 -export([init/2, info/3, terminate/3]).
 
@@ -38,69 +45,105 @@
 %%====================================================================
 
 %% @doc Start the Streamable HTTP server.
+%%
+%% == Security defaults ==
+%%
+%% Since version 1.2 the server binds to `127.0.0.1' by default.
+%% Public binds (any non-loopback IP) require an explicit
+%% `allowed_origins' to prevent DNS-rebinding and CORS-style
+%% attacks. The server validates the `Origin' header on every
+%% request and rejects mismatches with HTTP 403.
+%%
+%% == Options ==
+%%
+%% <ul>
+%%   <li>`port' — TCP port (default 9090).</li>
+%%   <li>`ip' — bind address (default `{127,0,0,1}').</li>
+%%   <li>`auth' — authentication provider config.</li>
+%%   <li>`session_enabled' — `true' (default) to use
+%%       `Mcp-Session-Id' sessions.</li>
+%%   <li>`ssl' — TLS options (`certfile', `keyfile',
+%%       optional `cacertfile').</li>
+%%   <li>`allowed_origins' — `[binary()] | any'. List of allowed
+%%       Origin values (case-sensitive scheme/host/port match) or
+%%       the atom `any' to disable validation. Required for
+%%       non-loopback binds. Defaults to a loopback allow-list when
+%%       bound to `127.0.0.1' / `::1'.</li>
+%%   <li>`allow_missing_origin' — `true' to accept requests with
+%%       no `Origin' header (typical of non-browser clients).
+%%       Defaults to `true' on loopback, `false' otherwise.</li>
+%% </ul>
 -spec start(Opts) -> {ok, pid()} | {error, term()} when
     Opts :: #{
         port => pos_integer(),
         ip => inet:ip_address(),
         auth => map(),
         session_enabled => boolean(),
-        ssl => map()
+        ssl => map(),
+        allowed_origins => [binary()] | any,
+        allow_missing_origin => boolean()
     }.
 start(Opts) ->
     Port = maps:get(port, Opts, 9090),
-    Ip = maps:get(ip, Opts, {0, 0, 0, 0}),
+    Ip = maps:get(ip, Opts, {127, 0, 0, 1}),
     SessionEnabled = maps:get(session_enabled, Opts, true),
 
-    %% Ensure session manager is started if sessions are enabled
-    _ = case SessionEnabled of
-        true ->
-            ensure_session_manager();
-        false ->
-            ok
-    end,
+    Loopback = is_loopback(Ip),
+    case resolve_allowed_origins(Loopback,
+                                 maps:get(allowed_origins, Opts, undefined)) of
+        {error, _} = Err ->
+            Err;
+        {ok, AllowedOrigins} ->
+            AllowMissing = maps:get(allow_missing_origin, Opts, Loopback),
 
-    %% Initialize authentication
-    AuthConfig = init_auth(maps:get(auth, Opts, #{})),
-
-    %% Handler state
-    HandlerState = #{
-        auth_config => AuthConfig,
-        session_enabled => SessionEnabled
-    },
-
-    Routes = [
-        {'_', [
-            {"/mcp", ?MODULE, HandlerState},
-            {"/", ?MODULE, HandlerState}
-        ]}
-    ],
-    Dispatch = cowboy_router:compile(Routes),
-
-    %% Start with TLS or clear depending on ssl option
-    case maps:get(ssl, Opts, undefined) of
-        #{certfile := Cert, keyfile := Key} = SslOpts ->
-            CaCert = maps:get(cacertfile, SslOpts, undefined),
-            TlsOpts = [
-                {port, Port},
-                {ip, Ip},
-                {certfile, Cert},
-                {keyfile, Key}
-            ] ++ case CaCert of
-                undefined -> [];
-                _ -> [{cacertfile, CaCert}]
+            %% Ensure session manager is started if sessions are enabled
+            _ = case SessionEnabled of
+                true -> ensure_session_manager();
+                false -> ok
             end,
-            cowboy:start_tls(?STREAM_LISTENER, TlsOpts, #{
-                env => #{dispatch => Dispatch},
-                idle_timeout => infinity
-            });
-        _ ->
-            cowboy:start_clear(?STREAM_LISTENER, [
-                {port, Port},
-                {ip, Ip}
-            ], #{
-                env => #{dispatch => Dispatch},
-                idle_timeout => infinity
-            })
+
+            AuthConfig = init_auth(maps:get(auth, Opts, #{})),
+
+            HandlerState = #{
+                auth_config => AuthConfig,
+                session_enabled => SessionEnabled,
+                allowed_origins => AllowedOrigins,
+                allow_missing_origin => AllowMissing
+            },
+
+            Routes = [
+                {'_', [
+                    {"/mcp", ?MODULE, HandlerState},
+                    {"/", ?MODULE, HandlerState}
+                ]}
+            ],
+            Dispatch = cowboy_router:compile(Routes),
+
+            case maps:get(ssl, Opts, undefined) of
+                #{certfile := Cert, keyfile := Key} = SslOpts ->
+                    CaCert = maps:get(cacertfile, SslOpts, undefined),
+                    TlsOpts = [
+                        {port, Port},
+                        {ip, Ip},
+                        {certfile, Cert},
+                        {keyfile, Key}
+                    ] ++ case CaCert of
+                        undefined -> [];
+                        _ -> [{cacertfile, CaCert}]
+                    end,
+                    cowboy:start_tls(?STREAM_LISTENER, TlsOpts, #{
+                        env => #{dispatch => Dispatch},
+                        idle_timeout => infinity
+                    });
+                _ ->
+                    cowboy:start_clear(?STREAM_LISTENER, [
+                        {port, Port},
+                        {ip, Ip}
+                    ], #{
+                        env => #{dispatch => Dispatch},
+                        idle_timeout => infinity
+                    })
+            end
     end.
 
 %% @doc Stop the Streamable HTTP server.
@@ -114,22 +157,27 @@ stop() ->
 
 init(Req0, State) ->
     Method = cowboy_req:method(Req0),
-    case Method of
-        <<"POST">> ->
-            handle_post(Req0, State);
-        <<"GET">> ->
-            handle_get_sse(Req0, State);
-        <<"DELETE">> ->
-            handle_delete(Req0, State);
-        <<"OPTIONS">> ->
-            handle_options(Req0, State);
-        _ ->
-            Req = cowboy_req:reply(405, #{
-                <<"content-type">> => <<"application/json">>,
-                <<"allow">> => <<"POST, GET, DELETE, OPTIONS">>
-            }, <<"{\"error\":\"Method not allowed\"}">>, Req0),
+    case validate_origin(Req0, State) of
+        ok ->
+            dispatch_method(Method, Req0, State);
+        {error, _Reason} ->
+            %% Respond 403 with no body. We deliberately omit
+            %% Access-Control-Allow-Origin so the browser surfaces
+            %% the rejection rather than retrying.
+            Req = cowboy_req:reply(403, #{}, <<>>, Req0),
             {ok, Req, State}
     end.
+
+dispatch_method(<<"POST">>, Req0, State)    -> handle_post(Req0, State);
+dispatch_method(<<"GET">>, Req0, State)     -> handle_get_sse(Req0, State);
+dispatch_method(<<"DELETE">>, Req0, State)  -> handle_delete(Req0, State);
+dispatch_method(<<"OPTIONS">>, Req0, State) -> handle_options(Req0, State);
+dispatch_method(_, Req0, State) ->
+    Req = cowboy_req:reply(405, cors_response_headers(Req0, State, #{
+        <<"content-type">> => <<"application/json">>,
+        <<"allow">> => <<"POST, GET, DELETE, OPTIONS">>
+    }), <<"{\"error\":\"Method not allowed\"}">>, Req0),
+    {ok, Req, State}.
 
 info(session_terminated, Req, State) ->
     %% Session was terminated, close the SSE stream
@@ -166,13 +214,13 @@ handle_post(Req0, State) ->
     %% Validate Accept header
     case validate_accept_header(Req0) of
         {error, Reason} ->
-            Req = cowboy_req:reply(406, cors_headers(),
+            Req = cowboy_req:reply(406, cors_response_headers(Req0, State, #{}),
                 json_encode(#{<<"error">> => Reason}), Req0),
             {ok, Req, State};
         ok ->
             %% Authenticate
             AuthConfig = maps:get(auth_config, State, #{provider => barrel_mcp_auth_none}),
-            Headers = extract_headers(Req0),
+            Headers = extract_headers(Req0, AuthConfig),
             AuthRequest = #{headers => Headers},
 
             case authenticate(AuthConfig, AuthRequest) of
@@ -185,144 +233,264 @@ handle_post(Req0, State) ->
 
 handle_post_authenticated(Req0, State) ->
     SessionEnabled = maps:get(session_enabled, State, true),
-
-    %% Get or create session
-    {SessionId, State1} = case SessionEnabled of
-        true ->
-            get_or_create_session(Req0, State);
-        false ->
-            {undefined, State}
-    end,
-
-    %% Update session activity
-    _ = case SessionId of
-        undefined -> ok;
-        _ -> barrel_mcp_session:update_activity(SessionId)
-    end,
-
-    %% Read and process request body
+    %% Read body first; we need to inspect the method to know whether
+    %% we may create a session (`initialize') or must look one up.
     {ok, Body, Req1} = cowboy_req:read_body(Req0),
-
     case barrel_mcp_protocol:decode(Body) of
-        {ok, #{<<"id">> := RespId} = Request}
-                when is_map_key(<<"result">>, Request);
-                     is_map_key(<<"error">>, Request) ->
-            %% Inbound is a JSON-RPC RESPONSE (not a request) for an
-            %% earlier server-initiated call (e.g. sampling/createMessage).
-            %% Route to the waiting caller; reply 204.
-            _ = barrel_mcp_session:deliver_response(RespId, Request),
-            ResponseHeaders = add_session_header(cors_headers(), SessionId),
-            Req2 = cowboy_req:reply(204, ResponseHeaders, <<>>, Req1),
-            {ok, Req2, State1};
-        {ok, Request} ->
-            %% Add auth info to request context
-            AuthInfo = maps:get(auth_info, State1, undefined),
-            ProtocolState = case SessionId of
-                undefined -> #{};
-                _ -> #{session_id => SessionId}
-            end,
-            ProtocolState1 = case AuthInfo of
-                undefined -> ProtocolState;
-                _ -> ProtocolState#{auth_info => AuthInfo}
-            end,
-            RequestWithAuth = case AuthInfo of
-                undefined -> Request;
-                _ -> Request#{<<"_auth">> => AuthInfo}
-            end,
-
-            %% Handle the MCP request
-            case barrel_mcp_protocol:handle(RequestWithAuth, ProtocolState1) of
-                no_response ->
-                    %% Notification - return 204 No Content
-                    ResponseHeaders = add_session_header(cors_headers(), SessionId),
-                    Req2 = cowboy_req:reply(204, ResponseHeaders, <<>>, Req1),
-                    {ok, Req2, State1};
-                Result ->
-                    %% Check if client accepts SSE
-                    case wants_sse_response(Req1) of
-                        true ->
-                            %% Stream response as SSE
-                            stream_sse_response(Req1, State1, SessionId, Result);
-                        false ->
-                            %% Return JSON response
-                            ResponseJson = barrel_mcp_protocol:encode(Result),
-                            ResponseHeaders = add_session_header(
-                                maps:merge(#{<<"content-type">> => <<"application/json">>}, cors_headers()),
-                                SessionId
-                            ),
-                            Req2 = cowboy_req:reply(200, ResponseHeaders, ResponseJson, Req1),
-                            {ok, Req2, State1}
-                    end
-            end;
+        {ok, Request} when is_list(Request) ->
+            %% Batches are not supported.
+            reply_jsonrpc_error(Req1, State, undefined, 400, null,
+                                ?JSONRPC_INVALID_REQUEST,
+                                <<"Batch requests are not supported">>);
+        {ok, Request} when is_map(Request) ->
+            handle_post_request(Req1, State, SessionEnabled, Request);
         {error, parse_error} ->
-            ErrorResponse = barrel_mcp_protocol:error_response(
-                null, -32700, <<"Parse error">>
-            ),
-            ResponseJson = barrel_mcp_protocol:encode(ErrorResponse),
-            ResponseHeaders = add_session_header(
-                maps:merge(#{<<"content-type">> => <<"application/json">>}, cors_headers()),
-                SessionId
-            ),
-            Req2 = cowboy_req:reply(400, ResponseHeaders, ResponseJson, Req1),
-            {ok, Req2, State1}
+            reply_jsonrpc_error(Req1, State, undefined, 400, null,
+                                -32700, <<"Parse error">>)
     end.
 
-handle_get_sse(Req0, State) ->
-    %% GET requests open an SSE stream for server-to-client notifications
-    %% This requires a valid session
-    SessionEnabled = maps:get(session_enabled, State, true),
+handle_post_request(Req0, State, SessionEnabled, Request) ->
+    %% Distinguish a JSON-RPC RESPONSE (carries result/error + id)
+    %% from a regular request/notification.
+    case is_jsonrpc_response(Request) of
+        true ->
+            handle_inbound_response(Req0, State, SessionEnabled, Request);
+        false ->
+            handle_inbound_request(Req0, State, SessionEnabled, Request)
+    end.
 
+is_jsonrpc_response(R) ->
+    is_map_key(<<"id">>, R) andalso
+        (is_map_key(<<"result">>, R) orelse is_map_key(<<"error">>, R)) andalso
+        not is_map_key(<<"method">>, R).
+
+handle_inbound_response(Req0, State, _SessionEnabled,
+                        #{<<"id">> := RespId} = Request) ->
+    _ = barrel_mcp_session:deliver_response(RespId, Request),
+    %% Per Streamable HTTP, accepted server-bound responses return 202.
+    Req = cowboy_req:reply(202, cors_response_headers(Req0, State, #{}),
+                           <<>>, Req0),
+    {ok, Req, State}.
+
+handle_inbound_request(Req0, State, SessionEnabled, Request) ->
+    Method = maps:get(<<"method">>, Request, undefined),
+    case lookup_session_for_request(Req0, State, SessionEnabled, Method) of
+        {ok, SessionId, State1} ->
+            handle_dispatch(Req0, State1, SessionId, Request);
+        {error, missing_session_id} ->
+            reply_jsonrpc_error(Req0, State, undefined, 400, null,
+                                ?JSONRPC_INVALID_REQUEST,
+                                <<"Mcp-Session-Id header required">>);
+        {error, unknown_session} ->
+            reply_jsonrpc_error(Req0, State, undefined, 404, null,
+                                ?JSONRPC_INVALID_REQUEST,
+                                <<"Unknown Mcp-Session-Id">>)
+    end.
+
+handle_dispatch(Req0, State, SessionId, Request) ->
+    %% Update session activity if we have a session.
+    _ = case SessionId of
+            undefined -> ok;
+            _ -> barrel_mcp_session:update_activity(SessionId)
+        end,
+
+    Method = maps:get(<<"method">>, Request, undefined),
+
+    case validate_protocol_version(Req0, State, SessionId, Method) of
+        {error, ProtoErr} ->
+            reply_jsonrpc_error(Req0, State, SessionId, 400, null,
+                                ?JSONRPC_INVALID_REQUEST, ProtoErr);
+        ok ->
+            AuthInfo = maps:get(auth_info, State, undefined),
+            ProtocolState0 = case SessionId of
+                                 undefined -> #{};
+                                 _ -> #{session_id => SessionId}
+                             end,
+            ProtocolState = case AuthInfo of
+                                undefined -> ProtocolState0;
+                                _ -> ProtocolState0#{auth_info => AuthInfo}
+                            end,
+            RequestWithAuth = case AuthInfo of
+                                  undefined -> Request;
+                                  _ -> Request#{<<"_auth">> => AuthInfo}
+                              end,
+            case barrel_mcp_protocol:handle(RequestWithAuth, ProtocolState) of
+                no_response ->
+                    %% Notification accepted: 202 with empty body.
+                    Headers = add_session_header(
+                                cors_response_headers(Req0, State, #{}),
+                                SessionId),
+                    Req = cowboy_req:reply(202, Headers, <<>>, Req0),
+                    {ok, Req, State};
+                Result ->
+                    %% Capture protocol_version from a successful initialize
+                    %% so subsequent requests can fall back to the
+                    %% session-stored value when the header is missing.
+                    State1 = maybe_capture_initialize_version(
+                                State, SessionId, Method, Result),
+                    case wants_sse_response(Req0) of
+                        true ->
+                            stream_sse_response(Req0, State1, SessionId, Result);
+                        false ->
+                            ResponseJson = barrel_mcp_protocol:encode(Result),
+                            Headers = add_session_header(
+                                        cors_response_headers(Req0, State1, #{
+                                            <<"content-type">> =>
+                                                <<"application/json">>
+                                        }),
+                                        SessionId),
+                            Req = cowboy_req:reply(200, Headers, ResponseJson, Req0),
+                            {ok, Req, State1}
+                    end
+            end
+    end.
+
+reply_jsonrpc_error(Req0, State, SessionId, Status, Id, Code, Message) ->
+    ErrorResponse = barrel_mcp_protocol:error_response(Id, Code, Message),
+    ResponseJson = barrel_mcp_protocol:encode(ErrorResponse),
+    Headers = add_session_header(
+                cors_response_headers(Req0, State, #{
+                    <<"content-type">> => <<"application/json">>
+                }), SessionId),
+    Req = cowboy_req:reply(Status, Headers, ResponseJson, Req0),
+    {ok, Req, State}.
+
+%% Look up (or, for `initialize', create) the session for the
+%% request. Returns:
+%%   {ok, SessionId | undefined, NewState}
+%%   {error, missing_session_id} — no header, header was required
+%%   {error, unknown_session}   — header present but id not registered
+lookup_session_for_request(_Req, State, false, _Method) ->
+    {ok, undefined, State};
+lookup_session_for_request(Req, State, true, Method) ->
+    Header = get_session_from_request(Req),
+    case {Method, Header} of
+        {<<"initialize">>, undefined} ->
+            {ok, SessionId} = barrel_mcp_session:create(#{}),
+            {ok, SessionId, State#{session_id => SessionId}};
+        {<<"initialize">>, SessionId} ->
+            case barrel_mcp_session:get(SessionId) of
+                {ok, _} -> {ok, SessionId, State#{session_id => SessionId}};
+                {error, not_found} ->
+                    {ok, NewSid} = barrel_mcp_session:create(#{}),
+                    {ok, NewSid, State#{session_id => NewSid}}
+            end;
+        {_, undefined} ->
+            {error, missing_session_id};
+        {_, SessionId} ->
+            case barrel_mcp_session:get(SessionId) of
+                {ok, _} -> {ok, SessionId, State#{session_id => SessionId}};
+                {error, not_found} -> {error, unknown_session}
+            end
+    end.
+
+%% Validate the `MCP-Protocol-Version' header per the spec:
+%% - On initialize, the header is optional (the body carries the
+%%   version).
+%% - For subsequent requests:
+%%   * present + supported → ok
+%%   * present + unsupported → error (400 with supported list)
+%%   * missing → fall back to the session-stored negotiated
+%%     version; if none, assume <<"2025-03-26">>.
+validate_protocol_version(_Req, _State, _Sid, <<"initialize">>) -> ok;
+validate_protocol_version(Req, _State, SessionId, _Method) ->
+    case cowboy_req:header(<<"mcp-protocol-version">>, Req) of
+        undefined ->
+            %% Session-stored value or default fallback. Either way: ok.
+            ok;
+        Version ->
+            case lists:member(Version, ?MCP_SUPPORTED_VERSIONS) of
+                true ->
+                    case SessionId of
+                        undefined -> ok;
+                        _ ->
+                            _ = barrel_mcp_session:set_protocol_version(
+                                  SessionId, Version),
+                            ok
+                    end;
+                false ->
+                    {error, iolist_to_binary([
+                        <<"Bad MCP-Protocol-Version: ">>, Version,
+                        <<". Supported: ">>,
+                        lists:join(<<", ">>, ?MCP_SUPPORTED_VERSIONS)
+                    ])}
+            end
+    end.
+
+%% After a successful initialize, store the negotiated
+%% `protocolVersion' on the session so later requests can fall back
+%% to it when the header is missing.
+maybe_capture_initialize_version(State, SessionId, <<"initialize">>,
+                                 #{<<"result">> := #{<<"protocolVersion">> :=
+                                                      Version}})
+  when is_binary(SessionId) ->
+    _ = barrel_mcp_session:set_protocol_version(SessionId, Version),
+    State;
+maybe_capture_initialize_version(State, _, _, _) -> State.
+
+handle_get_sse(Req0, State) ->
+    SessionEnabled = maps:get(session_enabled, State, true),
     case SessionEnabled of
         false ->
-            Req = cowboy_req:reply(400, cors_headers(),
+            Req = cowboy_req:reply(400, cors_response_headers(Req0, State, #{}),
                 json_encode(#{<<"error">> => <<"Sessions not enabled">>}), Req0),
             {ok, Req, State};
         true ->
             case get_session_from_request(Req0) of
                 undefined ->
-                    Req = cowboy_req:reply(400, cors_headers(),
+                    Req = cowboy_req:reply(400, cors_response_headers(Req0, State, #{}),
                         json_encode(#{<<"error">> => <<"Mcp-Session-Id header required">>}), Req0),
                     {ok, Req, State};
                 SessionId ->
                     case barrel_mcp_session:get(SessionId) of
                         {ok, _Session} ->
-                            %% Open SSE stream
-                            ResponseHeaders = add_session_header(#{
-                                <<"content-type">> => <<"text/event-stream">>,
-                                <<"cache-control">> => <<"no-cache">>,
-                                <<"connection">> => <<"keep-alive">>
-                            }, SessionId),
-                            ResponseHeaders1 = maps:merge(ResponseHeaders, cors_headers()),
-                            Req = cowboy_req:stream_reply(200, ResponseHeaders1, Req0),
-                            %% Register this process as the session's SSE
-                            %% pid so server-to-client primitives (sampling,
-                            %% notifications) can deliver messages here.
+                            ResponseHeaders = add_session_header(
+                                cors_response_headers(Req0, State, #{
+                                    <<"content-type">> => <<"text/event-stream">>,
+                                    <<"cache-control">> => <<"no-cache">>,
+                                    <<"connection">> => <<"keep-alive">>
+                                }), SessionId),
+                            Req = cowboy_req:stream_reply(200, ResponseHeaders, Req0),
                             _ = barrel_mcp_session:set_sse_pid(SessionId, self()),
-                            %% Enter loop mode to handle SSE events
                             {cowboy_loop, Req, State#{sse_session => SessionId}};
                         {error, not_found} ->
-                            Req = cowboy_req:reply(404, cors_headers(),
-                                json_encode(#{<<"error">> => <<"Session not found">>}), Req0),
+                            Req = cowboy_req:reply(404,
+                                cors_response_headers(Req0, State, #{}),
+                                json_encode(#{<<"error">> => <<"Unknown Mcp-Session-Id">>}),
+                                Req0),
                             {ok, Req, State}
                     end
             end
     end.
 
 handle_delete(Req0, State) ->
-    %% DELETE terminates a session
     case get_session_from_request(Req0) of
         undefined ->
-            Req = cowboy_req:reply(400, cors_headers(),
-                json_encode(#{<<"error">> => <<"Mcp-Session-Id header required">>}), Req0),
+            Req = cowboy_req:reply(400,
+                cors_response_headers(Req0, State, #{}),
+                json_encode(#{<<"error">> => <<"Mcp-Session-Id header required">>}),
+                Req0),
             {ok, Req, State};
         SessionId ->
-            barrel_mcp_session:delete(SessionId),
-            Req = cowboy_req:reply(204, cors_headers(), <<>>, Req0),
-            {ok, Req, State}
+            case barrel_mcp_session:get(SessionId) of
+                {ok, _} ->
+                    barrel_mcp_session:delete(SessionId),
+                    Req = cowboy_req:reply(204,
+                        cors_response_headers(Req0, State, #{}),
+                        <<>>, Req0),
+                    {ok, Req, State};
+                {error, not_found} ->
+                    Req = cowboy_req:reply(404,
+                        cors_response_headers(Req0, State, #{}),
+                        json_encode(#{<<"error">> => <<"Unknown Mcp-Session-Id">>}),
+                        Req0),
+                    {ok, Req, State}
+            end
     end.
 
 handle_options(Req0, State) ->
-    Req = cowboy_req:reply(204, cors_headers(), <<>>, Req0),
+    Req = cowboy_req:reply(204, cors_response_headers(Req0, State, #{}),
+                           <<>>, Req0),
     {ok, Req, State}.
 
 %%====================================================================
@@ -330,13 +498,12 @@ handle_options(Req0, State) ->
 %%====================================================================
 
 stream_sse_response(Req0, State, SessionId, Result) ->
-    %% Start SSE stream
-    ResponseHeaders = add_session_header(#{
-        <<"content-type">> => <<"text/event-stream">>,
-        <<"cache-control">> => <<"no-cache">>
-    }, SessionId),
-    ResponseHeaders1 = maps:merge(ResponseHeaders, cors_headers()),
-    Req = cowboy_req:stream_reply(200, ResponseHeaders1, Req0),
+    ResponseHeaders = add_session_header(
+        cors_response_headers(Req0, State, #{
+            <<"content-type">> => <<"text/event-stream">>,
+            <<"cache-control">> => <<"no-cache">>
+        }), SessionId),
+    Req = cowboy_req:stream_reply(200, ResponseHeaders, Req0),
 
     %% Send the response as an SSE event
     EventId = generate_event_id(),
@@ -360,23 +527,6 @@ generate_event_id() ->
 %%====================================================================
 %% Session Helpers
 %%====================================================================
-
-get_or_create_session(Req, State) ->
-    case get_session_from_request(Req) of
-        undefined ->
-            %% Create new session
-            {ok, SessionId} = barrel_mcp_session:create(#{}),
-            {SessionId, State#{session_id => SessionId}};
-        SessionId ->
-            case barrel_mcp_session:get(SessionId) of
-                {ok, _} ->
-                    {SessionId, State#{session_id => SessionId}};
-                {error, not_found} ->
-                    %% Session expired, create new one
-                    {ok, NewSessionId} = barrel_mcp_session:create(#{}),
-                    {NewSessionId, State#{session_id => NewSessionId}}
-            end
-    end.
 
 get_session_from_request(Req) ->
     cowboy_req:header(<<"mcp-session-id">>, Req, undefined).
@@ -462,30 +612,137 @@ authenticate(AuthConfig, Request) ->
 
 handle_auth_error(Req0, State, AuthConfig, Reason) ->
     {StatusCode, AuthHeaders, Body} = barrel_mcp_auth:challenge_response(AuthConfig, Reason),
-    Headers = maps:merge(AuthHeaders, cors_headers()),
+    Headers = maps:merge(AuthHeaders, cors_response_headers(Req0, State, #{})),
     Req = cowboy_req:reply(StatusCode, Headers, Body, Req0),
     {ok, Req, State}.
 
-extract_headers(Req) ->
-    HeaderNames = [<<"authorization">>, <<"x-api-key">>],
+extract_headers(Req, AuthConfig) ->
+    Names = case AuthConfig of
+                undefined -> [<<"authorization">>, <<"x-api-key">>];
+                _ ->
+                    Decl = barrel_mcp_auth:auth_headers(AuthConfig),
+                    case Decl of
+                        [] -> [<<"authorization">>, <<"x-api-key">>];
+                        _ -> Decl
+                    end
+            end,
     lists:foldl(fun(Name, Acc) ->
         case cowboy_req:header(Name, Req) of
             undefined -> Acc;
             Value -> Acc#{Name => Value}
         end
-    end, #{}, HeaderNames).
+    end, #{}, Names).
 
 %%====================================================================
 %% CORS
 %%====================================================================
 
-cors_headers() ->
-    #{
-        <<"access-control-allow-origin">> => <<"*">>,
+%% Build the CORS headers for the current request. Echoes the
+%% validated `Origin' (no wildcard); omits `Access-Control-Allow-Origin'
+%% when the request had no Origin header. The allowed-headers list is
+%% derived from the configured auth provider so custom headers
+%% (e.g. `X-API-Key', a custom `header_name') are honoured.
+-spec cors_response_headers(cowboy_req:req(), map(), map()) -> map().
+cors_response_headers(Req, State, Extra) ->
+    BaseAllowHeaders = [<<"content-type">>, <<"accept">>,
+                        <<"mcp-session-id">>, <<"mcp-protocol-version">>,
+                        <<"last-event-id">>],
+    AuthHeaders = case maps:get(auth_config, State, undefined) of
+                      undefined -> [];
+                      AC -> barrel_mcp_auth:auth_headers(AC)
+                  end,
+    AllowHeaders = lists:join(<<", ">>, BaseAllowHeaders ++ AuthHeaders),
+    ExposeHeaders = <<"www-authenticate, mcp-session-id, mcp-protocol-version">>,
+    Base = #{
         <<"access-control-allow-methods">> => <<"POST, GET, DELETE, OPTIONS">>,
-        <<"access-control-allow-headers">> => <<"content-type, authorization, x-api-key, mcp-session-id, mcp-protocol-version, accept, last-event-id">>,
-        <<"access-control-expose-headers">> => <<"www-authenticate, mcp-session-id, mcp-protocol-version">>
-    }.
+        <<"access-control-allow-headers">> => iolist_to_binary(AllowHeaders),
+        <<"access-control-expose-headers">> => ExposeHeaders
+    },
+    WithOrigin = case cowboy_req:header(<<"origin">>, Req) of
+                     undefined -> Base;
+                     Origin ->
+                         Base#{<<"access-control-allow-origin">> => Origin,
+                               <<"vary">> => <<"Origin">>}
+                 end,
+    maps:merge(WithOrigin, Extra).
+
+%%====================================================================
+%% Origin validation + bind helpers
+%%====================================================================
+
+%% Resolve the operator's `allowed_origins' input into the structural
+%% form used at request time. On loopback we provide a sensible
+%% default; on public binds the operator must opt in.
+resolve_allowed_origins(_Loopback, any) ->
+    {ok, any};
+resolve_allowed_origins(true, undefined) ->
+    {ok, default_loopback_origins()};
+resolve_allowed_origins(false, undefined) ->
+    {error, allowed_origins_required};
+resolve_allowed_origins(_Loopback, List) when is_list(List) ->
+    {ok, [parse_origin(O) || O <- List]}.
+
+default_loopback_origins() ->
+    [#{scheme => <<"http">>, host => <<"localhost">>, port => any},
+     #{scheme => <<"http">>, host => <<"127.0.0.1">>, port => any},
+     #{scheme => <<"http">>, host => <<"[::1]">>, port => any}].
+
+%% `<<"null">>' is special: browsers send it from sandboxed contexts.
+%% Encode it explicitly.
+parse_origin(<<"null">>) ->
+    null;
+parse_origin(Bin) when is_binary(Bin) ->
+    case uri_string:parse(Bin) of
+        #{scheme := Scheme, host := Host} = U ->
+            #{scheme => to_bin(Scheme),
+              host => to_bin(Host),
+              port => maps:get(port, U, any)};
+        _ ->
+            #{scheme => undefined, host => Bin, port => any}
+    end.
+
+is_loopback({127, _, _, _}) -> true;
+is_loopback({0, 0, 0, 0, 0, 0, 0, 1}) -> true;
+is_loopback("localhost") -> true;
+is_loopback(<<"localhost">>) -> true;
+is_loopback(_) -> false.
+
+%% Validate the request's `Origin' against the configured allow-list.
+%% Returns `ok' on accept, `{error, Reason}' on reject.
+-spec validate_origin(cowboy_req:req(), map()) ->
+    ok | {error, atom()}.
+validate_origin(Req, State) ->
+    Allowed = maps:get(allowed_origins, State, any),
+    AllowMissing = maps:get(allow_missing_origin, State, true),
+    case cowboy_req:header(<<"origin">>, Req) of
+        undefined when AllowMissing -> ok;
+        undefined -> {error, missing_origin};
+        Origin -> match_origin(Origin, Allowed)
+    end.
+
+match_origin(_Origin, any) -> ok;
+match_origin(<<"null">>, Allowed) ->
+    case lists:member(null, Allowed) of
+        true -> ok;
+        false -> {error, origin_null_not_allowed}
+    end;
+match_origin(Origin, Allowed) ->
+    Parsed = parse_origin(Origin),
+    case lists:any(fun(A) -> origin_matches(A, Parsed) end, Allowed) of
+        true -> ok;
+        false -> {error, origin_not_allowed}
+    end.
+
+origin_matches(null, _) -> false;
+origin_matches(#{scheme := S, host := H, port := P}, Parsed) ->
+    SOk = (S =:= undefined) orelse (S =:= maps:get(scheme, Parsed)),
+    HOk = (H =:= maps:get(host, Parsed)),
+    POk = (P =:= any) orelse (P =:= maps:get(port, Parsed)),
+    SOk andalso HOk andalso POk;
+origin_matches(_, _) -> false.
+
+to_bin(B) when is_binary(B) -> B;
+to_bin(L) when is_list(L) -> iolist_to_binary(L).
 
 %%====================================================================
 %% Utilities

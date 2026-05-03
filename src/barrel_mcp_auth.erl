@@ -67,7 +67,8 @@
     get_auth_info/1,
     extract_bearer_token/1,
     extract_api_key/2,
-    extract_basic_auth/1
+    extract_basic_auth/1,
+    auth_headers/1
 ]).
 
 %% Types
@@ -133,7 +134,13 @@
 -callback challenge(Reason :: auth_error(), State :: term()) ->
     {StatusCode :: integer(), Headers :: map(), Body :: binary()}.
 
--optional_callbacks([init/1]).
+%% Optional: declare which HTTP request headers carry credentials so
+%% the HTTP transport can build the CORS `Access-Control-Allow-Headers'
+%% list and read the right inputs in `extract_headers/1'. Returning
+%% the empty list means "no auth header" (e.g. cookie-based, or none).
+-callback auth_headers(State :: term()) -> [binary()].
+
+-optional_callbacks([init/1, auth_headers/1]).
 
 %%====================================================================
 %% API
@@ -178,6 +185,39 @@ authenticate(#{provider := Provider} = Config, Request, State) ->
 challenge_response(#{provider := Provider} = Config, Reason) ->
     ProviderState = maps:get(provider_state, Config, undefined),
     Provider:challenge(Reason, ProviderState).
+
+%% @doc Return the list of HTTP request headers (lower-case) the
+%% configured provider expects to read credentials from. Used by the
+%% HTTP transport to build CORS `Access-Control-Allow-Headers' and to
+%% extract inputs in the request handler. Falls back to a sensible
+%% default per built-in provider when the provider does not export
+%% `auth_headers/1'.
+-spec auth_headers(auth_config()) -> [binary()].
+auth_headers(#{provider := barrel_mcp_auth_none}) ->
+    [];
+auth_headers(#{provider := Provider} = Config) ->
+    case erlang:function_exported(Provider, auth_headers, 1) of
+        true ->
+            ProviderState = maps:get(provider_state, Config, undefined),
+            Provider:auth_headers(ProviderState);
+        false ->
+            default_auth_headers(Provider, Config)
+    end.
+
+default_auth_headers(barrel_mcp_auth_bearer, _) -> [<<"authorization">>];
+default_auth_headers(barrel_mcp_auth_basic, _)  -> [<<"authorization">>];
+default_auth_headers(barrel_mcp_auth_apikey, Config) ->
+    Opts = maps:get(provider_opts, Config, #{}),
+    Custom = maps:get(header_name, Opts, undefined),
+    Base = [<<"x-api-key">>, <<"authorization">>],
+    case Custom of
+        undefined -> Base;
+        H when is_binary(H) -> [string:lowercase(H) | Base]
+    end;
+default_auth_headers(barrel_mcp_auth_custom, _) ->
+    [<<"authorization">>, <<"x-api-key">>];
+default_auth_headers(_, _) ->
+    [].
 
 %% @doc Get authentication info from a context map.
 %%

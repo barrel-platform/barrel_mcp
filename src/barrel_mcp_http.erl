@@ -38,33 +38,40 @@
 %%====================================================================
 
 %% @doc Start HTTP server for MCP.
+%%
+%% Same security defaults as `barrel_mcp_http_stream':
+%% binds to `127.0.0.1' by default, requires explicit
+%% `allowed_origins' for non-loopback binds.
 -spec start(map()) -> {ok, pid()} | {error, term()}.
 start(Opts) ->
     Port = maps:get(port, Opts, 9090),
-    Ip = maps:get(ip, Opts, {0, 0, 0, 0}),
-
-    %% Initialize authentication
-    AuthConfig = init_auth(maps:get(auth, Opts, #{})),
-
-    %% Handler state includes auth config
-    HandlerState = #{
-        auth_config => AuthConfig
-    },
-
-    Routes = [
-        {'_', [
-            {"/mcp", ?MODULE, HandlerState},
-            {"/", ?MODULE, HandlerState}
-        ]}
-    ],
-    Dispatch = cowboy_router:compile(Routes),
-
-    cowboy:start_clear(?HTTP_LISTENER, [
-        {port, Port},
-        {ip, Ip}
-    ], #{
-        env => #{dispatch => Dispatch}
-    }).
+    Ip = maps:get(ip, Opts, {127, 0, 0, 1}),
+    Loopback = barrel_mcp_http_stream:is_loopback(Ip),
+    case barrel_mcp_http_stream:resolve_allowed_origins(
+           Loopback, maps:get(allowed_origins, Opts, undefined)) of
+        {error, _} = Err -> Err;
+        {ok, AllowedOrigins} ->
+            AllowMissing = maps:get(allow_missing_origin, Opts, Loopback),
+            AuthConfig = init_auth(maps:get(auth, Opts, #{})),
+            HandlerState = #{
+                auth_config => AuthConfig,
+                allowed_origins => AllowedOrigins,
+                allow_missing_origin => AllowMissing
+            },
+            Routes = [
+                {'_', [
+                    {"/mcp", ?MODULE, HandlerState},
+                    {"/", ?MODULE, HandlerState}
+                ]}
+            ],
+            Dispatch = cowboy_router:compile(Routes),
+            cowboy:start_clear(?HTTP_LISTENER, [
+                {port, Port},
+                {ip, Ip}
+            ], #{
+                env => #{dispatch => Dispatch}
+            })
+    end.
 
 %% @doc Stop HTTP server.
 -spec stop() -> ok | {error, not_found}.
@@ -76,19 +83,24 @@ stop() ->
 %%====================================================================
 
 init(Req0, State) ->
-    Method = cowboy_req:method(Req0),
-    case Method of
-        <<"POST">> ->
-            handle_post(Req0, State);
-        <<"OPTIONS">> ->
-            handle_options(Req0, State);
-        _ ->
-            Req = cowboy_req:reply(405, #{
-                <<"content-type">> => <<"application/json">>,
-                <<"allow">> => <<"POST, OPTIONS">>
-            }, <<"{\"error\":\"Method not allowed\"}">>, Req0),
+    case barrel_mcp_http_stream:validate_origin(Req0, State) of
+        ok ->
+            dispatch_method(cowboy_req:method(Req0), Req0, State);
+        {error, _} ->
+            Req = cowboy_req:reply(403, #{}, <<>>, Req0),
             {ok, Req, State}
     end.
+
+dispatch_method(<<"POST">>, Req0, State) ->
+    handle_post(Req0, State);
+dispatch_method(<<"OPTIONS">>, Req0, State) ->
+    handle_options(Req0, State);
+dispatch_method(_, Req0, State) ->
+    Req = cowboy_req:reply(405, #{
+        <<"content-type">> => <<"application/json">>,
+        <<"allow">> => <<"POST, OPTIONS">>
+    }, <<"{\"error\":\"Method not allowed\"}">>, Req0),
+    {ok, Req, State}.
 
 %%====================================================================
 %% Internal Functions
