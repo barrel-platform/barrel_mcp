@@ -115,6 +115,8 @@
     notify_resource_updated/2,
     notify_progress/3,
     notify_progress/4,
+    notify_log/3,
+    notify_log/4,
     notify_list_changed/1
 ]).
 
@@ -796,6 +798,51 @@ notify_progress(SessionId, Token, Progress) ->
 -spec notify_progress(binary(), term(), number(), number() | undefined) -> ok.
 notify_progress(SessionId, Token, Progress, Total) ->
     barrel_mcp_session:notify_progress(SessionId, Token, Progress, Total).
+
+%% @doc Emit `notifications/message' (the MCP server log stream) to a
+%% session. The notification is dropped silently when `Level' is below
+%% the session's configured level (`logging/setLevel'). `Logger' is an
+%% optional component name; pass `undefined' to omit it. `Data' is the
+%% structured payload — typically a string or a map.
+-spec notify_log(binary(), atom() | binary(), term()) -> ok.
+notify_log(SessionId, Level, Data) ->
+    notify_log(SessionId, Level, undefined, Data).
+
+-spec notify_log(binary(), atom() | binary(), binary() | undefined,
+                 term()) -> ok.
+notify_log(SessionId, Level, Logger, Data) ->
+    case barrel_mcp_session:log_level_priority(Level) of
+        error -> ok;  %% invalid level — drop
+        EventPrio ->
+            ConfigPrio = case barrel_mcp_session:get_log_level(SessionId) of
+                {ok, L} -> barrel_mcp_session:log_level_priority(L);
+                _ -> 1  %% default `info'
+            end,
+            case EventPrio >= ConfigPrio of
+                false -> ok;
+                true ->
+                    case barrel_mcp_session:get_sse_pid(SessionId) of
+                        {ok, Pid} when is_pid(Pid) ->
+                            Pid ! {sse_send_message, log_envelope(Level, Logger, Data)},
+                            ok;
+                        _ -> ok
+                    end
+            end
+    end.
+
+log_envelope(Level, Logger, Data) ->
+    LevelBin = level_to_binary(Level),
+    Params0 = #{<<"level">> => LevelBin, <<"data">> => Data},
+    Params = case Logger of
+                 undefined -> Params0;
+                 _ -> Params0#{<<"logger">> => Logger}
+             end,
+    #{<<"jsonrpc">> => <<"2.0">>,
+      <<"method">> => <<"notifications/message">>,
+      <<"params">> => Params}.
+
+level_to_binary(L) when is_atom(L) -> atom_to_binary(L, utf8);
+level_to_binary(L) when is_binary(L) -> L.
 
 %% @doc Push a `notifications/<kind>/list_changed' envelope to every
 %% currently-connected SSE session. Hosts call this when they mutate

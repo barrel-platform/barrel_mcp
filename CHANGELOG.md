@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### `logging/setLevel` actually filters the log stream
+
+- The previous `logging/setLevel` handler was a no-op stub that accepted any payload and returned `{}`. It now validates the requested level against the eight RFC 5424 levels (debug, info, notice, warning, error, critical, alert, emergency), persists the chosen level on the session, and rejects unknown levels with `-32602`.
+- New `barrel_mcp:notify_log/3,4` façade. Emits `notifications/message` to a session and is silently dropped when the event level is below the session's configured level. Default session level is `info`, matching the spec.
+- New helpers `barrel_mcp_session:set_log_level/2`, `get_log_level/1`, `log_level_priority/1`.
+
 ### Server-to-client `roots/list`
 
 - New `barrel_mcp:roots_list/1,2` façade. Sends `roots/list` to the connected client behind a session id and returns the host's roots. Requires the client to have declared `roots` capability in its `initialize' request and an active SSE stream.

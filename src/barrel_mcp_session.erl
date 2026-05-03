@@ -30,6 +30,10 @@
     list_elicitation_capable/0,
     has_roots/1,
     list_roots_capable/0,
+    %% Per-session log level (`logging/setLevel').
+    set_log_level/2,
+    get_log_level/1,
+    log_level_priority/1,
     %% Negotiated protocol version (after `initialize').
     set_protocol_version/2,
     get_protocol_version/1,
@@ -82,8 +86,15 @@
     sse_pid :: pid() | undefined,  %% Process handling SSE stream
     %% Recent SSE events (newest first) for `Last-Event-ID' replay.
     sse_buffer = [] :: [{binary(), map()}],
-    sse_buffer_max = 256 :: pos_integer()
+    sse_buffer_max = 256 :: pos_integer(),
+    %% Per-session log level set by `logging/setLevel'. Default
+    %% `info' per the MCP spec. Filters `notifications/message' on
+    %% emit.
+    log_level = info :: log_level()
 }).
+
+-type log_level() :: debug | info | notice | warning | error
+                   | critical | alert | emergency.
 
 %% Async tool call in-flight tracking.
 -record(in_flight, {
@@ -242,6 +253,63 @@ list_roots_capable() ->
             false -> Acc
         end
     end, [], ?SESSION_TABLE).
+
+%% @doc Set the per-session log level (driven by `logging/setLevel').
+%% `Level' is one of the eight RFC 5424 levels accepted by the MCP
+%% spec; rejects anything else with `{error, invalid_level}'.
+-spec set_log_level(binary(), log_level() | binary()) ->
+    ok | {error, not_found | invalid_level}.
+set_log_level(SessionId, Level) ->
+    case parse_level(Level) of
+        {ok, L} ->
+            gen_server:call(?MODULE, {set_log_level, SessionId, L});
+        error ->
+            {error, invalid_level}
+    end.
+
+%% @doc Read the current log level for a session. Defaults to `info'
+%% before any `logging/setLevel' is received.
+-spec get_log_level(binary()) -> {ok, log_level()} | {error, not_found}.
+get_log_level(SessionId) ->
+    case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, #mcp_session{log_level = L}}] -> {ok, L};
+        [] -> {error, not_found}
+    end.
+
+%% @doc Numeric priority for the eight RFC 5424 levels (debug=0,
+%% emergency=7). Higher = more severe. Used for filtering: a
+%% notification at priority N is delivered iff N >= configured level.
+-spec log_level_priority(log_level() | binary()) -> 0..7 | error.
+log_level_priority(Level) ->
+    case parse_level(Level) of
+        {ok, L} -> level_priority(L);
+        error -> error
+    end.
+
+level_priority(debug)     -> 0;
+level_priority(info)      -> 1;
+level_priority(notice)    -> 2;
+level_priority(warning)   -> 3;
+level_priority(error)     -> 4;
+level_priority(critical)  -> 5;
+level_priority(alert)     -> 6;
+level_priority(emergency) -> 7.
+
+parse_level(L) when is_atom(L) ->
+    case lists:member(L, [debug, info, notice, warning, error,
+                          critical, alert, emergency]) of
+        true -> {ok, L};
+        false -> error
+    end;
+parse_level(<<"debug">>)     -> {ok, debug};
+parse_level(<<"info">>)      -> {ok, info};
+parse_level(<<"notice">>)    -> {ok, notice};
+parse_level(<<"warning">>)   -> {ok, warning};
+parse_level(<<"error">>)     -> {ok, error};
+parse_level(<<"critical">>)  -> {ok, critical};
+parse_level(<<"alert">>)     -> {ok, alert};
+parse_level(<<"emergency">>) -> {ok, emergency};
+parse_level(_)               -> error.
 
 %% @doc Set the SSE process pid for a session.
 -spec set_sse_pid(binary(), pid() | undefined) -> ok | {error, not_found}.
@@ -519,6 +587,16 @@ handle_call({set_client_capabilities, SessionId, Caps}, _From, State) ->
     Reply = case ets:lookup(?SESSION_TABLE, SessionId) of
         [{_, Session}] ->
             Updated = Session#mcp_session{client_capabilities = Caps},
+            true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
+            ok;
+        [] -> {error, not_found}
+    end,
+    {reply, Reply, State};
+
+handle_call({set_log_level, SessionId, Level}, _From, State) ->
+    Reply = case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, Session}] ->
+            Updated = Session#mcp_session{log_level = Level},
             true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
             ok;
         [] -> {error, not_found}

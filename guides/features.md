@@ -98,6 +98,7 @@ Erlang MCP library. See `CHANGELOG.md` for release-by-release detail.
 | --- | --- |
 | `barrel_mcp:notify_resource_updated/1,2` | `notifications/resources/updated` to every subscriber. |
 | `barrel_mcp:notify_progress/3,4` | `notifications/progress` to a session. |
+| `barrel_mcp:notify_log/3,4` | `notifications/message` (server log stream) to a session, filtered against the session's `logging/setLevel`. |
 | `barrel_mcp:notify_list_changed/1` | `notifications/tools/list_changed`, `.../resources/list_changed`, or `.../prompts/list_changed` to every active SSE session. Auto-emitted on `reg_*`/`unreg_*`. |
 | `barrel_mcp:sampling_create_message/3` | Server→client `sampling/createMessage` (requires the client to declare `sampling` capability). |
 | `barrel_mcp:elicit_create/3` | Server→client `elicitation/create` to ask the host for structured user input (requires the client to declare `elicitation` capability). |
