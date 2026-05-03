@@ -170,7 +170,8 @@ handle_request(<<"tools/list">>, _Params, Id, _State) ->
         with_optional_fields(Base, Handler, [
             {<<"outputSchema">>, output_schema},
             {<<"title">>, title},
-            {<<"icons">>, icons}
+            {<<"icons">>, icons},
+            {<<"annotations">>, annotations}
         ])
     end, barrel_mcp_registry:all(tool)),
     success_response(Id, #{<<"tools">> => Tools});
