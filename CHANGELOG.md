@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Long-running tools: spec-shaped CreateTaskResult + CallToolResult on tasks/result
+
+- **Wire change.** `tools/call` for `long_running => true` tools now returns the spec-shaped `CreateTaskResult` envelope `{<<"task">> => Task}` (the full Task object with taskId, status, createdAt, lastUpdatedAt, ttl) instead of the flat `{taskId, status}` shape that was rejected by the reference Python SDK with a pydantic ValidationError. Hosts that previously read `Result.taskId` need to read `Result.task.taskId`.
+- **Wire change.** The task collector now stores tool results as the spec-shaped `CallToolResult` (`{content, structuredContent?}`) instead of the raw value, so `tasks/result` returns a payload that decodes as `CallToolResult` against the reference SDK. Previously `tasks/result` could surface bare strings, which the JSON-RPC envelope validator rejected.
+- Direction A of the Python interop suite now exercises the full long-running flow end-to-end: `experimental.call_tool_as_task` → poll `experimental.get_task` until `completed` → fetch `experimental.get_task_result(..., CallToolResult)`. Both wire shapes above are now validated against `mcp 1.27.0`'s pydantic models on every CI run.
+
 ### Interop coverage: elicitation/create + roots/list
 
 - Direction A now exercises the remaining two server-to-client primitives end-to-end against the reference SDK: a server-side tool calls `barrel_mcp:elicit_create/3` (form-mode payload), the Python `elicitation_callback` returns an `accept` action with a fixed colour, and the tool surfaces that colour as text. Same shape for `roots/list`: a tool calls `barrel_mcp:roots_list/1`, the Python `list_roots_callback` returns one fixed root, and the tool surfaces its name. With sampling already covered, every server-to-client primitive is now wire-validated against the reference implementation on every CI run.

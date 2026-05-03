@@ -197,8 +197,10 @@ long_running_returns_taskid(Config) ->
          {<<"mcp-session-id">>, SessionId}],
         Body, [with_body]),
     Result = maps:get(<<"result">>, json:decode(Resp)),
-    TaskId = maps:get(<<"taskId">>, Result),
-    ?assertEqual(<<"working">>, maps:get(<<"status">>, Result)),
+    %% Spec shape: {task: {taskId, status, ...}}.
+    Task = maps:get(<<"task">>, Result),
+    TaskId = maps:get(<<"taskId">>, Task),
+    ?assertEqual(<<"working">>, maps:get(<<"status">>, Task)),
     %% Wait for the worker to finish.
     timer:sleep(200),
     {ok, 200, _, GetResp} = hackney:request(post, url(Port),
@@ -255,7 +257,7 @@ long_running_cancel_signals_worker(Config) ->
          {<<"mcp-session-id">>, SessionId}],
         call_body(<<"cancellable">>, 31), [with_body]),
     Result = maps:get(<<"result">>, json:decode(RB)),
-    TaskId = maps:get(<<"taskId">>, Result),
+    TaskId = maps:get(<<"taskId">>, maps:get(<<"task">>, Result)),
     %% Cancel the task — the worker should receive a `{cancel, _}'
     %% signal in its mailbox (cooperatively observed by our tool).
     {ok, 200, _, _} = hackney:request(post, url(Port),

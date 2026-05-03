@@ -16,6 +16,7 @@ import traceback
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import (
+    CallToolResult,
     CreateMessageResult,
     ElicitResult,
     ListRootsResult,
@@ -174,6 +175,34 @@ async def run(url: str) -> None:
             ]
             if not text_blocks or text_blocks[0].text != ROOT_NAME:
                 fail(f"roots round-trip failed: {roots_result}")
+
+            # Long-running tool round-trip via experimental.call_tool_as_task.
+            # Validates the CreateTaskResult immediate response shape,
+            # the Task model returned by tasks/get, and that
+            # tasks/result decodes as a CallToolResult.
+            create_result = await session.experimental.call_tool_as_task(
+                "slow_echo", arguments={"text": "from-task"}
+            )
+            task_id = create_result.task.taskId
+
+            # Poll until terminal — slow_echo sleeps 100ms server-side.
+            final = None
+            for _ in range(50):
+                final = await session.experimental.get_task(task_id)
+                if final.status in ("completed", "failed", "cancelled"):
+                    break
+                await asyncio.sleep(0.05)
+            if final is None or final.status != "completed":
+                fail(f"task did not reach completed: {final}")
+
+            payload = await session.experimental.get_task_result(
+                task_id, CallToolResult
+            )
+            payload_text = [
+                b.text for b in payload.content if getattr(b, "text", None)
+            ]
+            if not payload_text or "from-task" not in payload_text[0]:
+                fail(f"tasks/result payload mismatch: {payload}")
 
     print("OK")
 
