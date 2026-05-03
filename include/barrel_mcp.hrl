@@ -16,6 +16,11 @@
 %% Older revisions the client knows how to speak (in preference order).
 -define(MCP_CLIENT_SUPPORTED_VERSIONS,
         [<<"2025-11-25">>, <<"2025-06-18">>, <<"2025-03-26">>, <<"2024-11-05">>]).
+%% Versions the server is willing to accept on the
+%% `MCP-Protocol-Version' request header. Same set as the client list
+%% today; bumping the server's preferred default is a separate change.
+-define(MCP_SUPPORTED_VERSIONS,
+        [<<"2025-11-25">>, <<"2025-06-18">>, <<"2025-03-26">>, <<"2024-11-05">>]).
 
 %% JSON-RPC Error Codes
 -define(JSONRPC_PARSE_ERROR, -32700).

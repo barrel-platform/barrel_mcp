@@ -26,6 +26,9 @@
     set_client_capabilities/2,
     has_sampling/1,
     list_sampling_capable/0,
+    %% Negotiated protocol version (after `initialize').
+    set_protocol_version/2,
+    get_protocol_version/1,
     %% sse_pid management.
     set_sse_pid/2,
     get_sse_pid/1,
@@ -41,6 +44,8 @@
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+
+-include("barrel_mcp.hrl").
 
 -define(SESSION_TABLE, barrel_mcp_sessions).
 -define(SUBSCRIPTIONS_TABLE, barrel_mcp_resource_subs).
@@ -82,19 +87,7 @@ start_link() ->
         protocol_version => binary()
     }.
 create(Opts) ->
-    SessionId = generate_id(),
-    Now = erlang:system_time(millisecond),
-    Session = #mcp_session{
-        id = SessionId,
-        created_at = Now,
-        last_activity = Now,
-        client_info = maps:get(client_info, Opts, #{}),
-        client_capabilities = maps:get(client_capabilities, Opts, #{}),
-        protocol_version = maps:get(protocol_version, Opts, <<"2025-03-26">>),
-        sse_pid = undefined
-    },
-    true = ets:insert(?SESSION_TABLE, {SessionId, Session}),
-    {ok, SessionId}.
+    gen_server:call(?MODULE, {create, Opts}).
 
 %% @doc Get a session by ID.
 -spec get(binary()) -> {ok, map()} | {error, not_found}.
@@ -109,28 +102,12 @@ get(SessionId) ->
 %% @doc Update last activity timestamp.
 -spec update_activity(binary()) -> ok | {error, not_found}.
 update_activity(SessionId) ->
-    case ets:lookup(?SESSION_TABLE, SessionId) of
-        [{_, Session}] ->
-            Now = erlang:system_time(millisecond),
-            Updated = Session#mcp_session{last_activity = Now},
-            true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
-            ok;
-        [] ->
-            {error, not_found}
-    end.
+    gen_server:call(?MODULE, {update_activity, SessionId}).
 
 %% @doc Delete a session.
 -spec delete(binary()) -> ok.
 delete(SessionId) ->
-    %% Notify SSE process if exists
-    case ets:lookup(?SESSION_TABLE, SessionId) of
-        [{_, #mcp_session{sse_pid = Pid}}] when is_pid(Pid) ->
-            Pid ! session_terminated;
-        _ ->
-            ok
-    end,
-    true = ets:delete(?SESSION_TABLE, SessionId),
-    ok.
+    gen_server:call(?MODULE, {delete, SessionId}).
 
 %% @doc Generate a unique session ID.
 -spec generate_id() -> binary().
@@ -150,11 +127,24 @@ list() ->
 %% protocol handler after parsing the `initialize' request.
 -spec set_client_capabilities(binary(), map()) -> ok | {error, not_found}.
 set_client_capabilities(SessionId, Capabilities) when is_map(Capabilities) ->
+    gen_server:call(?MODULE, {set_client_capabilities, SessionId, Capabilities}).
+
+%% @doc Record the negotiated protocol version on a session. Called
+%% by the HTTP transport after a successful `initialize' so later
+%% requests on the same session can fall back to it when the client
+%% omits the `MCP-Protocol-Version' header.
+-spec set_protocol_version(binary(), binary()) -> ok | {error, not_found}.
+set_protocol_version(SessionId, Version) when is_binary(Version) ->
+    gen_server:call(?MODULE, {set_protocol_version, SessionId, Version}).
+
+%% @doc Look up the negotiated protocol version for a session.
+-spec get_protocol_version(binary()) -> {ok, binary()} | {error, not_found}.
+get_protocol_version(SessionId) ->
     case ets:lookup(?SESSION_TABLE, SessionId) of
-        [{_, Session}] ->
-            Updated = Session#mcp_session{client_capabilities = Capabilities},
-            true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
-            ok;
+        [{_, #mcp_session{protocol_version = V}}] when is_binary(V) ->
+            {ok, V};
+        [{_, _}] ->
+            {ok, ?MCP_PROTOCOL_VERSION};
         [] ->
             {error, not_found}
     end.
@@ -183,13 +173,7 @@ list_sampling_capable() ->
 %% @doc Set the SSE process pid for a session.
 -spec set_sse_pid(binary(), pid() | undefined) -> ok | {error, not_found}.
 set_sse_pid(SessionId, Pid) ->
-    case ets:lookup(?SESSION_TABLE, SessionId) of
-        [{_, Session}] ->
-            Updated = Session#mcp_session{sse_pid = Pid},
-            true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
-            ok;
-        [] -> {error, not_found}
-    end.
+    gen_server:call(?MODULE, {set_sse_pid, SessionId, Pid}).
 
 -spec get_sse_pid(binary()) -> {ok, pid()} | {error, not_found | no_sse}.
 get_sse_pid(SessionId) ->
@@ -203,15 +187,11 @@ get_sse_pid(SessionId) ->
 -spec subscribe_resource(binary(), binary()) -> ok.
 subscribe_resource(SessionId, Uri)
         when is_binary(SessionId), is_binary(Uri) ->
-    _ = ensure_subs_table(),
-    true = ets:insert(?SUBSCRIPTIONS_TABLE, {{SessionId, Uri}}),
-    ok.
+    gen_server:call(?MODULE, {subscribe_resource, SessionId, Uri}).
 
 -spec unsubscribe_resource(binary(), binary()) -> ok.
 unsubscribe_resource(SessionId, Uri) ->
-    _ = ensure_subs_table(),
-    true = ets:delete(?SUBSCRIPTIONS_TABLE, {SessionId, Uri}),
-    ok.
+    gen_server:call(?MODULE, {unsubscribe_resource, SessionId, Uri}).
 
 %% @doc Return all session ids that subscribed to a URI.
 -spec subscribers_for(binary()) -> [binary()].
@@ -243,30 +223,24 @@ sampling_create_message(SessionId, Params, Opts) ->
 %% `result' or `error' for a server-initiated id.
 -spec deliver_response(binary() | integer(), map()) -> ok | {error, unknown_id}.
 deliver_response(Id, Response) ->
-    Key = id_to_binary(Id),
-    _ = ensure_pending_table(),
-    case ets:lookup(?PENDING_TABLE, Key) of
-        [{_, #pending{caller = Caller, caller_ref = Ref}}] ->
-            true = ets:delete(?PENDING_TABLE, Key),
-            Caller ! {sampling_response, Ref, Response},
-            ok;
-        [] ->
-            {error, unknown_id}
-    end.
+    gen_server:call(?MODULE, {deliver_response, id_to_binary(Id), Response}).
 
-%% @doc Cleanup sessions older than TTL milliseconds.
+%% @doc Cleanup sessions older than TTL milliseconds. Routes through
+%% the gen_server (the table owner under the new `protected'
+%% visibility); the handler deletes expired entries inline.
 -spec cleanup_expired(pos_integer()) -> non_neg_integer().
 cleanup_expired(TTL) ->
-    Now = erlang:system_time(millisecond),
-    Cutoff = Now - TTL,
-    Expired = ets:foldl(fun({Id, #mcp_session{last_activity = LastActivity}}, Acc) ->
-        case LastActivity < Cutoff of
-            true -> [Id | Acc];
-            false -> Acc
-        end
-    end, [], ?SESSION_TABLE),
-    lists:foreach(fun(Id) -> delete(Id) end, Expired),
-    length(Expired).
+    gen_server:call(?MODULE, {cleanup_expired, TTL}).
+
+%% Inline session delete, only called from inside the gen_server.
+delete_inline(SessionId) ->
+    case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, #mcp_session{sse_pid = Pid}}] when is_pid(Pid) ->
+            Pid ! session_terminated;
+        _ -> ok
+    end,
+    true = ets:delete(?SESSION_TABLE, SessionId),
+    ok.
 
 %%====================================================================
 %% gen_server callbacks
@@ -280,6 +254,110 @@ init([]) ->
     %% Schedule periodic cleanup
     _ = erlang:send_after(?CLEANUP_INTERVAL, self(), cleanup),
     {ok, #{}}.
+
+handle_call({create, Opts}, _From, State) ->
+    SessionId = generate_id(),
+    Now = erlang:system_time(millisecond),
+    Session = #mcp_session{
+        id = SessionId,
+        created_at = Now,
+        last_activity = Now,
+        client_info = maps:get(client_info, Opts, #{}),
+        client_capabilities = maps:get(client_capabilities, Opts, #{}),
+        protocol_version = maps:get(protocol_version, Opts, <<"2025-03-26">>),
+        sse_pid = undefined
+    },
+    true = ets:insert(?SESSION_TABLE, {SessionId, Session}),
+    {reply, {ok, SessionId}, State};
+
+handle_call({update_activity, SessionId}, _From, State) ->
+    Reply = case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, Session}] ->
+            Now = erlang:system_time(millisecond),
+            Updated = Session#mcp_session{last_activity = Now},
+            true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
+            ok;
+        [] ->
+            {error, not_found}
+    end,
+    {reply, Reply, State};
+
+handle_call({delete, SessionId}, _From, State) ->
+    case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, #mcp_session{sse_pid = Pid}}] when is_pid(Pid) ->
+            Pid ! session_terminated;
+        _ -> ok
+    end,
+    true = ets:delete(?SESSION_TABLE, SessionId),
+    {reply, ok, State};
+
+handle_call({set_client_capabilities, SessionId, Caps}, _From, State) ->
+    Reply = case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, Session}] ->
+            Updated = Session#mcp_session{client_capabilities = Caps},
+            true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
+            ok;
+        [] -> {error, not_found}
+    end,
+    {reply, Reply, State};
+
+handle_call({set_protocol_version, SessionId, Version}, _From, State) ->
+    Reply = case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, Session}] ->
+            Updated = Session#mcp_session{protocol_version = Version},
+            true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
+            ok;
+        [] -> {error, not_found}
+    end,
+    {reply, Reply, State};
+
+handle_call({set_sse_pid, SessionId, Pid}, _From, State) ->
+    Reply = case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, Session}] ->
+            Updated = Session#mcp_session{sse_pid = Pid},
+            true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
+            ok;
+        [] -> {error, not_found}
+    end,
+    {reply, Reply, State};
+
+handle_call({subscribe_resource, SessionId, Uri}, _From, State) ->
+    true = ets:insert(?SUBSCRIPTIONS_TABLE, {{SessionId, Uri}}),
+    {reply, ok, State};
+
+handle_call({unsubscribe_resource, SessionId, Uri}, _From, State) ->
+    true = ets:delete(?SUBSCRIPTIONS_TABLE, {SessionId, Uri}),
+    {reply, ok, State};
+
+handle_call({register_pending, RequestId, Pending}, _From, State) ->
+    true = ets:insert(?PENDING_TABLE, {RequestId, Pending}),
+    {reply, ok, State};
+
+handle_call({discard_pending, RequestId}, _From, State) ->
+    true = ets:delete(?PENDING_TABLE, RequestId),
+    {reply, ok, State};
+
+handle_call({deliver_response, Key, Response}, _From, State) ->
+    Reply = case ets:lookup(?PENDING_TABLE, Key) of
+        [{_, #pending{caller = Caller, caller_ref = Ref}}] ->
+            true = ets:delete(?PENDING_TABLE, Key),
+            Caller ! {sampling_response, Ref, Response},
+            ok;
+        [] ->
+            {error, unknown_id}
+    end,
+    {reply, Reply, State};
+
+handle_call({cleanup_expired, TTL}, _From, State) ->
+    Now = erlang:system_time(millisecond),
+    Cutoff = Now - TTL,
+    Expired = ets:foldl(
+        fun({Id, #mcp_session{last_activity = LA}}, Acc)
+              when LA < Cutoff -> [Id | Acc];
+           (_, Acc) -> Acc
+        end, [], ?SESSION_TABLE),
+    lists:foreach(fun delete_inline/1, Expired),
+    {reply, length(Expired), State};
 
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
@@ -337,7 +415,7 @@ ensure_session_table() ->
     case ets:whereis(?SESSION_TABLE) of
         undefined ->
             ets:new(?SESSION_TABLE, [
-                named_table, public, set,
+                named_table, protected, set,
                 {read_concurrency, true},
                 {write_concurrency, true}
             ]);
@@ -348,7 +426,7 @@ ensure_subs_table() ->
     case ets:whereis(?SUBSCRIPTIONS_TABLE) of
         undefined ->
             ets:new(?SUBSCRIPTIONS_TABLE, [
-                named_table, public, set,
+                named_table, protected, set,
                 {read_concurrency, true}
             ]);
         _ -> ok
@@ -358,7 +436,7 @@ ensure_pending_table() ->
     case ets:whereis(?PENDING_TABLE) of
         undefined ->
             ets:new(?PENDING_TABLE, [
-                named_table, public, set,
+                named_table, protected, set,
                 {read_concurrency, true}
             ]);
         _ -> ok
@@ -368,15 +446,14 @@ do_sampling(SessionId, SsePid, Params, Opts) ->
     Timeout = maps:get(timeout_ms, Opts, ?DEFAULT_SAMPLING_TIMEOUT),
     RequestId = generate_request_id(),
     Ref = make_ref(),
-    Pending = #pending{
-        id = RequestId,
-        session_id = SessionId,
-        caller = self(),
-        caller_ref = Ref,
-        expires_at = erlang:system_time(millisecond) + Timeout
-    },
-    _ = ensure_pending_table(),
-    true = ets:insert(?PENDING_TABLE, {RequestId, Pending}),
+    ok = gen_server:call(?MODULE,
+        {register_pending, RequestId, #pending{
+            id = RequestId,
+            session_id = SessionId,
+            caller = self(),
+            caller_ref = Ref,
+            expires_at = erlang:system_time(millisecond) + Timeout
+        }}),
     Request = #{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => RequestId,
@@ -391,7 +468,7 @@ do_sampling(SessionId, SsePid, Params, Opts) ->
         {sampling_response, Ref, #{<<"error">> := Err}} ->
             {error, {client_error, Err}}
     after Timeout ->
-        true = ets:delete(?PENDING_TABLE, RequestId),
+        _ = gen_server:call(?MODULE, {discard_pending, RequestId}),
         {error, timeout}
     end.
 

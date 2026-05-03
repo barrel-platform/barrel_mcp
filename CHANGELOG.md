@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security and spec conformance (Streamable HTTP + JSON-RPC)
+
+- **Origin validation.** Streamable HTTP and the legacy `barrel_mcp_http` now validate the `Origin` header on POST/GET/DELETE/OPTIONS using `uri_string:parse/1` (structural scheme/host/port match — no binary prefix matching). New options `allowed_origins` and `allow_missing_origin`. The literal `Origin: null` value is treated as a distinct present origin and is rejected unless explicitly allowed.
+- **Default bind to loopback.** Both transports default to `{127, 0, 0, 1}`. Public binds require an explicit `allowed_origins`; the start function refuses with `{error, allowed_origins_required}` otherwise.
+- **CORS tightening.** `Access-Control-Allow-Origin` now echoes the validated `Origin` (no wildcard) with `Vary: Origin`, and is omitted entirely when no `Origin` is sent. The `Access-Control-Allow-Headers` allow-list is derived from the configured auth provider via a new optional `auth_headers/1` callback on `barrel_mcp_auth`. Custom API-key header names are honoured both in CORS and in `extract_headers`.
+- **Streamable HTTP response shape.** Notifications and POSTed responses to server-initiated requests now return **202 Accepted** with empty body. Missing `Mcp-Session-Id` on a non-initialize request returns **400 Bad Request**; unknown/invalid id returns **404 Not Found**. `initialize` is the only request that may run without a session.
+- **`MCP-Protocol-Version` server validation.** Present-but-unsupported header → 400 with the supported list. Missing header on a session that has completed initialize falls back to the session-stored negotiated version. Pre-init / no session falls back to `2025-03-26` per spec compatibility guidance. New `?MCP_SUPPORTED_VERSIONS` macro.
+- **JSON-RPC id strictness.** `barrel_mcp_protocol:handle/2` and `decode_envelope/1` now reject ids that are not `binary` or `integer` (including `null`) with `-32600 Invalid Request`.
+- **Batch rejection.** Top-level JSON arrays are explicitly rejected with `-32600 Batch requests are not supported` at both the HTTP boundary and inside `handle/2`.
+- **ETS visibility.** `barrel_mcp_sessions`, `barrel_mcp_resource_subs`, and `barrel_mcp_pending_requests` are now `protected`. Every public mutator on `barrel_mcp_session` (create, update_activity, delete, set_client_capabilities, set_protocol_version, set_sse_pid, subscribe_resource, unsubscribe_resource, deliver_response, cleanup_expired) routes through the gen_server.
+- New `test/barrel_mcp_http_stream_security_SUITE.erl` covers Origin matching, session lookup, version validation, response shape, batch / id strictness, and ETS protection.
+
 ### Added
 
 - **Spec-conformant MCP client** (`barrel_mcp_client`)

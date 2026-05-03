@@ -31,8 +31,10 @@
 %% API
 %%====================================================================
 
-%% @doc Decode a JSON-RPC request.
--spec decode(binary()) -> {ok, map()} | {error, term()}.
+%% @doc Decode a JSON-RPC request body. The spec includes `list()'
+%% in the success type so the HTTP transport can detect (and reject)
+%% JSON-RPC batches.
+-spec decode(binary()) -> {ok, map() | list()} | {error, term()}.
 decode(Binary) ->
     try
         {ok, json:decode(Binary)}
@@ -52,20 +54,30 @@ handle(Request) ->
     handle(Request, #{}).
 
 %% @doc Handle a JSON-RPC request with state.
--spec handle(map(), map()) -> map() | no_response.
+%%
+%% MCP forbids JSON-RPC batches (a top-level JSON array) — they are
+%% rejected here with `Invalid Request' so non-HTTP callers see the
+%% same error as the HTTP transport.
+-spec handle(map() | list(), map()) -> map() | no_response.
+handle(L, _State) when is_list(L) ->
+    error_response(null, ?JSONRPC_INVALID_REQUEST,
+                   <<"Batch requests are not supported">>);
 handle(#{<<"jsonrpc">> := <<"2.0">>, <<"method">> := Method} = Request, State) ->
-    Id = maps:get(<<"id">>, Request, undefined),
     Params = maps:get(<<"params">>, Request, #{}),
-    case Id of
-        undefined ->
-            %% Notification - no response expected
+    case maps:find(<<"id">>, Request) of
+        error ->
+            %% No id: this is a notification — no response.
             handle_notification(Method, Params, State),
             no_response;
-        _ ->
-            %% Request - response required
-            handle_request(Method, Params, Id, State)
+        {ok, Id} when is_binary(Id); is_integer(Id) ->
+            handle_request(Method, Params, Id, State);
+        {ok, _BadId} ->
+            %% MCP requires id to be a string or integer (and not
+            %% null). Anything else is an Invalid Request.
+            error_response(null, ?JSONRPC_INVALID_REQUEST,
+                           <<"Invalid Request: id must be a string or integer">>)
     end;
-handle(#{<<"id">> := Id}, _State) ->
+handle(#{<<"id">> := Id}, _State) when is_binary(Id); is_integer(Id) ->
     error_response(Id, ?JSONRPC_INVALID_REQUEST, <<"Invalid Request">>);
 handle(_, _State) ->
     error_response(null, ?JSONRPC_INVALID_REQUEST, <<"Invalid Request">>).
@@ -351,22 +363,33 @@ encode_error(Id, Code, Message) ->
     {response, Id :: term(), Result :: term()} |
     {error, Id :: term(), Code :: integer(), Message :: binary(), Data :: term()} |
     {invalid, term()}.
+decode_envelope(L) when is_list(L) ->
+    {invalid, batch_unsupported};
 decode_envelope(#{<<"jsonrpc">> := <<"2.0">>} = Msg) ->
     case {maps:find(<<"method">>, Msg),
           maps:find(<<"id">>, Msg),
           maps:find(<<"result">>, Msg),
           maps:find(<<"error">>, Msg)} of
-        {{ok, Method}, {ok, Id}, error, error} ->
+        {{ok, Method}, {ok, Id}, error, error}
+                when is_binary(Id) orelse is_integer(Id) ->
             {request, Id, Method, maps:get(<<"params">>, Msg, #{})};
+        {{ok, _Method}, {ok, _BadId}, error, error} ->
+            {invalid, bad_id};
         {{ok, Method}, error, error, error} ->
             {notification, Method, maps:get(<<"params">>, Msg, #{})};
-        {error, {ok, Id}, {ok, Result}, error} ->
+        {error, {ok, Id}, {ok, Result}, error}
+                when is_binary(Id) orelse is_integer(Id) ->
             {response, Id, Result};
-        {error, {ok, Id}, error, {ok, Err}} ->
+        {error, {ok, _BadId}, {ok, _Result}, error} ->
+            {invalid, bad_id};
+        {error, {ok, Id}, error, {ok, Err}}
+                when is_binary(Id) orelse is_integer(Id) ->
             Code = maps:get(<<"code">>, Err, ?JSONRPC_INTERNAL_ERROR),
             Message = maps:get(<<"message">>, Err, <<>>),
             Data = maps:get(<<"data">>, Err, undefined),
             {error, Id, Code, Message, Data};
+        {error, {ok, _BadId}, error, {ok, _Err}} ->
+            {invalid, bad_id};
         _ ->
             {invalid, malformed}
     end;
