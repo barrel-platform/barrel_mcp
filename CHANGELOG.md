@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Interop assertions tightened to value level
+
+- Direction A's `list_tools`, `list_resources`, `read_resource`, `list_prompts`, `get_prompt`, `list_resource_templates`, and `complete` now assert the actual field values returned by the Erlang server (descriptions, mime types, prompt argument names, content text, completion suggestions) instead of just presence checks. Same for Direction B against the Python FastMCP server.
+
 ### Interop coverage: full feature surface
 
 Direction A (Python client → Erlang server) now exercises every wire surface defined by the MCP spec:

@@ -106,9 +106,17 @@ async def run(url: str) -> None:
             await session.initialize()
 
             tools = await session.list_tools()
-            names = [t.name for t in tools.tools]
-            if EXPECTED_TOOL not in names:
-                fail(f"echo tool missing from list_tools: {names}")
+            tool_by_name = {t.name: t for t in tools.tools}
+            if EXPECTED_TOOL not in tool_by_name:
+                fail(
+                    f"echo tool missing from list_tools: "
+                    f"{list(tool_by_name)}"
+                )
+            echo_tool = tool_by_name[EXPECTED_TOOL]
+            if echo_tool.description != "Echo a string":
+                fail(f"echo description wrong: {echo_tool.description!r}")
+            if "text" not in (echo_tool.inputSchema.get("required") or []):
+                fail(f"echo input schema lost `text`: {echo_tool.inputSchema}")
 
             result = await session.call_tool(
                 EXPECTED_TOOL, arguments={"text": "hello"}
@@ -120,18 +128,34 @@ async def run(url: str) -> None:
                 fail(f"echo did not round-trip: {text_blocks[0].text!r}")
 
             resources = await session.list_resources()
-            uris = [str(r.uri) for r in resources.resources]
-            if EXPECTED_RESOURCE_URI not in uris:
-                fail(f"sample resource missing from list_resources: {uris}")
+            res_by_uri = {str(r.uri): r for r in resources.resources}
+            if EXPECTED_RESOURCE_URI not in res_by_uri:
+                fail(f"sample resource missing: {list(res_by_uri)}")
+            sample_res = res_by_uri[EXPECTED_RESOURCE_URI]
+            if sample_res.name != "Greeting":
+                fail(f"resource name wrong: {sample_res.name!r}")
+            if sample_res.mimeType != "text/plain":
+                fail(f"resource mimeType wrong: {sample_res.mimeType!r}")
 
             read_result = await session.read_resource(EXPECTED_RESOURCE_URI)
             if not read_result.contents:
                 fail("read_resource returned empty contents")
+            block = read_result.contents[0]
+            if getattr(block, "text", None) != "hello, world":
+                fail(f"read_resource text mismatch: {block!r}")
+            if str(block.uri) != EXPECTED_RESOURCE_URI:
+                fail(f"read_resource uri mismatch: {block.uri!r}")
 
             prompts = await session.list_prompts()
-            prompt_names = [p.name for p in prompts.prompts]
-            if EXPECTED_PROMPT not in prompt_names:
-                fail(f"sample prompt missing from list_prompts: {prompt_names}")
+            prompt_by_name = {p.name: p for p in prompts.prompts}
+            if EXPECTED_PROMPT not in prompt_by_name:
+                fail(f"sample prompt missing: {list(prompt_by_name)}")
+            sample_prompt = prompt_by_name[EXPECTED_PROMPT]
+            if not sample_prompt.arguments:
+                fail(f"prompt has no arguments declared: {sample_prompt}")
+            arg_names = [a.name for a in sample_prompt.arguments]
+            if "who" not in arg_names:
+                fail(f"prompt missing `who` argument: {arg_names}")
 
             await session.set_logging_level("warning")
 
@@ -145,26 +169,36 @@ async def run(url: str) -> None:
             prompt_result = await session.get_prompt(
                 EXPECTED_PROMPT, arguments={"who": "interop"}
             )
-            if not prompt_result.messages:
-                fail(f"get_prompt returned no messages: {prompt_result}")
+            if len(prompt_result.messages) != 1:
+                fail(f"get_prompt expected 1 message: {prompt_result}")
+            msg = prompt_result.messages[0]
+            if msg.role != "user":
+                fail(f"prompt message role wrong: {msg.role!r}")
+            if getattr(msg.content, "text", None) != "hello, interop":
+                fail(f"prompt message text mismatch: {msg.content!r}")
 
             # resources/templates/list — registered fixture has one
             # template (`file:///{path}`).
             templates = await session.list_resource_templates()
-            template_uris = [
-                t.uriTemplate for t in templates.resourceTemplates
-            ]
-            if "file:///{path}" not in template_uris:
-                fail(f"resource template missing: {template_uris}")
+            tmpl_by_uri = {
+                t.uriTemplate: t for t in templates.resourceTemplates
+            }
+            if "file:///{path}" not in tmpl_by_uri:
+                fail(f"resource template missing: {list(tmpl_by_uri)}")
+            tmpl = tmpl_by_uri["file:///{path}"]
+            if tmpl.name != "File":
+                fail(f"template name wrong: {tmpl.name!r}")
 
             # completion/complete — registered for prompt
-            # `hello_prompt` argument `who`.
+            # `hello_prompt` argument `who`. The Erlang fixture
+            # returns ["world", "world!"].
             comp = await session.complete(
                 ref={"type": "ref/prompt", "name": EXPECTED_PROMPT},
                 argument={"name": "who", "value": "wo"},
             )
-            if not comp.completion.values:
-                fail(f"completion returned no values: {comp}")
+            values = comp.completion.values
+            if values != ["world", "world!"]:
+                fail(f"completion values mismatch: {values}")
 
             # Tool returning structuredContent.
             structured_result = await session.call_tool(

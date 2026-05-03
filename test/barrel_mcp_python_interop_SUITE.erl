@@ -113,8 +113,8 @@ erlang_client_against_python_server(Config) ->
     ?assert(lists:member(<<"mem://greeting">>, ResUris)),
     {ok, ReadRes} = barrel_mcp_client:read_resource(
                        Pid, <<"mem://greeting">>),
-    Contents = maps:get(<<"contents">>, ReadRes),
-    ?assert(is_list(Contents) andalso Contents =/= []),
+    [Block | _] = maps:get(<<"contents">>, ReadRes),
+    ?assertEqual(<<"hello, world">>, maps:get(<<"text">>, Block)),
 
     %% prompts/list + prompts/get
     {ok, Prompts} = barrel_mcp_client:list_prompts(Pid),
@@ -123,8 +123,11 @@ erlang_client_against_python_server(Config) ->
     {ok, PromptResult} = barrel_mcp_client:get_prompt(
                             Pid, <<"hello_prompt">>,
                             #{<<"who">> => <<"interop">>}),
-    PromptMsgs = maps:get(<<"messages">>, PromptResult),
-    ?assert(is_list(PromptMsgs) andalso PromptMsgs =/= []),
+    [PromptMsg | _] = maps:get(<<"messages">>, PromptResult),
+    ?assertEqual(<<"user">>, maps:get(<<"role">>, PromptMsg)),
+    %% Python FastMCP wraps the message text under content.text.
+    Content = maps:get(<<"content">>, PromptMsg),
+    ?assertEqual(<<"hello, interop">>, maps:get(<<"text">>, Content)),
 
     %% ping
     {ok, _} = barrel_mcp_client:ping(Pid),
