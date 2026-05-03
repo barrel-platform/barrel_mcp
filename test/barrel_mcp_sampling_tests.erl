@@ -296,6 +296,83 @@ test_roots_timeout() ->
     exit(Pid, kill).
 
 %% ============================================================================
+%% logging/setLevel + notify_log filtering
+%% ============================================================================
+
+logging_test_() ->
+    {setup, fun setup/0, fun teardown/1, fun(_) ->
+        [
+            {"default level is info",
+             fun test_default_log_level/0},
+            {"set_log_level rejects invalid level",
+             fun test_set_log_level_invalid/0},
+            {"notify_log delivers >= configured level",
+             fun test_notify_log_at_or_above/0},
+            {"notify_log drops below configured level",
+             fun test_notify_log_below/0},
+            {"unknown level passed to notify_log is dropped",
+             fun test_notify_log_invalid_dropped/0}
+        ]
+    end}.
+
+test_default_log_level() ->
+    {ok, S1} = barrel_mcp_session:create(#{}),
+    ?assertEqual({ok, info}, barrel_mcp_session:get_log_level(S1)).
+
+test_set_log_level_invalid() ->
+    {ok, S1} = barrel_mcp_session:create(#{}),
+    ?assertEqual({error, invalid_level},
+                 barrel_mcp_session:set_log_level(S1, <<"verbose">>)),
+    ?assertEqual({ok, info}, barrel_mcp_session:get_log_level(S1)),
+    ok = barrel_mcp_session:set_log_level(S1, <<"warning">>),
+    ?assertEqual({ok, warning},
+                 barrel_mcp_session:get_log_level(S1)).
+
+test_notify_log_at_or_above() ->
+    {ok, S1} = barrel_mcp_session:create(#{}),
+    Self = self(),
+    Pid = spawn(fun() -> capture_loop(Self) end),
+    ok = barrel_mcp_session:set_sse_pid(S1, Pid),
+    ok = barrel_mcp_session:set_log_level(S1, <<"warning">>),
+    ok = barrel_mcp:notify_log(S1, error, <<"boom">>),
+    receive
+        {captured, {sse_send_message, Msg}} ->
+            ?assertEqual(<<"notifications/message">>,
+                         maps:get(<<"method">>, Msg)),
+            Params = maps:get(<<"params">>, Msg),
+            ?assertEqual(<<"error">>, maps:get(<<"level">>, Params)),
+            ?assertEqual(<<"boom">>, maps:get(<<"data">>, Params))
+    after 1000 -> ?assert(false)
+    end,
+    exit(Pid, kill).
+
+test_notify_log_below() ->
+    {ok, S1} = barrel_mcp_session:create(#{}),
+    Self = self(),
+    Pid = spawn(fun() -> capture_loop(Self) end),
+    ok = barrel_mcp_session:set_sse_pid(S1, Pid),
+    ok = barrel_mcp_session:set_log_level(S1, <<"warning">>),
+    ok = barrel_mcp:notify_log(S1, debug, <<"chatter">>),
+    receive
+        {captured, _} -> ?assert(false)
+    after 200 -> ok
+    end,
+    exit(Pid, kill).
+
+test_notify_log_invalid_dropped() ->
+    {ok, S1} = barrel_mcp_session:create(#{}),
+    Self = self(),
+    Pid = spawn(fun() -> capture_loop(Self) end),
+    ok = barrel_mcp_session:set_sse_pid(S1, Pid),
+    ?assertEqual(ok,
+                 barrel_mcp:notify_log(S1, <<"verbose">>, <<"x">>)),
+    receive
+        {captured, _} -> ?assert(false)
+    after 200 -> ok
+    end,
+    exit(Pid, kill).
+
+%% ============================================================================
 %% Helpers
 %% ============================================================================
 

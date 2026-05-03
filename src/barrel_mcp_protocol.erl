@@ -380,8 +380,40 @@ handle_request(<<"completion/complete">>, Params, Id, _State) ->
     end;
 
 %% Logging
-handle_request(<<"logging/setLevel">>, _Params, Id, _State) ->
-    success_response(Id, #{});
+handle_request(<<"logging/setLevel">>, Params, Id, State) ->
+    Level = maps:get(<<"level">>, Params, undefined),
+    case {Level, maps:find(session_id, State)} of
+        {undefined, _} ->
+            error_response(Id, ?JSONRPC_INVALID_PARAMS,
+                           <<"Missing required parameter: level">>);
+        {_, error} ->
+            %% Stdio / no session — accept but no per-session storage.
+            case barrel_mcp_session:log_level_priority(Level) of
+                error ->
+                    error_response(Id, ?JSONRPC_INVALID_PARAMS,
+                                   <<"Invalid log level">>);
+                _ ->
+                    success_response(Id, #{})
+            end;
+        {_, {ok, undefined}} ->
+            case barrel_mcp_session:log_level_priority(Level) of
+                error ->
+                    error_response(Id, ?JSONRPC_INVALID_PARAMS,
+                                   <<"Invalid log level">>);
+                _ ->
+                    success_response(Id, #{})
+            end;
+        {_, {ok, SessionId}} ->
+            case barrel_mcp_session:set_log_level(SessionId, Level) of
+                ok ->
+                    success_response(Id, #{});
+                {error, invalid_level} ->
+                    error_response(Id, ?JSONRPC_INVALID_PARAMS,
+                                   <<"Invalid log level">>);
+                {error, not_found} ->
+                    success_response(Id, #{})
+            end
+    end;
 
 %% Unknown method
 handle_request(Method, _Params, Id, _State) ->
