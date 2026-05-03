@@ -37,7 +37,12 @@
     id :: binary(),
     session_id :: binary() | undefined,
     method :: binary(),
-    status :: running | success | error | cancelled,
+    %% Spec vocabulary (MCP 2025-11-25):
+    %%   submitted | working | completed | failed | cancelled
+    %% We don't model `submitted' today (workers start immediately),
+    %% so the initial state is `working' and terminal states are
+    %% `completed', `failed', `cancelled'.
+    status :: working | completed | failed | cancelled,
     result :: term(),
     error :: term(),
     created_at :: integer(),
@@ -116,7 +121,7 @@ handle_call({create, SessionId, Method}, _From, State) ->
     TaskId = generate_id(),
     Task = #task{
         id = TaskId, session_id = SessionId, method = Method,
-        status = running, created_at = Now, updated_at = Now
+        status = working, created_at = Now, updated_at = Now
     },
     true = ets:insert(?TABLE, {{SessionId, TaskId}, Task}),
     notify_changed(SessionId, Task),
@@ -150,10 +155,10 @@ handle_call({set_worker, SessionId, TaskId, Info}, _From, State) ->
     end,
     {reply, Reply, State};
 handle_call({finish, SessionId, TaskId, Result}, _From, State) ->
-    Reply = transition(SessionId, TaskId, success, Result, undefined),
+    Reply = transition(SessionId, TaskId, completed, Result, undefined),
     {reply, Reply, State};
 handle_call({fail, SessionId, TaskId, Reason}, _From, State) ->
-    Reply = transition(SessionId, TaskId, error, undefined, Reason),
+    Reply = transition(SessionId, TaskId, failed, undefined, Reason),
     {reply, Reply, State};
 handle_call(_, _, State) ->
     {reply, {error, unknown_request}, State}.
@@ -164,7 +169,7 @@ handle_info(sweep, State) ->
     Now = erlang:system_time(millisecond),
     Cutoff = Now - ?TASK_TTL,
     Drop = ets:foldl(fun
-        ({_, #task{status = running}}, Acc) -> Acc;
+        ({_, #task{status = working}}, Acc) -> Acc;
         ({Key, #task{updated_at = U}}, Acc) when U < Cutoff -> [Key | Acc];
         (_, Acc) -> Acc
     end, [], ?TABLE),
@@ -194,7 +199,7 @@ generate_id() ->
 
 transition(SessionId, TaskId, Status, Result, Reason) ->
     case ets:lookup(?TABLE, {SessionId, TaskId}) of
-        [{_, #task{status = running} = Task}] ->
+        [{_, #task{status = working} = Task}] ->
             Now = erlang:system_time(millisecond),
             Updated = Task#task{
                 status = Status, result = Result, error = Reason,
@@ -230,20 +235,26 @@ task_to_map(#task{id = Id, session_id = Sid, method = M, status = St,
         <<"taskId">> => Id,
         <<"method">> => M,
         <<"status">> => atom_to_binary(St, utf8),
-        <<"createdAt">> => C,
-        <<"updatedAt">> => U
+        <<"createdAt">> => to_rfc3339(C),
+        <<"updatedAt">> => to_rfc3339(U)
     },
     Base1 = case Sid of undefined -> Base;
                        _ -> Base#{<<"sessionId">> => Sid} end,
-    Base2 = case St =:= success of
+    Base2 = case St =:= completed of
                 true when R =/= undefined -> Base1#{<<"result">> => R};
                 _ -> Base1
             end,
-    case St =:= error of
+    case St =:= failed of
         true when E =/= undefined ->
             Base2#{<<"error">> => format_error(E)};
         _ -> Base2
     end.
+
+to_rfc3339(Ms) when is_integer(Ms) ->
+    iolist_to_binary(
+      calendar:system_time_to_rfc3339(Ms,
+                                      [{unit, millisecond},
+                                       {offset, "Z"}])).
 
 format_error(B) when is_binary(B) -> B;
 format_error(T) -> iolist_to_binary(io_lib:format("~p", [T])).

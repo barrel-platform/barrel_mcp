@@ -482,14 +482,16 @@ as at least one completion handler is registered.
 ## Tasks (long-running operations)
 
 The `barrel_mcp_tasks` module backs the `tasks/list`, `tasks/get`,
-and `tasks/cancel` MCP methods, plus the
+`tasks/cancel`, and `tasks/result` MCP methods, plus the
 `notifications/tasks/changed` notifications.
 
 You don't usually call this module directly: registering a tool
 with `long_running => true` (see above) wires the lifecycle for
 you. The collector process records the worker's eventual outcome
-as a task transition (`running` → `success | error | cancelled`)
+as a task transition (`working` → `completed | failed | cancelled`)
 and emits the matching notification on the session's SSE channel.
+Status values match the MCP 2025-11-25 wire vocabulary, and
+`createdAt` / `updatedAt` are emitted as RFC 3339 strings.
 
 Hosts that drive their own long-running operations outside the
 tool path can use the public API:
@@ -501,7 +503,7 @@ ok = barrel_mcp_tasks:finish(SessionId, TaskId, #{<<"reindexed">> => 12000}).
 ```
 
 Tasks are evicted from memory one hour after they reach a terminal
-state (success / error / cancelled).
+state (completed / failed / cancelled).
 
 ## Server → client notifications
 

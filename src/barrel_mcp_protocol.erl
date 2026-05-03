@@ -138,7 +138,13 @@ handle_request(<<"initialize">>, Params, Id, State) ->
                               <<"listChanged">> => true},
         <<"prompts">> => #{<<"listChanged">> => true},
         <<"logging">> => #{},
-        <<"tasks">> => #{<<"listChanged">> => true}
+        <<"tasks">> => #{
+            <<"list">> => true,
+            <<"get">> => true,
+            <<"cancel">> => true,
+            <<"result">> => true,
+            <<"listChanged">> => true
+        }
     },
     Caps = maybe_advertise_completions(BaseCaps),
     success_response(Id, #{
@@ -324,6 +330,26 @@ handle_request(<<"tasks/cancel">>, Params, Id, State) ->
     TaskId = maps:get(<<"taskId">>, Params, <<>>),
     case barrel_mcp_tasks:cancel(SessionId, TaskId) of
         ok -> success_response(Id, #{});
+        {error, not_found} ->
+            error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
+    end;
+
+handle_request(<<"tasks/result">>, Params, Id, State) ->
+    SessionId = maps:get(session_id, State, undefined),
+    TaskId = maps:get(<<"taskId">>, Params, <<>>),
+    case barrel_mcp_tasks:get(SessionId, TaskId) of
+        {ok, #{<<"status">> := <<"completed">>} = T} ->
+            Result = maps:get(<<"result">>, T, #{}),
+            success_response(Id, Result);
+        {ok, #{<<"status">> := <<"failed">>} = T} ->
+            Err = maps:get(<<"error">>, T, <<"Task failed">>),
+            error_response(Id, ?MCP_TOOL_ERROR, Err);
+        {ok, #{<<"status">> := <<"cancelled">>}} ->
+            error_response(Id, ?JSONRPC_INVALID_PARAMS,
+                           <<"Task cancelled">>);
+        {ok, #{<<"status">> := _}} ->
+            error_response(Id, ?JSONRPC_INVALID_PARAMS,
+                           <<"Task not yet complete">>);
         {error, not_found} ->
             error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
     end;

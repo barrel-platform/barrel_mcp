@@ -123,7 +123,10 @@ by the spec.
   `resources/templates/list`, `resources/subscribe`,
   `resources/unsubscribe`, `prompts/list`, `prompts/get`,
   `completion/complete`, `logging/setLevel`, `ping`,
-  `tasks/list`, `tasks/get`, `tasks/cancel`.
+  `tasks/list`, `tasks/get`, `tasks/cancel`, `tasks/result`.
+- Task statuses on the wire: `working`, `completed`, `failed`,
+  `cancelled`. Task timestamps (`createdAt`, `updatedAt`) are
+  RFC 3339 strings.
 - Pagination via `cursor` / `nextCursor`. Single page by default
   (`want_cursor => true` to follow paging by hand). The sugar helpers
   `list_tools_all/1`, `list_resources_all/1`,

@@ -198,7 +198,7 @@ long_running_returns_taskid(Config) ->
         Body, [with_body]),
     Result = maps:get(<<"result">>, json:decode(Resp)),
     TaskId = maps:get(<<"taskId">>, Result),
-    ?assertEqual(<<"running">>, maps:get(<<"status">>, Result)),
+    ?assertEqual(<<"working">>, maps:get(<<"status">>, Result)),
     %% Wait for the worker to finish.
     timer:sleep(200),
     {ok, 200, _, GetResp} = hackney:request(post, url(Port),
@@ -210,7 +210,24 @@ long_running_returns_taskid(Config) ->
                       <<"params">> => #{<<"taskId">> => TaskId}}),
         [with_body]),
     GetResult = maps:get(<<"result">>, json:decode(GetResp)),
-    ?assertEqual(<<"success">>, maps:get(<<"status">>, GetResult)),
+    ?assertEqual(<<"completed">>, maps:get(<<"status">>, GetResult)),
+    %% Timestamps are RFC 3339 strings now, not integers.
+    ?assert(is_binary(maps:get(<<"createdAt">>, GetResult))),
+    ?assert(is_binary(maps:get(<<"updatedAt">>, GetResult))),
+    %% tasks/result returns the final payload.
+    {ok, 200, _, ResultResp} = hackney:request(post, url(Port),
+        [{<<"content-type">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
+         {<<"mcp-session-id">>, SessionId}],
+        json:encode(#{<<"jsonrpc">> => <<"2.0">>, <<"id">> => 11,
+                      <<"method">> => <<"tasks/result">>,
+                      <<"params">> => #{<<"taskId">> => TaskId}}),
+        [with_body]),
+    ResultPayload = maps:get(<<"result">>, json:decode(ResultResp)),
+    %% The long_tool returned <<"done">>; the result map is whatever
+    %% the registry stored — it may be wrapped further by the
+    %% collector. Just assert we got a non-error response.
+    ?assert(is_map(ResultPayload) orelse is_binary(ResultPayload)),
     ok = barrel_mcp_registry:unreg(tool, <<"long">>),
     ok.
 
