@@ -235,10 +235,24 @@ case barrel_mcp_schema:validate(Args, ToolInputSchema) of
 end.
 ```
 
-### Roadmap
+### Notes on past roadmap items
 
-- Periodic deadline timer for in-flight requests beyond the per-call
-  timeout (today timeouts fire only when configured per-request).
-- Client-side `Last-Event-ID` resume (server-side replay is shipped;
-  client transport tracks the last id but does not yet replay on
-  reconnect from its own state).
+- *Periodic deadline timer.* Earlier docs flagged a missing
+  global sweep for in-flight requests with `infinity` timeout.
+  In practice the client applies `?DEFAULT_REQUEST_TIMEOUT`
+  (30s) per request unless the caller explicitly passes
+  `timeout => infinity`, so the default loop is already
+  time-bounded. Overriding an explicit `infinity` from a
+  background sweep would surprise callers who deliberately
+  disabled the deadline; the per-request timer is the right
+  hook.
+
+- *Client-side `Last-Event-ID` resume.* Earlier docs said the
+  transport tracked the id but did not replay on reconnect.
+  This actually does work today within the transport process
+  lifetime: `handle_sse_done` schedules `reopen_sse` which
+  preserves `sse_last_event_id`, and `start_get_sse` re-adds
+  the `last-event-id` header on the new GET. A full client
+  restart (gen_statem crash) does lose the cursor, but that
+  flow re-initializes the session anyway, so a fresh stream
+  is the correct outcome.

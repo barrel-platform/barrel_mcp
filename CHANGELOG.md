@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Doc cleanup: stale roadmap items + subscription session scope
+
+- `guides/features.md`'s roadmap section called out a "periodic deadline timer" and "client-side `Last-Event-ID` resume" as missing. Both turn out to be either by-design (default request timeout already bounds every call; explicit `infinity` is a deliberate caller choice) or already shipped (the transport's `reopen_sse` loop preserves `sse_last_event_id` across server-initiated SSE closes, and a full client restart re-initializes the session anyway). Replaced the roadmap section with notes explaining each.
+- `guides/tools-resources-prompts.md` now calls out that `resources/subscribe` is scoped to the calling `Mcp-Session-Id`: when a client re-initializes, the new session id has no carry-over subscriptions and must subscribe again. Matches the spec's session-lifecycle model; previously implicit.
+
 ### `examples/agent_host` — runnable multi-server federation demo
 
 - New example app showing the `barrel_mcp_agent` aggregator + router end-to-end. `agent_host:run/0` connects two clients to one in-process MCP server under different `ServerId`s, calls `barrel_mcp_agent:list_tools/0` to surface the namespaced catalog, and routes a `<<"beta:echo">>` call through the right client. CT case asserts the namespaced names appear and the routed result round-trips.
