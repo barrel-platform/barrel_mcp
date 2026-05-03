@@ -29,8 +29,11 @@
 %% Tool / resource / prompt handlers exported for the registry.
 -export([echo_tool/1, slow_tool/2, trigger_update_tool/1,
          ask_llm_tool/1, ask_user_tool/1, list_roots_tool/1,
-         progress_tool/2,
-         greeting_resource/1, hello_prompt/1]).
+         progress_tool/2, structured_tool/1, error_tool/1,
+         registry_churn_tool/1, cancellable_tool/2,
+         file_resource/1,
+         greeting_resource/1, hello_prompt/1,
+         echo_completion/2]).
 
 -define(PORT, 22451).
 
@@ -94,6 +97,8 @@ erlang_client_against_python_server(Config) ->
                                 args => [AbsScript]}}
     }),
     ok = wait_ready(Pid, 50),
+
+    %% tools/list + tools/call
     {ok, Tools} = barrel_mcp_client:list_tools(Pid),
     Names = [maps:get(<<"name">>, T) || T <- Tools],
     ?assert(lists:member(<<"echo">>, Names)),
@@ -101,6 +106,29 @@ erlang_client_against_python_server(Config) ->
                      Pid, <<"echo">>, #{<<"text">> => <<"hello">>},
                      #{timeout => 10000}),
     [#{<<"text">> := <<"hello">>} | _] = maps:get(<<"content">>, Result),
+
+    %% resources/list + resources/read
+    {ok, Resources} = barrel_mcp_client:list_resources(Pid),
+    ResUris = [maps:get(<<"uri">>, R) || R <- Resources],
+    ?assert(lists:member(<<"mem://greeting">>, ResUris)),
+    {ok, ReadRes} = barrel_mcp_client:read_resource(
+                       Pid, <<"mem://greeting">>),
+    Contents = maps:get(<<"contents">>, ReadRes),
+    ?assert(is_list(Contents) andalso Contents =/= []),
+
+    %% prompts/list + prompts/get
+    {ok, Prompts} = barrel_mcp_client:list_prompts(Pid),
+    PromptNames = [maps:get(<<"name">>, P) || P <- Prompts],
+    ?assert(lists:member(<<"hello_prompt">>, PromptNames)),
+    {ok, PromptResult} = barrel_mcp_client:get_prompt(
+                            Pid, <<"hello_prompt">>,
+                            #{<<"who">> => <<"interop">>}),
+    PromptMsgs = maps:get(<<"messages">>, PromptResult),
+    ?assert(is_list(PromptMsgs) andalso PromptMsgs =/= []),
+
+    %% ping
+    {ok, _} = barrel_mcp_client:ping(Pid),
+
     barrel_mcp_client:close(Pid),
     ok.
 
@@ -149,6 +177,37 @@ ensure_fixture() ->
         description => <<"Emit a few progress events then return">>,
         input_schema => #{<<"type">> => <<"object">>}
     }),
+    ok = barrel_mcp_registry:reg(tool, <<"structured">>, ?MODULE,
+                                  structured_tool, #{
+        description => <<"Return structuredContent">>,
+        input_schema => #{<<"type">> => <<"object">>}
+    }),
+    ok = barrel_mcp_registry:reg(tool, <<"erroring">>, ?MODULE,
+                                  error_tool, #{
+        description => <<"Return isError: true">>,
+        input_schema => #{<<"type">> => <<"object">>}
+    }),
+    ok = barrel_mcp_registry:reg(tool, <<"churn_registry">>, ?MODULE,
+                                  registry_churn_tool, #{
+        description => <<"Register and unregister a tool, "
+                          "emitting list_changed">>,
+        input_schema => #{<<"type">> => <<"object">>}
+    }),
+    ok = barrel_mcp_registry:reg(tool, <<"cancellable">>, ?MODULE,
+                                  cancellable_tool, #{
+        description => <<"Long-running tool that observes cancel">>,
+        long_running => true,
+        input_schema => #{<<"type">> => <<"object">>}
+    }),
+    ok = barrel_mcp_registry:reg(resource_template, <<"file_template">>,
+                                  ?MODULE, file_resource, #{
+        name => <<"File">>,
+        uri_template => <<"file:///{path}">>,
+        description => <<"File resource template">>,
+        mime_type => <<"text/plain">>
+    }),
+    ok = barrel_mcp:reg_completion({prompt, <<"hello_prompt">>, <<"who">>},
+                                    ?MODULE, echo_completion, #{}),
     ok = barrel_mcp_registry:reg(resource, <<"greeting">>, ?MODULE,
                                   greeting_resource, #{
         name => <<"Greeting">>,
@@ -171,8 +230,16 @@ cleanup_fixture() ->
     catch barrel_mcp_registry:unreg(tool, <<"ask_user">>),
     catch barrel_mcp_registry:unreg(tool, <<"list_roots">>),
     catch barrel_mcp_registry:unreg(tool, <<"progress_echo">>),
+    catch barrel_mcp_registry:unreg(tool, <<"structured">>),
+    catch barrel_mcp_registry:unreg(tool, <<"erroring">>),
+    catch barrel_mcp_registry:unreg(tool, <<"churn_registry">>),
+    catch barrel_mcp_registry:unreg(tool, <<"cancellable">>),
+    catch barrel_mcp_registry:unreg(tool, <<"churned">>),
     catch barrel_mcp_registry:unreg(resource, <<"greeting">>),
+    catch barrel_mcp_registry:unreg(resource_template, <<"file_template">>),
     catch barrel_mcp_registry:unreg(prompt, <<"hello_prompt">>),
+    catch barrel_mcp:unreg_completion({prompt, <<"hello_prompt">>,
+                                                <<"who">>}),
     ok.
 
 echo_tool(#{<<"text">> := T}) -> T.
@@ -235,10 +302,59 @@ progress_tool(_Args, Ctx) ->
     %% Brief sleeps between emits so the SSE writer flushes each
     %% notification ahead of the synchronous tool response, which
     %% otherwise wins the race in the reference Python client.
-    Emit(1, 3, undefined), timer:sleep(20),
-    Emit(2, 3, undefined), timer:sleep(20),
-    Emit(3, 3, undefined), timer:sleep(20),
+    Emit(1, 3, undefined), timer:sleep(50),
+    Emit(2, 3, undefined), timer:sleep(50),
+    Emit(3, 3, undefined), timer:sleep(50),
     <<"progressed">>.
+
+%% Returns structuredContent on the wire.
+structured_tool(_) ->
+    Data = #{<<"answer">> => 42, <<"label">> => <<"meaning">>},
+    Content = [#{<<"type">> => <<"text">>,
+                  <<"text">> => <<"answer is 42">>}],
+    {structured, Data, Content}.
+
+%% Returns isError: true on the wire.
+error_tool(_) ->
+    {tool_error, [#{<<"type">> => <<"text">>,
+                    <<"text">> => <<"intentional failure">>}]}.
+
+%% Triggers a tools/list_changed notification by registering and
+%% then unregistering a tool.
+registry_churn_tool(_) ->
+    ok = barrel_mcp_registry:reg(tool, <<"churned">>, ?MODULE,
+                                  echo_tool, #{
+        description => <<"Transient tool registered to test list_changed">>,
+        input_schema => #{<<"type">> => <<"object">>}
+    }),
+    timer:sleep(20),
+    catch barrel_mcp_registry:unreg(tool, <<"churned">>),
+    <<"churned">>.
+
+%% Cooperative cancel: arity-2 worker watches its mailbox for
+%% {cancel, RequestId} from notifications/cancelled.
+cancellable_tool(_Args, Ctx) ->
+    ReqId = maps:get(request_id, Ctx),
+    cancellable_loop(ReqId).
+
+cancellable_loop(ReqId) ->
+    receive
+        {cancel, ReqId} -> {tool_error,
+                             [#{<<"type">> => <<"text">>,
+                                <<"text">> => <<"cancelled">>}]}
+    after 50 ->
+        cancellable_loop(ReqId)
+    end.
+
+%% Resource template handler: serves whatever the template's
+%% `path' substitution resolved to (we just echo the URI).
+file_resource(_) ->
+    <<"template-served">>.
+
+%% Completion handler: returns a single canned suggestion derived
+%% from the partial value the user typed.
+echo_completion(_PartialValue, _Ctx) ->
+    {ok, [<<"world">>, <<"world!">>]}.
 
 %% Long-running arity-2 handler. Sleeps briefly then echoes back so
 %% the Python client can see the task transition through `working' →
@@ -251,12 +367,12 @@ greeting_resource(_) -> <<"hello, world">>.
 
 hello_prompt(Args) ->
     Who = maps:get(<<"who">>, Args, <<"world">>),
-    #{<<"description">> => <<"Greet">>,
-      <<"messages">> => [#{<<"role">> => <<"user">>,
-                            <<"content">> => #{<<"type">> => <<"text">>,
-                                                <<"text">> =>
-                                                    iolist_to_binary(
-                                                      [<<"hello, ">>, Who])}}]}.
+    #{description => <<"Greet">>,
+      messages => [#{<<"role">> => <<"user">>,
+                      <<"content">> => #{<<"type">> => <<"text">>,
+                                          <<"text">> =>
+                                              iolist_to_binary(
+                                                [<<"hello, ">>, Who])}}]}.
 
 %%====================================================================
 %% Helpers

@@ -67,20 +67,33 @@ async def list_roots_callback(_context):
 
 async def run(url: str) -> None:
     update_event = asyncio.Event()
+    tools_list_changed_event = asyncio.Event()
+    task_status_seen: list[str] = []
 
     async def on_message(message):
         # ClientSession dispatches inbound notifications to this
-        # handler. We only care about the resources/updated stream
-        # for the subscribe round-trip.
+        # handler. Capture the ones we want to assert on.
         from mcp.types import (
             ServerNotification,
             ResourceUpdatedNotification,
+            ToolListChangedNotification,
         )
+        try:
+            from mcp.types import TaskStatusNotification
+        except ImportError:
+            TaskStatusNotification = None  # SDK below 1.27
         if isinstance(message, ServerNotification):
             inner = message.root
             if isinstance(inner, ResourceUpdatedNotification):
                 if str(inner.params.uri) == EXPECTED_RESOURCE_URI:
                     update_event.set()
+            elif isinstance(inner, ToolListChangedNotification):
+                tools_list_changed_event.set()
+            elif (
+                TaskStatusNotification is not None
+                and isinstance(inner, TaskStatusNotification)
+            ):
+                task_status_seen.append(inner.params.status)
 
     async with streamable_http_client(url) as (read, write, _):
         async with ClientSession(
@@ -121,6 +134,53 @@ async def run(url: str) -> None:
                 fail(f"sample prompt missing from list_prompts: {prompt_names}")
 
             await session.set_logging_level("warning")
+
+            # ping round-trip — trivial but exercises the wire end
+            # to end.
+            await session.send_ping()
+
+            # prompts/get with arguments — verifies the prompt
+            # template renders and returns the spec-shaped messages
+            # array.
+            prompt_result = await session.get_prompt(
+                EXPECTED_PROMPT, arguments={"who": "interop"}
+            )
+            if not prompt_result.messages:
+                fail(f"get_prompt returned no messages: {prompt_result}")
+
+            # resources/templates/list — registered fixture has one
+            # template (`file:///{path}`).
+            templates = await session.list_resource_templates()
+            template_uris = [
+                t.uriTemplate for t in templates.resourceTemplates
+            ]
+            if "file:///{path}" not in template_uris:
+                fail(f"resource template missing: {template_uris}")
+
+            # completion/complete — registered for prompt
+            # `hello_prompt` argument `who`.
+            comp = await session.complete(
+                ref={"type": "ref/prompt", "name": EXPECTED_PROMPT},
+                argument={"name": "who", "value": "wo"},
+            )
+            if not comp.completion.values:
+                fail(f"completion returned no values: {comp}")
+
+            # Tool returning structuredContent.
+            structured_result = await session.call_tool(
+                "structured", arguments={}
+            )
+            if structured_result.structuredContent is None:
+                fail(f"no structuredContent: {structured_result}")
+            if structured_result.structuredContent.get("answer") != 42:
+                fail(f"structured payload mismatch: {structured_result}")
+
+            # Tool returning isError: true.
+            err_result = await session.call_tool(
+                "erroring", arguments={}
+            )
+            if not err_result.isError:
+                fail(f"isError flag missing: {err_result}")
 
             # Tasks: list_tasks and get_task validate the wire shape
             # (taskId, status, createdAt, lastUpdatedAt, ttl) against
@@ -230,6 +290,58 @@ async def run(url: str) -> None:
                 fail("no progress events received")
             if progress_seen[-1] != (3, 3):
                 fail(f"unexpected progress sequence: {progress_seen}")
+
+            # notifications/tools/list_changed: the churn_registry
+            # tool registers + unregisters another tool, which the
+            # registry auto-broadcasts as list_changed.
+            await session.call_tool("churn_registry", arguments={})
+            try:
+                await asyncio.wait_for(
+                    tools_list_changed_event.wait(), timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                fail("did not receive notifications/tools/list_changed")
+
+            # notifications/cancelled flow. Start a long-running
+            # cancellable tool and cancel it mid-flight.
+            cancel_task_pending: asyncio.Task = asyncio.create_task(
+                session.experimental.call_tool_as_task(
+                    "cancellable", arguments={}
+                )
+            )
+            await asyncio.sleep(0.1)
+            # Use the public list_tasks to find the running task,
+            # then cancel it. We could also use the create-task
+            # response's taskId once it lands, but that lands after
+            # the task is recorded in the store, which is after a
+            # tiny delay.
+            tasks_now = await session.experimental.list_tasks()
+            running = [t for t in tasks_now.tasks if t.status == "working"]
+            if not running:
+                cancel_task_pending.cancel()
+                fail("expected at least one working task to cancel")
+            cancel_id = running[0].taskId
+            cancel_result = await session.experimental.cancel_task(
+                cancel_id
+            )
+            if cancel_result.status not in ("cancelled", "failed"):
+                fail(
+                    "cancel_task returned non-terminal status: "
+                    f"{cancel_result.status}"
+                )
+            try:
+                await asyncio.wait_for(cancel_task_pending, timeout=5.0)
+            except asyncio.TimeoutError:
+                fail("cancellable tool did not return after cancel")
+            except Exception:
+                # The cancelled call may surface as an error result;
+                # that's acceptable for this assertion.
+                pass
+
+            # notifications/tasks/status: by now we've run a few
+            # tasks; assert at least one transition was observed.
+            if not task_status_seen:
+                fail("no notifications/tasks/status observed")
 
     print("OK")
 
