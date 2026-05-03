@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tasks capability wire shape fix
+
+- `initialize` now advertises `tasks.list` / `tasks.get` / `tasks.cancel` / `tasks.result` as the spec-shaped empty objects (`#{}`) instead of bare `true` booleans. Caught by the new Python interop tests; the reference Python SDK rejects `bool` for these fields with a pydantic `ValidationError`. `listChanged` stays a boolean (the spec keeps that one as bool).
+
+### Python interop test harness
+
+- New `test/interop/` directory pairing a Python MCP client (`client.py`, Streamable HTTP) and a Python FastMCP server (`server.py`, stdio) with the official `mcp` SDK pinned to `~= 1.27.0`.
+- New `test/barrel_mcp_python_interop_SUITE` Common Test suite drives both directions: Python client → Erlang server (initialize, list_tools / call_tool, list_resources / read_resource, list_prompts, set_logging_level), and Erlang client → Python server (list_tools, call_tool round-trip).
+- `make interop-setup` creates the venv, `make interop-test` runs the suite. The CT cases skip cleanly when `INTEROP_PYTHON` is unset, so the default `rebar3 ct` loop is unaffected by missing Python tooling.
+- New `interop` CI job runs both directions on Linux with Python 3.12 + OTP 28.
+
 ## [1.2.0] - 2026-05-03
 
 This release lands the agent-host story (server federation +

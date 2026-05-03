@@ -138,11 +138,15 @@ handle_request(<<"initialize">>, Params, Id, State) ->
                               <<"listChanged">> => true},
         <<"prompts">> => #{<<"listChanged">> => true},
         <<"logging">> => #{},
+        %% Per the MCP tasks SEP (and as enforced by the
+        %% reference Python SDK), each operation key is an
+        %% object whose presence advertises support; only
+        %% `listChanged' is a bare boolean.
         <<"tasks">> => #{
-            <<"list">> => true,
-            <<"get">> => true,
-            <<"cancel">> => true,
-            <<"result">> => true,
+            <<"list">> => #{},
+            <<"get">> => #{},
+            <<"cancel">> => #{},
+            <<"result">> => #{},
             <<"listChanged">> => true
         }
     },
