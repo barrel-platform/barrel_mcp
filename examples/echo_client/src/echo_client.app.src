@@ -1,0 +1,9 @@
+{application, echo_client, [
+    {description, "barrel_mcp echo client example"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {applications, [kernel, stdlib, barrel_mcp]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]}
+]}.

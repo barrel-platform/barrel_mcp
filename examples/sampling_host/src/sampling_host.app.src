@@ -1,0 +1,9 @@
+{application, sampling_host, [
+    {description, "barrel_mcp sampling host example"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {applications, [kernel, stdlib, barrel_mcp]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]}
+]}.

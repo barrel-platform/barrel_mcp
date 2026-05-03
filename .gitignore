@@ -4,6 +4,9 @@ _checkouts/
 ebin/
 *.beam
 
+# Examples — _checkouts symlinks created by `make examples-setup'
+examples/*/_checkouts/
+
 # Claude Code scratch
 .claude/
 

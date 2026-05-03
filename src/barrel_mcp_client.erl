@@ -136,11 +136,23 @@ start(Spec) ->
 close(Pid) ->
     gen_statem:cast(Pid, close).
 
-%% @doc List tools on the server. Single page.
+%% @doc List tools advertised by the server. Returns a single page.
+%% Use {@link list_tools/2} with `#{want_cursor => true}' or
+%% {@link list_tools_all/1} to walk pagination.
 -spec list_tools(pid()) -> {ok, [map()]} | {error, term()}.
 list_tools(Pid) ->
     list_tools(Pid, #{}).
 
+%% @doc List tools with pagination control.
+%%
+%% `Opts' may contain:
+%% <ul>
+%%   <li>`{cursor, Cursor}' — start from a previously-returned
+%%       `nextCursor'.</li>
+%%   <li>`{want_cursor, true}' — return `{ok, Items, NextCursor}' even
+%%       on the last page (with `undefined' for `NextCursor').</li>
+%%   <li>`{timeout, Ms}' — override the per-request timeout.</li>
+%% </ul>
 -spec list_tools(pid(), map()) -> {ok, [map()], NextCursor :: binary() | undefined} |
                                   {ok, [map()]} | {error, term()}.
 list_tools(Pid, Opts) ->
@@ -151,41 +163,72 @@ list_tools(Pid, Opts) ->
 list_tools_all(Pid) ->
     walk_all(fun(Cursor) -> list_tools(Pid, page_opts(Cursor)) end).
 
-%% @doc Call a tool. Args are forwarded as `arguments'.
+%% @doc Invoke a tool by name. `Args' is forwarded verbatim as the
+%% JSON-RPC `arguments' field. Returns the server's `result' map,
+%% which has a `<<"content">>' list of content blocks.
 -spec call_tool(pid(), binary(), map()) -> {ok, map()} | {error, term()}.
 call_tool(Pid, Name, Args) ->
     call_tool(Pid, Name, Args, #{}).
 
+%% @doc Invoke a tool with options.
+%%
+%% `Opts' may contain:
+%% <ul>
+%%   <li>`{progress_token, Token}' — register the calling process to
+%%       receive `{mcp_progress, Token, Params}' messages until the
+%%       request settles.</li>
+%%   <li>`{timeout, Ms}' — override the per-request timeout
+%%       (`request_timeout' from the connect spec, default 30000).</li>
+%% </ul>
 -spec call_tool(pid(), binary(), map(), map()) -> {ok, map()} | {error, term()}.
 call_tool(Pid, Name, Args, Opts) ->
     Params0 = #{<<"name">> => Name, <<"arguments">> => Args},
     Params = maybe_attach_progress_token(Params0, Opts),
     request(Pid, <<"tools/call">>, Params, request_timeout(Opts)).
 
+%% @doc List resources advertised by the server. Single page.
 -spec list_resources(pid()) -> {ok, [map()]} | {error, term()}.
 list_resources(Pid) -> list_resources(Pid, #{}).
 
+%% @doc List resources with pagination control. Same `Opts' shape as
+%% {@link list_tools/2}.
+-spec list_resources(pid(), map()) -> {ok, [map()], binary() | undefined} |
+                                       {ok, [map()]} | {error, term()}.
 list_resources(Pid, Opts) ->
     paged(Pid, <<"resources/list">>, <<"resources">>, Opts).
 
-%% @doc Walk all `resources/list' pages.
+%% @doc Walk every `resources/list' page and return the union.
 -spec list_resources_all(pid()) -> {ok, [map()]} | {error, term()}.
 list_resources_all(Pid) ->
     walk_all(fun(Cursor) -> list_resources(Pid, page_opts(Cursor)) end).
 
+%% @doc List resource templates advertised by the server. Single
+%% page.
+-spec list_resource_templates(pid()) -> {ok, [map()]} | {error, term()}.
 list_resource_templates(Pid) -> list_resource_templates(Pid, #{}).
 
+%% @doc List resource templates with pagination control. Same `Opts'
+%% shape as {@link list_tools/2}.
+-spec list_resource_templates(pid(), map()) ->
+    {ok, [map()], binary() | undefined} | {ok, [map()]} | {error, term()}.
 list_resource_templates(Pid, Opts) ->
     paged(Pid, <<"resources/templates/list">>, <<"resourceTemplates">>, Opts).
 
-%% @doc Walk all `resources/templates/list' pages.
+%% @doc Walk every `resources/templates/list' page.
 -spec list_resource_templates_all(pid()) -> {ok, [map()]} | {error, term()}.
 list_resource_templates_all(Pid) ->
     walk_all(fun(Cursor) -> list_resource_templates(Pid, page_opts(Cursor)) end).
 
+%% @doc Read a resource by URI.
+-spec read_resource(pid(), binary()) -> {ok, map()} | {error, term()}.
 read_resource(Pid, Uri) ->
     request(Pid, <<"resources/read">>, #{<<"uri">> => Uri}).
 
+%% @doc Subscribe the calling process to updates for `Uri'. The
+%% calling process receives `{mcp_resource_updated, Uri, Params}' on
+%% every inbound `notifications/resources/updated' for that URI until
+%% it calls {@link unsubscribe/2} or the client closes.
+-spec subscribe(pid(), binary()) -> {ok, map()} | {error, term()}.
 subscribe(Pid, Uri) ->
     case request(Pid, <<"resources/subscribe">>, #{<<"uri">> => Uri}) of
         {ok, _} = Ok ->
@@ -194,6 +237,8 @@ subscribe(Pid, Uri) ->
         Err -> Err
     end.
 
+%% @doc Stop receiving updates for `Uri' on the calling process.
+-spec unsubscribe(pid(), binary()) -> {ok, map()} | {error, term()}.
 unsubscribe(Pid, Uri) ->
     case request(Pid, <<"resources/unsubscribe">>, #{<<"uri">> => Uri}) of
         {ok, _} = Ok ->
@@ -202,52 +247,84 @@ unsubscribe(Pid, Uri) ->
         Err -> Err
     end.
 
+%% @doc List prompts advertised by the server. Single page.
+-spec list_prompts(pid()) -> {ok, [map()]} | {error, term()}.
 list_prompts(Pid) -> list_prompts(Pid, #{}).
 
+%% @doc List prompts with pagination control. Same `Opts' shape as
+%% {@link list_tools/2}.
+-spec list_prompts(pid(), map()) -> {ok, [map()], binary() | undefined} |
+                                     {ok, [map()]} | {error, term()}.
 list_prompts(Pid, Opts) ->
     paged(Pid, <<"prompts/list">>, <<"prompts">>, Opts).
 
-%% @doc Walk all `prompts/list' pages.
+%% @doc Walk every `prompts/list' page.
 -spec list_prompts_all(pid()) -> {ok, [map()]} | {error, term()}.
 list_prompts_all(Pid) ->
     walk_all(fun(Cursor) -> list_prompts(Pid, page_opts(Cursor)) end).
 
+%% @doc Render a prompt with the given arguments.
+-spec get_prompt(pid(), binary(), map()) -> {ok, map()} | {error, term()}.
 get_prompt(Pid, Name, Args) ->
     request(Pid, <<"prompts/get">>, #{
         <<"name">> => Name,
         <<"arguments">> => Args
     }).
 
+%% @doc Send `completion/complete' to ask the server to suggest values
+%% for a prompt or resource template argument. `Ref' is the JSON-RPC
+%% `ref' map (e.g. `#{<<"type">> => <<"ref/prompt">>, <<"name">> => N}')
+%% and `Argument' is `#{<<"name">> => Key, <<"value">> => Partial}'.
+-spec complete(pid(), map(), map()) -> {ok, map()} | {error, term()}.
 complete(Pid, Ref, Argument) ->
     request(Pid, <<"completion/complete">>, #{
         <<"ref">> => Ref,
         <<"argument">> => Argument
     }).
 
+%% @doc Send `logging/setLevel'. `Level' is one of `debug', `info',
+%% `notice', `warning', `error', `critical', `alert', `emergency' as
+%% a binary.
+-spec set_log_level(pid(), binary()) -> {ok, map()} | {error, term()}.
 set_log_level(Pid, Level) when is_binary(Level) ->
     request(Pid, <<"logging/setLevel">>, #{<<"level">> => Level}).
 
+%% @doc Send a `ping' request and wait for the response.
+-spec ping(pid()) -> {ok, map()} | {error, term()}.
 ping(Pid) ->
     request(Pid, <<"ping">>, #{}).
 
 %% @doc Cancel a previously-issued request by id. Sends
-%% `notifications/cancelled' and removes the pending slot so the
-%% caller receives `{error, cancelled}'.
+%% `notifications/cancelled' to the server and unblocks the caller
+%% with `{error, cancelled}'.
+-spec cancel(pid(), integer()) -> ok.
 cancel(Pid, RequestId) ->
     gen_statem:cast(Pid, {cancel, RequestId}).
 
-%% @doc Deliver an asynchronous reply for a request that the handler
-%% returned `{async, Tag, _}' for. Result may be a plain term (sent as
-%% a JSON-RPC `result') or `{error, Code, Message}'.
+%% @doc Deliver a deferred reply for a server-initiated request that
+%% the handler answered with `{async, Tag, _}'. `Result' is either a
+%% plain term (sent as the JSON-RPC `result') or
+%% `{error, Code, Message}'.
+-spec reply_async(pid(), term(),
+                  term() | {error, integer(), binary()}) -> ok.
 reply_async(Pid, Tag, Result) ->
     gen_statem:cast(Pid, {async_reply, Tag, Result}).
 
+%% @doc Return the `serverInfo' map the server reported during
+%% `initialize' (with keys like `<<"name">>' and `<<"version">>').
+-spec server_info(pid()) -> {ok, map() | undefined}.
 server_info(Pid) ->
     gen_statem:call(Pid, server_info).
 
+%% @doc Return the server capabilities map negotiated during
+%% `initialize'. Useful to gate work on optional features.
+-spec server_capabilities(pid()) -> {ok, map() | undefined}.
 server_capabilities(Pid) ->
     gen_statem:call(Pid, server_capabilities).
 
+%% @doc Return the negotiated protocol version (e.g.
+%% `<<"2025-11-25">>' or `<<"2025-03-26">>' if the server downgraded).
+-spec protocol_version(pid()) -> {ok, binary() | undefined}.
 protocol_version(Pid) ->
     gen_statem:call(Pid, protocol_version).
 

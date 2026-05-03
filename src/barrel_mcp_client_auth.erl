@@ -19,18 +19,18 @@
 -type handle() :: term().
 -type t() :: {module(), handle()} | none.
 
-%% @doc Build the auth handle from a config term.
+%% Build the auth handle from a config term.
 %%   `none' — no auth header sent.
 %%   `{bearer, Token}' — static bearer token.
-%%   `{oauth, Config}' — OAuth 2.1 + PKCE (Phase D).
+%%   `{oauth, Config}' — OAuth 2.1 + PKCE.
 -callback init(Config :: term()) -> {ok, handle()} | {error, term()}.
 
-%% @doc Return the value to put in the `Authorization' header.
+%% Return the value to put in the `Authorization' header.
 %% Returning `none' means do not attach an Authorization header.
 -callback header(handle()) ->
     {ok, binary()} | none | {error, term()}.
 
-%% @doc Refresh the credential after a 401. `WwwAuthenticate' is the
+%% Refresh the credential after a 401. `WwwAuthenticate' is the
 %% raw header value returned by the server, used by OAuth flows for
 %% protected-resource-metadata discovery.
 -callback refresh(handle(), WwwAuthenticate :: binary() | undefined) ->
