@@ -31,7 +31,9 @@ tools_test_() ->
         {"Call tool returns list of content blocks", fun test_call_tool_list/0},
         {"Call non-existent tool returns error", fun test_call_tool_not_found/0},
         {"Call tool with error returns error response", fun test_call_tool_error/0},
-        {"Tool with input schema is listed correctly", fun test_tool_input_schema/0}
+        {"Tool with input schema is listed correctly", fun test_tool_input_schema/0},
+        {"Tool annotations are surfaced in tools/list",
+         fun test_tool_annotations/0}
      ]
     }.
 
@@ -201,3 +203,36 @@ test_tool_input_schema() ->
     ?assert(maps:is_key(<<"properties">>, InputSchema)),
 
     barrel_mcp_registry:unreg(tool, <<"search">>).
+
+test_tool_annotations() ->
+    Annotations = #{
+        <<"readOnlyHint">> => true,
+        <<"destructiveHint">> => false,
+        <<"idempotentHint">> => true,
+        <<"openWorldHint">> => false
+    },
+    ok = barrel_mcp_registry:reg(tool, <<"reader">>, ?MODULE, echo_tool, #{
+        description => <<"Read-only inspector">>,
+        annotations => Annotations
+    }),
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"tools/list">>
+    },
+    Response = barrel_mcp_protocol:handle(Request),
+    Result = maps:get(<<"result">>, Response),
+    [Tool] = maps:get(<<"tools">>, Result),
+    ?assertEqual(Annotations, maps:get(<<"annotations">>, Tool)),
+    %% Tools without annotations omit the field.
+    ok = barrel_mcp_registry:reg(tool, <<"plain">>, ?MODULE, echo_tool, #{}),
+    Response2 = barrel_mcp_protocol:handle(Request),
+    [_, _] = maps:get(<<"tools">>, maps:get(<<"result">>, Response2)),
+    Tools = maps:get(<<"tools">>, maps:get(<<"result">>, Response2)),
+    Plain = lists:filter(fun(T) ->
+                              maps:get(<<"name">>, T) =:= <<"plain">>
+                          end, Tools),
+    [PlainTool] = Plain,
+    ?assertNot(maps:is_key(<<"annotations">>, PlainTool)),
+    barrel_mcp_registry:unreg(tool, <<"reader">>),
+    barrel_mcp_registry:unreg(tool, <<"plain">>).

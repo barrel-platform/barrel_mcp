@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tool annotations
+
+- `reg_tool/4` accepts a new `annotations` option — a free-form map of behavioural hints (the spec defines `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` as booleans). The map is surfaced verbatim under `annotations` in the `tools/list` payload. Tools without annotations omit the field.
+
 ### `logging/setLevel` actually filters the log stream
 
 - The previous `logging/setLevel` handler was a no-op stub that accepted any payload and returned `{}`. It now validates the requested level against the eight RFC 5424 levels (debug, info, notice, warning, error, critical, alert, emergency), persists the chosen level on the session, and rejects unknown levels with `-32602`.

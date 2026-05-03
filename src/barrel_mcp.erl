@@ -143,6 +143,10 @@
 %% <ul>
 %%   <li>`description' - Human-readable description of the tool</li>
 %%   <li>`input_schema' - JSON Schema defining expected input format</li>
+%%   <li>`annotations' - Map of MCP behavioural hints surfaced under
+%%       `annotations' on `tools/list'. Spec keys are
+%%       `readOnlyHint', `destructiveHint', `idempotentHint',
+%%       `openWorldHint' (all booleans). Values pass through verbatim.</li>
 %% </ul>
 %%
 %% == Handler Return Values ==
@@ -180,7 +184,9 @@
     Function :: atom(),
     Opts :: #{
         description => binary(),
-        input_schema => map()
+        input_schema => map(),
+        annotations => map(),
+        _ => _
     }.
 reg_tool(Name, Module, Function, Opts) ->
     barrel_mcp_registry:reg(tool, Name, Module, Function, Opts).

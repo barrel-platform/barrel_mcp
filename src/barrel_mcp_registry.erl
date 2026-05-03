@@ -544,7 +544,9 @@ build_handler(tool, Module, Function, Opts) ->
         long_running => maps:get(long_running, Opts, false),
         validate_output => maps:get(validate_output, Opts, false)
     },
-    add_metadata(maps:merge(Base, opt_field(output_schema, Opts)), Opts);
+    Merged = maps:merge(Base, opt_field(output_schema, Opts)),
+    Merged1 = maps:merge(Merged, opt_field(annotations, Opts)),
+    add_metadata(Merged1, Opts);
 build_handler(resource, Module, Function, Opts) ->
     Base = #{
         module => Module,
