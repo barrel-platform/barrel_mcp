@@ -6,7 +6,7 @@
 %%% worker continues in the background; clients poll via
 %%% `tasks/get', enumerate via `tasks/list', and abort via
 %%% `tasks/cancel'. State transitions emit
-%%% `notifications/tasks/changed' on the session's SSE channel.
+%%% `notifications/tasks/status' on the session's SSE channel.
 %%%
 %%% Tasks live in a `protected' ETS table keyed by
 %%% `{SessionId, TaskId}'. A periodic sweep evicts terminal tasks
@@ -97,7 +97,7 @@ cancel(SessionId, TaskId) ->
 set_worker(SessionId, TaskId, Info) ->
     gen_server:call(?MODULE, {set_worker, SessionId, TaskId, Info}).
 
-%% @doc Record success: store the result and emit notifications/tasks/changed.
+%% @doc Record success: store the result and emit notifications/tasks/status.
 -spec finish(binary() | undefined, binary(), term()) -> ok | {error, not_found}.
 finish(SessionId, TaskId, Result) ->
     gen_server:call(?MODULE, {finish, SessionId, TaskId, Result}).
@@ -221,7 +221,7 @@ notify_changed(SessionId, #task{} = Task) ->
         {ok, Pid} when is_pid(Pid) ->
             Pid ! {sse_send_message, #{
                 <<"jsonrpc">> => <<"2.0">>,
-                <<"method">> => <<"notifications/tasks/changed">>,
+                <<"method">> => <<"notifications/tasks/status">>,
                 <<"params">> => task_to_map(Task)
             }},
             ok;
