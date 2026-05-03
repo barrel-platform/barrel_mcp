@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-05-03
+
+This release lands the agent-host story (server federation +
+provider-shape bridge + multi-server aggregator) on top of a major
+spec-conformance pass for MCP `2025-11-25`. The server's
+`protocol_version` env default is now `<<"2025-11-25">>` (was
+`<<"2025-03-26">>`).
+
+
 ### `barrel_mcp_agent` — multi-server tool aggregator
 
 - New module sitting on top of `barrel_mcp_clients`. Aggregates `tools/list` across every connected MCP client, rewrites each tool name to `<<"ServerId<sep>ToolName">>` (default separator `:`), and routes a namespaced `call_tool/2,3` back to the correct client.
