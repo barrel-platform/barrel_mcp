@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-05-03
+
+This release is driven by a Python interop harness (PR #24) that
+exercises every spec wire surface against the official `mcp 1.27.0`
+Python SDK in both directions on every CI run. The harness
+surfaced several wire bugs we then fixed; this release captures
+all of them. Breaking wire-level changes are listed up front.
+
+**Breaking wire-level changes since 1.2.0** — hosts that produced
+or consumed these envelopes need to update:
+
+- `notifications/tasks/changed` was renamed to `notifications/tasks/status` (the spec method name).
+- `tools/call` for `long_running => true` tools wraps the immediate response as `CreateTaskResult` (`{<<"task">> => Task}`) instead of the flat `{taskId, status}`.
+- Task envelopes now use `lastUpdatedAt` (was `updatedAt`) and include a `ttl` field (always `null` for now).
+- `tasks/cancel` returns the cancelled `Task` instead of `{}`.
+- `tasks/result` returns a `CallToolResult` (`{<<"content">>, <<"structuredContent">>?}`) instead of the raw stored value.
+- `initialize` advertises `tasks.list` / `get` / `cancel` / `result` as objects, not bare booleans.
+
 ### Interop assertions tightened to value level
 
 - Direction A's `list_tools`, `list_resources`, `read_resource`, `list_prompts`, `get_prompt`, `list_resource_templates`, and `complete` now assert the actual field values returned by the Erlang server (descriptions, mime types, prompt argument names, content text, completion suggestions) instead of just presence checks. Same for Direction B against the Python FastMCP server.
