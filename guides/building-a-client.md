@@ -250,6 +250,39 @@ URI on the same client.
 
 ---
 
+### Logging
+
+Set the server's log level for the session, and route the
+inbound `notifications/message` stream into your application's
+logger via the handler.
+
+```erlang
+set_debug_level(Pid) ->
+    barrel_mcp_client:set_log_level(Pid, <<"debug">>).
+```
+
+Levels match RFC 5424 names: `debug`, `info`, `notice`,
+`warning`, `error`, `critical`, `alert`, `emergency`.
+
+### Server introspection
+
+```erlang
+caps(Pid) ->
+    barrel_mcp_client:server_capabilities(Pid).
+
+info(Pid) ->
+    barrel_mcp_client:server_info(Pid).
+
+negotiated_version(Pid) ->
+    barrel_mcp_client:protocol_version(Pid).
+```
+
+`server_capabilities/1` is the authoritative source for what the
+server actually supports (e.g. whether `tasks` is advertised).
+Check before calling capability-gated methods.
+
+---
+
 ## 9. Get prompts and run completion
 
 ```erlang
@@ -370,22 +403,27 @@ metrics, logs, or UI.
 ### Task methods
 
 When a tool was registered as `long_running` on the server, the
-initial `call_tool` returns a `taskId`. Track it via the
-`tasks/*` request methods (see the spec for shapes; on the wire
-they are `tasks/list`, `tasks/get`, `tasks/cancel`). The client's
-public API exposes them as direct `request/3` calls:
+initial `call_tool` returns a `taskId`. Track it with the typed
+wrappers:
 
 ```erlang
 poll_task(Pid, TaskId) ->
-    %% `tasks/get' is just another spec method; until the client
-    %% adds a typed wrapper you can call it via the request shape.
-    barrel_mcp_client:request(Pid, <<"tasks/get">>,
-                              #{<<"taskId">> => TaskId}).
+    barrel_mcp_client:tasks_get(Pid, TaskId).
+
+list_tasks(Pid) ->
+    %% Single page; use `tasks_list_all/1' or
+    %% `tasks_list/2' with `#{want_cursor => true}' for paging.
+    barrel_mcp_client:tasks_list(Pid).
+
+abort_task(Pid, TaskId) ->
+    barrel_mcp_client:tasks_cancel(Pid, TaskId).
 ```
 
 When you registered a `progress_token` on the originating call,
 the same task usually emits `notifications/progress` updates that
-arrive through your handler, so polling is rarely required.
+arrive through your handler, so polling is rarely required —
+prefer subscribing to `notifications/tasks/changed` in the
+handler over busy-polling `tasks_get/2`.
 
 ---
 

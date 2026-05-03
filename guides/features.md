@@ -122,12 +122,14 @@ by the spec.
 - `tools/list`, `tools/call`, `resources/list`, `resources/read`,
   `resources/templates/list`, `resources/subscribe`,
   `resources/unsubscribe`, `prompts/list`, `prompts/get`,
-  `completion/complete`, `logging/setLevel`, `ping`.
+  `completion/complete`, `logging/setLevel`, `ping`,
+  `tasks/list`, `tasks/get`, `tasks/cancel`.
 - Pagination via `cursor` / `nextCursor`. Single page by default
   (`want_cursor => true` to follow paging by hand). The sugar helpers
   `list_tools_all/1`, `list_resources_all/1`,
-  `list_resource_templates_all/1`, `list_prompts_all/1` walk every
-  page via `barrel_mcp_pagination:walk/1`.
+  `list_resource_templates_all/1`, `list_prompts_all/1`,
+  `tasks_list_all/1` walk every page via
+  `barrel_mcp_pagination:walk/1`.
 - Cancellation: `barrel_mcp_client:cancel/2` sends
   `notifications/cancelled` and unblocks the caller.
 - Progress: pass `progress_token` to `call_tool/4` and the caller
