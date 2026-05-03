@@ -193,6 +193,22 @@ by the spec.
     `refresh_token` was supplied. The interactive authorization-code
     redirect stays a host concern.
 
+### Multi-server agent aggregator (`barrel_mcp_agent`)
+
+Sits on top of `barrel_mcp_clients` and turns the federation
+registry into a single namespaced tool catalog the host can hand
+to an LLM, plus a router that dispatches a model's tool call back
+to the right MCP server.
+
+- `list_tools/0,1` — aggregated `tools/list` across every
+  registered client; tool names rewritten to
+  `<<"ServerId<sep>ToolName">>` (default separator `:`).
+- `to_anthropic/0,1`, `to_openai/0,1` — the same catalog in the
+  matching provider shape.
+- `call_tool/2,3` — parses the namespaced name, routes to the
+  right client. Errors `{error, no_separator | unknown_server}`
+  cover the parse / lookup paths.
+
 ### LLM provider bridge (`barrel_mcp_tool_format`)
 
 Translates MCP tool maps to the shapes the major LLM provider
