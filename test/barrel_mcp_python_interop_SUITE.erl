@@ -27,7 +27,8 @@
          erlang_client_against_python_server/1]).
 
 %% Tool / resource / prompt handlers exported for the registry.
--export([echo_tool/1, slow_tool/2, greeting_resource/1, hello_prompt/1]).
+-export([echo_tool/1, slow_tool/2, trigger_update_tool/1,
+         greeting_resource/1, hello_prompt/1]).
 
 -define(PORT, 22451).
 
@@ -121,6 +122,11 @@ ensure_fixture() ->
                            <<"properties">> =>
                                #{<<"text">> => #{<<"type">> => <<"string">>}}}
     }),
+    ok = barrel_mcp_registry:reg(tool, <<"trigger_update">>, ?MODULE,
+                                  trigger_update_tool, #{
+        description => <<"Push notifications/resources/updated for the greeting URI">>,
+        input_schema => #{<<"type">> => <<"object">>}
+    }),
     ok = barrel_mcp_registry:reg(resource, <<"greeting">>, ?MODULE,
                                   greeting_resource, #{
         name => <<"Greeting">>,
@@ -138,11 +144,16 @@ ensure_fixture() ->
 cleanup_fixture() ->
     catch barrel_mcp_registry:unreg(tool, <<"echo">>),
     catch barrel_mcp_registry:unreg(tool, <<"slow_echo">>),
+    catch barrel_mcp_registry:unreg(tool, <<"trigger_update">>),
     catch barrel_mcp_registry:unreg(resource, <<"greeting">>),
     catch barrel_mcp_registry:unreg(prompt, <<"hello_prompt">>),
     ok.
 
 echo_tool(#{<<"text">> := T}) -> T.
+
+trigger_update_tool(_) ->
+    ok = barrel_mcp:notify_resource_updated(<<"mem://greeting">>),
+    <<"triggered">>.
 
 %% Long-running arity-2 handler. Sleeps briefly then echoes back so
 %% the Python client can see the task transition through `working' →

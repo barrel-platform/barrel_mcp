@@ -28,8 +28,26 @@ def fail(msg: str) -> None:
 
 
 async def run(url: str) -> None:
+    update_event = asyncio.Event()
+
+    async def on_message(message):
+        # ClientSession dispatches inbound notifications to this
+        # handler. We only care about the resources/updated stream
+        # for the subscribe round-trip.
+        from mcp.types import (
+            ServerNotification,
+            ResourceUpdatedNotification,
+        )
+        if isinstance(message, ServerNotification):
+            inner = message.root
+            if isinstance(inner, ResourceUpdatedNotification):
+                if str(inner.params.uri) == EXPECTED_RESOURCE_URI:
+                    update_event.set()
+
     async with streamable_http_client(url) as (read, write, _):
-        async with ClientSession(read, write) as session:
+        async with ClientSession(
+            read, write, message_handler=on_message
+        ) as session:
             await session.initialize()
 
             tools = await session.list_tools()
@@ -69,6 +87,16 @@ async def run(url: str) -> None:
             tasks_list = await session.experimental.list_tasks()
             if not isinstance(tasks_list.tasks, list):
                 fail(f"list_tasks did not return a list: {tasks_list}")
+
+            # Subscribe / notifications/resources/updated round-trip.
+            # subscribe -> trigger -> wait for the notification.
+            await session.subscribe_resource(EXPECTED_RESOURCE_URI)
+            await session.call_tool("trigger_update", arguments={})
+            try:
+                await asyncio.wait_for(update_event.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                fail("did not receive notifications/resources/updated")
+            await session.unsubscribe_resource(EXPECTED_RESOURCE_URI)
 
     print("OK")
 
