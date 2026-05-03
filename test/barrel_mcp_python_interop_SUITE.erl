@@ -27,7 +27,7 @@
          erlang_client_against_python_server/1]).
 
 %% Tool / resource / prompt handlers exported for the registry.
--export([echo_tool/1, greeting_resource/1, hello_prompt/1]).
+-export([echo_tool/1, slow_tool/2, greeting_resource/1, hello_prompt/1]).
 
 -define(PORT, 22451).
 
@@ -113,6 +113,14 @@ ensure_fixture() ->
                            <<"properties">> =>
                                #{<<"text">> => #{<<"type">> => <<"string">>}}}
     }),
+    ok = barrel_mcp_registry:reg(tool, <<"slow_echo">>, ?MODULE,
+                                  slow_tool, #{
+        description => <<"Long-running echo (returns a taskId)">>,
+        long_running => true,
+        input_schema => #{<<"type">> => <<"object">>,
+                           <<"properties">> =>
+                               #{<<"text">> => #{<<"type">> => <<"string">>}}}
+    }),
     ok = barrel_mcp_registry:reg(resource, <<"greeting">>, ?MODULE,
                                   greeting_resource, #{
         name => <<"Greeting">>,
@@ -129,11 +137,19 @@ ensure_fixture() ->
 
 cleanup_fixture() ->
     catch barrel_mcp_registry:unreg(tool, <<"echo">>),
+    catch barrel_mcp_registry:unreg(tool, <<"slow_echo">>),
     catch barrel_mcp_registry:unreg(resource, <<"greeting">>),
     catch barrel_mcp_registry:unreg(prompt, <<"hello_prompt">>),
     ok.
 
 echo_tool(#{<<"text">> := T}) -> T.
+
+%% Long-running arity-2 handler. Sleeps briefly then echoes back so
+%% the Python client can see the task transition through `working' →
+%% `completed'.
+slow_tool(Args, _Ctx) ->
+    timer:sleep(100),
+    maps:get(<<"text">>, Args, <<"slow">>).
 
 greeting_resource(_) -> <<"hello, world">>.
 

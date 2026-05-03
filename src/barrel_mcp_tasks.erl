@@ -236,7 +236,11 @@ task_to_map(#task{id = Id, session_id = Sid, method = M, status = St,
         <<"method">> => M,
         <<"status">> => atom_to_binary(St, utf8),
         <<"createdAt">> => to_rfc3339(C),
-        <<"updatedAt">> => to_rfc3339(U)
+        <<"lastUpdatedAt">> => to_rfc3339(U),
+        %% `ttl' is the requested retention duration in milliseconds,
+        %% null when unlimited. We don't yet honour a client-supplied
+        %% TTL, so we report null.
+        <<"ttl">> => null
     },
     Base1 = case Sid of undefined -> Base;
                        _ -> Base#{<<"sessionId">> => Sid} end,

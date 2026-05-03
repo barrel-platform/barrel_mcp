@@ -491,7 +491,7 @@ you. The collector process records the worker's eventual outcome
 as a task transition (`working` → `completed | failed | cancelled`)
 and emits the matching notification on the session's SSE channel.
 Status values match the MCP 2025-11-25 wire vocabulary, and
-`createdAt` / `updatedAt` are emitted as RFC 3339 strings.
+`createdAt` / `lastUpdatedAt` are emitted as RFC 3339 strings.
 
 Hosts that drive their own long-running operations outside the
 tool path can use the public API:

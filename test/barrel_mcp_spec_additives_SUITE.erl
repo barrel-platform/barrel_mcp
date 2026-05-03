@@ -213,7 +213,7 @@ long_running_returns_taskid(Config) ->
     ?assertEqual(<<"completed">>, maps:get(<<"status">>, GetResult)),
     %% Timestamps are RFC 3339 strings now, not integers.
     ?assert(is_binary(maps:get(<<"createdAt">>, GetResult))),
-    ?assert(is_binary(maps:get(<<"updatedAt">>, GetResult))),
+    ?assert(is_binary(maps:get(<<"lastUpdatedAt">>, GetResult))),
     %% tasks/result returns the final payload.
     {ok, 200, _, ResultResp} = hackney:request(post, url(Port),
         [{<<"content-type">>, <<"application/json">>},

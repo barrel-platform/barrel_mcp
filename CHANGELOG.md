@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tasks Task-shape wire alignment
+
+- Renamed the wire field `updatedAt` → `lastUpdatedAt` on every Task envelope (`tasks/get`, `tasks/list`, `notifications/tasks/changed`). The reference Python SDK models the field as `lastUpdatedAt`, and accepts no other name.
+- Added a `ttl` field to every Task envelope (always `null` for now — we don't yet honour client-supplied TTLs). The Python SDK's `Task` model requires the field to be present.
+- `tasks/cancel` now returns the cancelled Task instead of `{}`. Matches `CancelTaskResult` in the reference SDK; existing barrel_mcp clients that pattern-match `{ok, _}` are unaffected.
+- Extended the Direction A interop test to call `experimental.list_tasks()`, exercising the Task wire shape end-to-end against the reference pydantic models.
+
 ### Tasks capability wire shape fix
 
 - `initialize` now advertises `tasks.list` / `tasks.get` / `tasks.cancel` / `tasks.result` as the spec-shaped empty objects (`#{}`) instead of bare `true` booleans. Caught by the new Python interop tests; the reference Python SDK rejects `bool` for these fields with a pydantic `ValidationError`. `listChanged` stays a boolean (the spec keeps that one as bool).
