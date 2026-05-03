@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Server-side cursor pagination on `*/list`
+
+- `tools/list`, `resources/list`, `resources/templates/list`, `prompts/list`, and `tasks/list` now accept an opaque `cursor` parameter and emit `nextCursor` when more entries remain. Page size is 50, sorted by name (or `taskId` for tasks). Existing single-shot callers see the first page transparently.
+- Direction A of the Python interop suite registers 60 dummy tools and walks `tools/list` via `cursor` until exhausted, asserting at least one `nextCursor` was emitted, no duplicates across pages, and that all fixture tools are visible across the walk.
+
 ## [1.3.0] - 2026-05-03
 
 This release is driven by a Python interop harness (PR #24) that

@@ -211,6 +211,16 @@ ensure_fixture() ->
     }),
     ok = barrel_mcp:reg_completion({prompt, <<"hello_prompt">>, <<"who">>},
                                     ?MODULE, echo_completion, #{}),
+    %% Register enough dummy tools to force multi-page behaviour
+    %% on tools/list (the server paginates at 50 entries per page).
+    [ok = barrel_mcp_registry:reg(tool,
+                                    iolist_to_binary(io_lib:format(
+                                      "dummy_~3..0B", [N])),
+                                    ?MODULE, echo_tool, #{
+        description => <<"dummy">>,
+        input_schema => #{<<"type">> => <<"object">>}
+      })
+     || N <- lists:seq(1, 60)],
     ok = barrel_mcp_registry:reg(resource, <<"greeting">>, ?MODULE,
                                   greeting_resource, #{
         name => <<"Greeting">>,
@@ -243,6 +253,9 @@ cleanup_fixture() ->
     catch barrel_mcp_registry:unreg(prompt, <<"hello_prompt">>),
     catch barrel_mcp:unreg_completion({prompt, <<"hello_prompt">>,
                                                 <<"who">>}),
+    [catch barrel_mcp_registry:unreg(tool,
+              iolist_to_binary(io_lib:format("dummy_~3..0B", [N])))
+     || N <- lists:seq(1, 60)],
     ok.
 
 echo_tool(#{<<"text">> := T}) -> T.

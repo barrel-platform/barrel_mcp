@@ -105,12 +105,20 @@ async def run(url: str) -> None:
         ) as session:
             await session.initialize()
 
-            tools = await session.list_tools()
-            tool_by_name = {t.name: t for t in tools.tools}
+            # Walk every page so we see fixtures regardless of where
+            # they fall alphabetically.
+            tool_by_name: dict = {}
+            cursor = None
+            for _ in range(50):
+                page = await session.list_tools(cursor=cursor)
+                tool_by_name.update({t.name: t for t in page.tools})
+                cursor = page.nextCursor
+                if cursor is None:
+                    break
             if EXPECTED_TOOL not in tool_by_name:
                 fail(
                     f"echo tool missing from list_tools: "
-                    f"{list(tool_by_name)}"
+                    f"{sorted(tool_by_name)[:10]}..."
                 )
             echo_tool = tool_by_name[EXPECTED_TOOL]
             if echo_tool.description != "Echo a string":
@@ -376,6 +384,37 @@ async def run(url: str) -> None:
             # tasks; assert at least one transition was observed.
             if not task_status_seen:
                 fail("no notifications/tasks/status observed")
+
+            # Pagination: explicitly walk every tool via the cursor.
+            # The Erlang server paginates in chunks of ?PAGE_SIZE (50)
+            # and emits nextCursor when more items remain. The fixture
+            # registers 60 dummy tools so this exercises at least two
+            # pages.
+            collected_names: list[str] = []
+            saw_next_cursor = False
+            cursor = None
+            for _ in range(50):
+                page = await session.list_tools(cursor=cursor)
+                collected_names.extend(t.name for t in page.tools)
+                if page.nextCursor is not None:
+                    saw_next_cursor = True
+                cursor = page.nextCursor
+                if cursor is None:
+                    break
+            if not saw_next_cursor:
+                fail(
+                    "expected at least one nextCursor across "
+                    "tools/list pages"
+                )
+            if len(collected_names) != len(set(collected_names)):
+                fail(
+                    f"pagination duplicated entries: {collected_names}"
+                )
+            if EXPECTED_TOOL not in collected_names:
+                fail(
+                    "paginated walk did not surface the echo tool: "
+                    f"{sorted(collected_names)[:10]}..."
+                )
 
     print("OK")
 
