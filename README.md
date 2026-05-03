@@ -642,6 +642,15 @@ Your application's entry point should call `barrel_mcp:start_stdio()`.
 **Logging:**
 - `logging/setLevel`
 
+## Pending features
+
+Design notes and scoped sketches for things not yet implemented
+live in [`docs/pending-features.md`](docs/pending-features.md).
+First entry: **Enterprise-Managed Authorization** (the second
+half of the MCP `ext-auth` extension — RFC 8693 token-exchange
+chained through an org IdP for SSO-driven MCP access). Open an
+issue if you want one prioritised.
+
 ## Development
 
 ```bash
