@@ -40,8 +40,18 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {barrel_mcp, {git, "https://github.com/your-org/barrel_mcp.git", {branch, "main"}}}
+    {barrel_mcp,
+        {git, "https://github.com/barrel-platform/barrel_mcp.git",
+              {tag, "v1.2.0"}}}
 ]}.
+```
+
+Track `main` instead of pinning a tag for the latest fixes:
+
+```erlang
+{barrel_mcp,
+    {git, "https://github.com/barrel-platform/barrel_mcp.git",
+          {branch, "main"}}}
 ```
 
 ## Architecture
