@@ -173,7 +173,7 @@ models and routes the model's tool calls back through the MCP
 client.
 
 ```erlang
-agent_tool_loop(McpPid) ->
+single_server_loop(McpPid) ->
     {ok, McpTools} = barrel_mcp_client:list_tools_all(McpPid),
     AnthropicTools = barrel_mcp_tool_format:to_anthropic(McpTools),
     %% ... call Anthropic with AnthropicTools, get tool_use blocks ...
@@ -188,6 +188,26 @@ receive_tool_use_block() ->
 
 `to_openai/1` and `from_openai_call/1` follow the same pattern for
 the OpenAI Chat Completions tool-call envelope.
+
+### Federate across servers with the agent aggregator
+
+When the host connects to several MCP servers at once (via
+`barrel_mcp:start_client/2`), `barrel_mcp_agent` collapses every
+catalog into one namespaced list and routes a model's call back to
+the right server.
+
+```erlang
+multi_server_loop() ->
+    Tools = barrel_mcp_agent:to_anthropic(),
+    %% ... call Anthropic with Tools ...
+    Block = receive_tool_use_block(),
+    {Name, Args} = barrel_mcp_tool_format:from_anthropic_call(Block),
+    barrel_mcp_agent:call_tool(Name, Args).
+```
+
+Tool names round-trip through `<<"ServerId:ToolName">>`. Pick a
+different separator with `#{separator => <<"::">>}` if `:` clashes
+with one of your tool names.
 
 ---
 

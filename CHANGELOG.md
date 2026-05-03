@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### `barrel_mcp_agent` — multi-server tool aggregator
+
+- New module sitting on top of `barrel_mcp_clients`. Aggregates `tools/list` across every connected MCP client, rewrites each tool name to `<<"ServerId<sep>ToolName">>` (default separator `:`), and routes a namespaced `call_tool/2,3` back to the correct client.
+- `to_anthropic/0,1` and `to_openai/0,1` return the aggregated catalog directly in provider format, ready to hand to a model.
+- Closes the orchestration gap for hosts running an agent loop against multiple MCP servers.
+
 ### `barrel_mcp_tool_format` — LLM provider tool-shape translator
 
 - New module bridging MCP tool definitions and the tool shapes the LLM provider APIs expect.
