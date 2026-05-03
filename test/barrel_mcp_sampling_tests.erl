@@ -163,6 +163,76 @@ test_sampling_timeout() ->
     exit(Pid, kill).
 
 %% ============================================================================
+%% elicit_create round-trip
+%% ============================================================================
+
+elicit_round_trip_test_() ->
+    {setup, fun setup/0, fun teardown/1, fun(_) ->
+        [
+            {"declines without elicitation capability",
+             fun test_elicit_not_supported/0},
+            {"happy path: response routed to caller",
+             fun test_elicit_round_trip/0},
+            {"timeout when no response arrives",
+             fun test_elicit_timeout/0}
+        ]
+    end}.
+
+test_elicit_not_supported() ->
+    {ok, S1} = barrel_mcp_session:create(#{}),
+    ?assertEqual({error, not_supported},
+                 barrel_mcp:elicit_create(S1, #{}, #{})).
+
+test_elicit_round_trip() ->
+    {ok, S1} = barrel_mcp_session:create(#{}),
+    ok = barrel_mcp_session:set_client_capabilities(
+        S1, #{<<"elicitation">> => #{}}),
+    Self = self(),
+    Pid = spawn(fun() -> sampling_responder(Self) end),
+    ok = barrel_mcp_session:set_sse_pid(S1, Pid),
+    spawn(fun() ->
+        Self ! {result, barrel_mcp:elicit_create(
+            S1,
+            #{<<"message">> => <<"Pick a colour">>,
+              <<"requestedSchema">> => #{<<"type">> => <<"object">>}},
+            #{timeout_ms => 2000})}
+    end),
+    Request = receive
+        {got_message, Msg} -> Msg
+    after 1000 -> ?assert(false), undefined
+    end,
+    Id = maps:get(<<"id">>, Request),
+    ?assertEqual(<<"elicitation/create">>,
+                 maps:get(<<"method">>, Request)),
+    ok = barrel_mcp_session:deliver_response(Id, #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => Id,
+        <<"result">> => #{<<"action">> => <<"accept">>,
+                          <<"content">> => #{<<"colour">> => <<"blue">>}}
+    }),
+    receive
+        {result, {ok, Result}} ->
+            ?assertEqual(<<"accept">>, maps:get(<<"action">>, Result)),
+            ?assertEqual(<<"blue">>,
+                         maps:get(<<"colour">>,
+                                  maps:get(<<"content">>, Result)))
+    after 2000 ->
+        ?assert(false)
+    end,
+    exit(Pid, kill).
+
+test_elicit_timeout() ->
+    {ok, S1} = barrel_mcp_session:create(#{}),
+    ok = barrel_mcp_session:set_client_capabilities(
+        S1, #{<<"elicitation">> => #{}}),
+    Pid = spawn(fun() -> idle_loop() end),
+    ok = barrel_mcp_session:set_sse_pid(S1, Pid),
+    ?assertEqual({error, timeout},
+                 barrel_mcp:elicit_create(
+                     S1, #{}, #{timeout_ms => 100})),
+    exit(Pid, kill).
+
+%% ============================================================================
 %% Helpers
 %% ============================================================================
 

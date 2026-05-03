@@ -106,6 +106,8 @@
 -export([
     sampling_create_message/3,
     list_sessions_with_sampling/0,
+    elicit_create/3,
+    list_sessions_with_elicitation/0,
     notify_resource_updated/1,
     notify_resource_updated/2,
     notify_progress/3,
@@ -717,6 +719,23 @@ sampling_create_message(SessionId, Params, Opts) ->
 -spec list_sessions_with_sampling() -> [binary()].
 list_sessions_with_sampling() ->
     barrel_mcp_session:list_sampling_capable().
+
+%% @doc Send `elicitation/create' to the client behind a session to
+%% request structured user input. Requires the client to have declared
+%% elicitation capability in its `initialize' request and an active SSE
+%% stream. Blocks until the client responds or `timeout_ms' (default
+%% 30s) elapses.
+-spec elicit_create(binary(), map(), map()) ->
+    {ok, Result :: map()}
+  | {error, timeout | not_supported | no_sse | not_found | term()}.
+elicit_create(SessionId, Params, Opts) ->
+    barrel_mcp_session:elicit_create(SessionId, Params, Opts).
+
+%% @doc Return the ids of currently connected sessions whose client
+%% declared elicitation capability.
+-spec list_sessions_with_elicitation() -> [binary()].
+list_sessions_with_elicitation() ->
+    barrel_mcp_session:list_elicitation_capable().
 
 %% @doc Notify all subscribers of a resource that it has changed.
 %% The notification body is a JSON-RPC notification with no params; the
