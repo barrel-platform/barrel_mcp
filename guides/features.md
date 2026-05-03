@@ -53,10 +53,12 @@ Erlang MCP library. See `CHANGELOG.md` for release-by-release detail.
   `{resource_template, Uri, Arg}`; advertised via the
   `completions` capability when at least one is registered.
 - All registrations accept optional `title` and `icons`.
-- Tool registrations additionally accept `annotations` —
-  spec-shaped behavioural hints (`readOnlyHint`, `destructiveHint`,
-  `idempotentHint`, `openWorldHint`) surfaced verbatim under
-  `annotations` in `tools/list`.
+- Tool, resource, prompt, and resource-template registrations
+  also accept `annotations` — a free-form map surfaced verbatim
+  under `annotations` in the matching `*/list` payload. Tools use
+  `readOnlyHint`, `destructiveHint`, `idempotentHint`,
+  `openWorldHint`; resources/prompts/templates use `audience`
+  (`["user" | "assistant"]`) and `priority` (0..1).
 
 ### Tool features
 

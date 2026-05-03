@@ -30,7 +30,9 @@ resources_test_() ->
         {"Read resource returns JSON content", fun test_read_resource_json/0},
         {"Read non-existent resource returns error", fun test_read_resource_not_found/0},
         {"Resource with mime type is listed correctly", fun test_resource_mime_type/0},
-        {"List resource templates returns empty", fun test_list_resource_templates/0}
+        {"List resource templates returns empty", fun test_list_resource_templates/0},
+        {"Resource annotations are surfaced in resources/list",
+         fun test_resource_annotations/0}
      ]
     }.
 
@@ -230,3 +232,22 @@ test_list_resource_templates() ->
     Result = maps:get(<<"result">>, Response),
     Templates = maps:get(<<"resourceTemplates">>, Result),
     ?assertEqual([], Templates).
+
+test_resource_annotations() ->
+    Annotations = #{<<"audience">> => [<<"user">>],
+                    <<"priority">> => 0.8},
+    ok = barrel_mcp_registry:reg(resource, <<"ann_res">>, ?MODULE, text_resource, #{
+        name => <<"Annotated">>,
+        uri => <<"mem://annotated">>,
+        annotations => Annotations
+    }),
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"resources/list">>
+    },
+    Response = barrel_mcp_protocol:handle(Request),
+    Result = maps:get(<<"result">>, Response),
+    [Resource] = maps:get(<<"resources">>, Result),
+    ?assertEqual(Annotations, maps:get(<<"annotations">>, Resource)),
+    barrel_mcp_registry:unreg(resource, <<"ann_res">>).
