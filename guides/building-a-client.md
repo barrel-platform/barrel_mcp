@@ -217,7 +217,7 @@ classify(#{<<"content">> := Content}) ->
 
 If the server registered the tool with `long_running => true`,
 `call_tool` returns immediately with `#{<<"taskId">> := Id,
-<<"status">> := <<"running">>}`. Track progress with the methods
+<<"status">> := <<"working">>}`. Track progress with the methods
 in section 12.
 
 ---
@@ -417,13 +417,22 @@ list_tasks(Pid) ->
 
 abort_task(Pid, TaskId) ->
     barrel_mcp_client:tasks_cancel(Pid, TaskId).
+
+fetch_task_result(Pid, TaskId) ->
+    %% Returns the recorded result for a `completed' task, or an
+    %% error for `failed' / `cancelled' / still-`working' tasks.
+    barrel_mcp_client:tasks_result(Pid, TaskId).
 ```
+
+Status values on the wire are `working`, `completed`, `failed`,
+and `cancelled`; `createdAt` and `updatedAt` are RFC 3339 strings.
 
 When you registered a `progress_token` on the originating call,
 the same task usually emits `notifications/progress` updates that
-arrive through your handler, so polling is rarely required —
-prefer subscribing to `notifications/tasks/changed` in the
-handler over busy-polling `tasks_get/2`.
+arrive through your handler, so polling is rarely required. Prefer
+subscribing to `notifications/tasks/changed` in the handler over
+busy-polling `tasks_get/2`, then fetch the payload once with
+`tasks_result/2` when the status reaches `completed`.
 
 ---
 

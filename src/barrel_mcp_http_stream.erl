@@ -417,7 +417,7 @@ handle_long_running_call(Req0, State, SessionId, RequestId, ToolName,
                                      #{worker => Worker,
                                        request_id => RequestId}),
     Result = #{<<"taskId">> => TaskId,
-               <<"status">> => <<"running">>},
+               <<"status">> => <<"working">>},
     send_tool_envelope(Req0, State, SessionId, RequestId, Result).
 
 %% Tiny worker that funnels tool outcomes into the task registry.

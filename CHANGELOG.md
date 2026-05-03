@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tasks spec parity (MCP 2025-11-25)
+
+- **Status vocabulary aligned with spec.** Internal `running | success | error | cancelled` replaced with `working | completed | failed | cancelled` on the wire (in `tasks/get`, `tasks/list`, `notifications/tasks/changed`, and the immediate `tools/call` response when `long_running => true`).
+- **RFC 3339 timestamps.** `createdAt` and `updatedAt` are emitted as ISO 8601 strings via `calendar:system_time_to_rfc3339/1` instead of integer milliseconds.
+- **`tasks/result` method.** New JSON-RPC method to fetch the recorded result for a `completed` task (or the recorded error for `failed`); returns `Task not yet complete` for `working`, `Task cancelled` for `cancelled`, and `Task not found` otherwise. New client wrapper `barrel_mcp_client:tasks_result/2`.
+- **Tasks capability shape.** Advertised as `#{list, get, cancel, result, listChanged}` instead of the bare `#{listChanged}` placeholder.
+
 ### Critical correctness and security fixes
 
 - **API-key auth verification.** `barrel_mcp_auth_apikey:verify_key/2` no longer returns `ok` for any HMAC-formatted stored value (it was self-comparing `Stored` with itself). The 2-arity helper now rejects HMAC formats with `{error, pepper_required}`; a new `verify_key/3` takes the pepper and does a constant-time HMAC compare. The provider state now keeps `pepper`, so `hash_keys => true` with a configured pepper actually verifies HMAC keys end to end.

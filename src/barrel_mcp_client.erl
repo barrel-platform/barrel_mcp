@@ -63,6 +63,7 @@
     tasks_list_all/1,
     tasks_get/2,
     tasks_cancel/2,
+    tasks_result/2,
     %% Misc
     complete/3,
     set_log_level/2,
@@ -322,6 +323,14 @@ tasks_get(Pid, TaskId) ->
 -spec tasks_cancel(pid(), binary()) -> {ok, map()} | {error, term()}.
 tasks_cancel(Pid, TaskId) ->
     request(Pid, <<"tasks/cancel">>, #{<<"taskId">> => TaskId}).
+
+%% @doc Fetch the final result of a completed task. Returns the
+%% task's stored `result' map; for `failed' tasks returns
+%% `{error, {Code, Message}}'; for tasks still `working' returns
+%% `{error, {_, <<"Task not yet complete">>}}'.
+-spec tasks_result(pid(), binary()) -> {ok, map()} | {error, term()}.
+tasks_result(Pid, TaskId) ->
+    request(Pid, <<"tasks/result">>, #{<<"taskId">> => TaskId}).
 
 %% @doc Send a `ping' request and wait for the response.
 -spec ping(pid()) -> {ok, map()} | {error, term()}.
