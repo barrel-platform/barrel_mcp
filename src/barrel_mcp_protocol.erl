@@ -164,7 +164,10 @@ handle_request(<<"ping">>, _Params, Id, _State) ->
     success_response(Id, #{});
 
 %% Tools
-handle_request(<<"tools/list">>, _Params, Id, _State) ->
+handle_request(<<"tools/list">>, Params, Id, _State) ->
+    Cursor = maps:get(<<"cursor">>, Params, undefined),
+    {Page, Next} = paginate(barrel_mcp_registry:all(tool), Cursor,
+                             fun({N, _}) -> N end),
     Tools = lists:map(fun({Name, Handler}) ->
         Base = #{
             <<"name">> => Name,
@@ -177,8 +180,8 @@ handle_request(<<"tools/list">>, _Params, Id, _State) ->
             {<<"icons">>, icons},
             {<<"annotations">>, annotations}
         ])
-    end, barrel_mcp_registry:all(tool)),
-    success_response(Id, #{<<"tools">> => Tools});
+    end, Page),
+    success_response(Id, with_next_cursor(#{<<"tools">> => Tools}, Next));
 
 handle_request(<<"tools/call">>, Params, Id, _State) ->
     Name = maps:get(<<"name">>, Params, <<>>),
@@ -209,7 +212,10 @@ handle_request(<<"tools/call">>, Params, Id, _State) ->
     {async, Plan};
 
 %% Resources
-handle_request(<<"resources/list">>, _Params, Id, _State) ->
+handle_request(<<"resources/list">>, Params, Id, _State) ->
+    Cursor = maps:get(<<"cursor">>, Params, undefined),
+    {Page, Next} = paginate(barrel_mcp_registry:all(resource), Cursor,
+                             fun({N, _}) -> N end),
     Resources = lists:map(fun({_Name, Handler}) ->
         Base = #{
             <<"uri">> => maps:get(uri, Handler, <<>>),
@@ -222,8 +228,9 @@ handle_request(<<"resources/list">>, _Params, Id, _State) ->
             {<<"icons">>, icons},
             {<<"annotations">>, annotations}
         ])
-    end, barrel_mcp_registry:all(resource)),
-    success_response(Id, #{<<"resources">> => Resources});
+    end, Page),
+    success_response(Id, with_next_cursor(#{<<"resources">> => Resources},
+                                            Next));
 
 handle_request(<<"resources/read">>, Params, Id, _State) ->
     Uri = maps:get(<<"uri">>, Params, <<>>),
@@ -242,7 +249,10 @@ handle_request(<<"resources/read">>, Params, Id, _State) ->
             error_response(Id, ?JSONRPC_METHOD_NOT_FOUND, <<"Resource not found">>)
     end;
 
-handle_request(<<"resources/templates/list">>, _Params, Id, _State) ->
+handle_request(<<"resources/templates/list">>, Params, Id, _State) ->
+    Cursor = maps:get(<<"cursor">>, Params, undefined),
+    {Page, Next} = paginate(barrel_mcp_registry:all(resource_template),
+                             Cursor, fun({N, _}) -> N end),
     Templates = lists:map(fun({_Name, Handler}) ->
         Base = #{
             <<"uriTemplate">> => maps:get(uri_template, Handler, <<>>),
@@ -256,8 +266,10 @@ handle_request(<<"resources/templates/list">>, _Params, Id, _State) ->
             {<<"icons">>, icons},
             {<<"annotations">>, annotations}
         ])
-    end, barrel_mcp_registry:all(resource_template)),
-    success_response(Id, #{<<"resourceTemplates">> => Templates});
+    end, Page),
+    success_response(Id, with_next_cursor(
+                           #{<<"resourceTemplates">> => Templates},
+                           Next));
 
 handle_request(<<"resources/subscribe">>, Params, Id, State) ->
     Uri = maps:get(<<"uri">>, Params, <<>>),
@@ -282,7 +294,10 @@ handle_request(<<"resources/unsubscribe">>, Params, Id, State) ->
     end;
 
 %% Prompts
-handle_request(<<"prompts/list">>, _Params, Id, _State) ->
+handle_request(<<"prompts/list">>, Params, Id, _State) ->
+    Cursor = maps:get(<<"cursor">>, Params, undefined),
+    {Page, Next} = paginate(barrel_mcp_registry:all(prompt), Cursor,
+                             fun({N, _}) -> N end),
     Prompts = lists:map(fun({Name, Handler}) ->
         Base = #{
             <<"name">> => Name,
@@ -300,8 +315,9 @@ handle_request(<<"prompts/list">>, _Params, Id, _State) ->
             {<<"icons">>, icons},
             {<<"annotations">>, annotations}
         ])
-    end, barrel_mcp_registry:all(prompt)),
-    success_response(Id, #{<<"prompts">> => Prompts});
+    end, Page),
+    success_response(Id, with_next_cursor(#{<<"prompts">> => Prompts},
+                                            Next));
 
 handle_request(<<"prompts/get">>, Params, Id, _State) ->
     Name = maps:get(<<"name">>, Params, <<>>),
@@ -319,10 +335,13 @@ handle_request(<<"prompts/get">>, Params, Id, _State) ->
     end;
 
 %% Tasks
-handle_request(<<"tasks/list">>, _Params, Id, State) ->
+handle_request(<<"tasks/list">>, Params, Id, State) ->
     SessionId = maps:get(session_id, State, undefined),
-    {ok, Tasks} = barrel_mcp_tasks:list(SessionId, #{}),
-    success_response(Id, #{<<"tasks">> => Tasks});
+    Cursor = maps:get(<<"cursor">>, Params, undefined),
+    {ok, AllTasks} = barrel_mcp_tasks:list(SessionId, #{}),
+    {Page, Next} = paginate(AllTasks, Cursor,
+                             fun(T) -> maps:get(<<"taskId">>, T) end),
+    success_response(Id, with_next_cursor(#{<<"tasks">> => Page}, Next));
 
 handle_request(<<"tasks/get">>, Params, Id, State) ->
     SessionId = maps:get(session_id, State, undefined),
@@ -622,6 +641,37 @@ with_optional_fields(Envelope, Handler, Fields) ->
             V -> Acc#{WireKey => V}
         end
     end, Envelope, Fields).
+
+%%====================================================================
+%% Cursor pagination for `*/list' handlers
+%%====================================================================
+
+-define(PAGE_SIZE, 50).
+
+%% Sort `Items' by `KeyFn(Item)', drop everything up to and
+%% including `Cursor', take up to `?PAGE_SIZE'. Returns
+%% `{Page, NextCursor}' where `NextCursor' is the last key of the
+%% page when more items remain, or `undefined' otherwise.
+%% `Cursor' is the opaque last-seen key from a prior response.
+paginate(Items, Cursor, KeyFn) ->
+    Sorted = lists:sort(fun(A, B) -> KeyFn(A) =< KeyFn(B) end, Items),
+    AfterCursor = drop_until_after(Sorted, Cursor, KeyFn),
+    case lists:split(min(?PAGE_SIZE, length(AfterCursor)),
+                     AfterCursor) of
+        {Page, []} ->
+            {Page, undefined};
+        {Page, _Rest} ->
+            Last = lists:last(Page),
+            {Page, KeyFn(Last)}
+    end.
+
+drop_until_after(Items, undefined, _) ->
+    Items;
+drop_until_after(Items, Cursor, KeyFn) ->
+    lists:dropwhile(fun(I) -> KeyFn(I) =< Cursor end, Items).
+
+with_next_cursor(Resp, undefined) -> Resp;
+with_next_cursor(Resp, Cursor) -> Resp#{<<"nextCursor">> => Cursor}.
 
 %% Pick the protocol version to advertise in the `initialize'
 %% response. If the client's requested version is one we speak, echo
