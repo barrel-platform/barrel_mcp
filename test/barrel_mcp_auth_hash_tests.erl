@@ -71,3 +71,50 @@ apikey_hmac_is_pepper_dependent_test() ->
     H2 = barrel_mcp_auth_apikey:hash_key(<<"my-key">>,
                                           #{pepper => <<"b">>}),
     ?assertNotEqual(H1, H2).
+
+%%====================================================================
+%% verify_key/3 (correct HMAC verification with pepper)
+%%====================================================================
+
+apikey_verify_with_pepper_round_trip_test() ->
+    Pepper = <<"the-actual-pepper">>,
+    H = barrel_mcp_auth_apikey:hash_key(<<"k1">>, #{pepper => Pepper}),
+    ?assertEqual(ok, barrel_mcp_auth_apikey:verify_key(<<"k1">>, H, Pepper)),
+    ?assertEqual({error, invalid_credentials},
+                 barrel_mcp_auth_apikey:verify_key(<<"wrong">>, H, Pepper)).
+
+apikey_verify_with_wrong_pepper_fails_test() ->
+    H = barrel_mcp_auth_apikey:hash_key(<<"k1">>, #{pepper => <<"good">>}),
+    ?assertEqual({error, invalid_credentials},
+                 barrel_mcp_auth_apikey:verify_key(<<"k1">>, H, <<"bad">>)).
+
+apikey_verify_2arity_rejects_hmac_format_test() ->
+    H = barrel_mcp_auth_apikey:hash_key(<<"k1">>, #{pepper => <<"p">>}),
+    %% 2-arity helper has no pepper; it must NOT silently accept.
+    ?assertEqual({error, pepper_required},
+                 barrel_mcp_auth_apikey:verify_key(<<"k1">>, H)).
+
+apikey_provider_init_keeps_pepper_test() ->
+    {ok, State} = barrel_mcp_auth_apikey:init(#{
+        keys => #{},
+        hash_keys => true,
+        pepper => <<"persistent">>
+    }),
+    ?assertEqual(<<"persistent">>, maps:get(pepper, State)).
+
+apikey_provider_authenticate_with_hmac_test() ->
+    Pepper = <<"shhh">>,
+    Key = <<"client-1-key">>,
+    Stored = barrel_mcp_auth_apikey:hash_key(Key, #{pepper => Pepper}),
+    {ok, State} = barrel_mcp_auth_apikey:init(#{
+        keys => #{Stored => #{subject => <<"client-1">>}},
+        hash_keys => true,
+        pepper => Pepper
+    }),
+    Req = #{headers => #{<<"x-api-key">> => Key}},
+    ?assertMatch({ok, #{subject := <<"client-1">>}},
+                 barrel_mcp_auth_apikey:authenticate(Req, State)),
+    %% Wrong key must fail.
+    BadReq = #{headers => #{<<"x-api-key">> => <<"nope">>}},
+    ?assertMatch({error, _},
+                 barrel_mcp_auth_apikey:authenticate(BadReq, State)).

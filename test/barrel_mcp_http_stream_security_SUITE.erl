@@ -29,7 +29,11 @@
     batch_rejected/1,
     id_null_rejected/1,
     id_object_rejected/1,
-    ets_session_table_protected/1
+    ets_session_table_protected/1,
+    accept_only_json_rejected/1,
+    accept_only_sse_rejected/1,
+    accept_wildcard_ok/1,
+    initialize_with_unknown_session_returns_404/1
 ]).
 
 -define(BASE_PORT, 21100).
@@ -49,7 +53,11 @@ all() -> [
     batch_rejected,
     id_null_rejected,
     id_object_rejected,
-    ets_session_table_protected
+    ets_session_table_protected,
+    accept_only_json_rejected,
+    accept_only_sse_rejected,
+    accept_wildcard_ok,
+    initialize_with_unknown_session_returns_404
 ].
 
 init_per_suite(Config) ->
@@ -90,7 +98,7 @@ origin_loopback_rejects_external(Config) ->
     {ok, 403, _, _} = hackney:request(post,
         url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
          {<<"origin">>, <<"https://attacker.example">>}],
         init_body(), [with_body]),
     ok.
@@ -102,7 +110,7 @@ origin_null_rejected_by_default(Config) ->
     {ok, 403, _, _} = hackney:request(post,
         url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
          {<<"origin">>, <<"null">>}],
         init_body(), [with_body]),
     ok.
@@ -134,7 +142,7 @@ session_missing_returns_400(Config) ->
     {ok, 400, _, _} = hackney:request(post,
         url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
+         {<<"accept">>, <<"application/json, text/event-stream">>}],
         ping_body(), [with_body]),
     ok.
 
@@ -145,7 +153,7 @@ session_unknown_returns_404(Config) ->
     {ok, 404, _, _} = hackney:request(post,
         url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
          {<<"mcp-session-id">>, <<"mcp_not_a_real_session">>}],
         ping_body(), [with_body]),
     ok.
@@ -163,7 +171,7 @@ notification_returns_202(Config) ->
     {ok, 202, _, _} = hackney:request(post,
         url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
+         {<<"accept">>, <<"application/json, text/event-stream">>}],
         Notif, [with_body]),
     ok.
 
@@ -179,7 +187,7 @@ response_post_returns_202(Config) ->
     {ok, 202, _, _} = hackney:request(post,
         url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
+         {<<"accept">>, <<"application/json, text/event-stream">>}],
         Resp, [with_body]),
     ok.
 
@@ -196,7 +204,7 @@ protocol_version_unsupported_returns_400(Config) ->
     {ok, 400, _, _} = hackney:request(post,
         url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
          {<<"mcp-session-id">>, SessionId},
          {<<"mcp-protocol-version">>, <<"1999-01-01">>}],
         ping_body(), [with_body]),
@@ -211,7 +219,7 @@ protocol_version_present_supported_ok(Config) ->
     {ok, 200, _, _} = hackney:request(post,
         url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
          {<<"mcp-session-id">>, SessionId},
          {<<"mcp-protocol-version">>, <<"2025-11-25">>}],
         ping_body(), [with_body]),
@@ -231,7 +239,7 @@ batch_rejected(Config) ->
     {ok, 400, _, Body} = hackney:request(post,
         url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
+         {<<"accept">>, <<"application/json, text/event-stream">>}],
         Batch, [with_body]),
     Resp = json:decode(Body),
     ?assertEqual(-32600, maps:get(<<"code">>,
@@ -248,7 +256,7 @@ id_null_rejected(Config) ->
     {ok, _, _, Body} = hackney:request(post,
         url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
+         {<<"accept">>, <<"application/json, text/event-stream">>}],
         Body0, [with_body]),
     Resp = json:decode(Body),
     ?assertEqual(-32600, maps:get(<<"code">>,
@@ -264,11 +272,60 @@ id_object_rejected(Config) ->
     {ok, _, _, Body} = hackney:request(post,
         url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
+         {<<"accept">>, <<"application/json, text/event-stream">>}],
         Body0, [with_body]),
     Resp = json:decode(Body),
     ?assertEqual(-32600, maps:get(<<"code">>,
                                   maps:get(<<"error">>, Resp))).
+
+%%====================================================================
+%% Accept-header strictness
+%%====================================================================
+
+accept_only_json_rejected(Config) ->
+    Port = ?config(port, Config),
+    {ok, _} = barrel_mcp:start_http_stream(#{port => Port,
+                                             session_enabled => false}),
+    {ok, 406, _, _} = hackney:request(post, url(Port),
+        [{<<"content-type">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json">>}],
+        ping_body(), [with_body]),
+    ok.
+
+accept_only_sse_rejected(Config) ->
+    Port = ?config(port, Config),
+    {ok, _} = barrel_mcp:start_http_stream(#{port => Port,
+                                             session_enabled => false}),
+    {ok, 406, _, _} = hackney:request(post, url(Port),
+        [{<<"content-type">>, <<"application/json">>},
+         {<<"accept">>, <<"text/event-stream">>}],
+        ping_body(), [with_body]),
+    ok.
+
+accept_wildcard_ok(Config) ->
+    Port = ?config(port, Config),
+    {ok, _} = barrel_mcp:start_http_stream(#{port => Port,
+                                             session_enabled => false}),
+    {ok, 200, _, _} = hackney:request(post, url(Port),
+        [{<<"content-type">>, <<"application/json">>},
+         {<<"accept">>, <<"*/*">>}],
+        ping_body(), [with_body]),
+    ok.
+
+%%====================================================================
+%% Initialize with unknown session id
+%%====================================================================
+
+initialize_with_unknown_session_returns_404(Config) ->
+    Port = ?config(port, Config),
+    {ok, _} = barrel_mcp:start_http_stream(#{port => Port,
+                                             session_enabled => true}),
+    {ok, 404, _, _} = hackney:request(post, url(Port),
+        [{<<"content-type">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
+         {<<"mcp-session-id">>, <<"mcp_does_not_exist">>}],
+        init_body(), [with_body]),
+    ok.
 
 %%====================================================================
 %% ETS visibility
@@ -314,7 +371,7 @@ ping_body() ->
 
 post_init(Port, ExtraHeaders) ->
     Headers = [{<<"content-type">>, <<"application/json">>},
-               {<<"accept">>, <<"application/json">>} | ExtraHeaders],
+               {<<"accept">>, <<"application/json, text/event-stream">>} | ExtraHeaders],
     {ok, S, H, B} = hackney:request(post, url(Port), Headers,
                                     init_body(), [with_body]),
     {S, H, B}.

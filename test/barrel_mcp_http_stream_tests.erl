@@ -87,7 +87,7 @@ test_post_json() ->
     {ok, Status, Headers, Body} = hackney:request(post,
         <<"http://localhost:19091/mcp">>,
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
+         {<<"accept">>, <<"application/json, text/event-stream">>}],
         Request, []),
 
     ?assertEqual(200, Status),
@@ -165,7 +165,7 @@ test_session_header() ->
     {ok, 200, Headers2, _} = hackney:request(post,
         <<"http://localhost:19095/mcp">>,
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
          {<<"mcp-session-id">>, SessionId}],
         Ping, []),
     ?assertEqual(SessionId, proplists:get_value(<<"mcp-session-id">>, Headers2)),
@@ -197,7 +197,7 @@ post_initialize(Url) ->
     }),
     {ok, S, H, Resp} = hackney:request(post, Url,
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
+         {<<"accept">>, <<"application/json, text/event-stream">>}],
         Body, [with_body]),
     {S, H, Resp}.
 
@@ -222,7 +222,7 @@ test_auth_required() ->
     {ok, Status, _, _Body} = hackney:request(post,
         <<"http://localhost:19097/mcp">>,
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
+         {<<"accept">>, <<"application/json, text/event-stream">>}],
         Request, []),
 
     ?assertEqual(401, Status),
@@ -250,7 +250,7 @@ test_auth_valid() ->
     {ok, Status, _, _Body} = hackney:request(post,
         <<"http://localhost:19098/mcp">>,
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
          {<<"x-api-key">>, <<"test-key">>}],
         Request, []),
 

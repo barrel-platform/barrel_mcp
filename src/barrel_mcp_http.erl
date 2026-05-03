@@ -108,27 +108,19 @@ dispatch_method(_, Req0, State) ->
 
 handle_post(Req0, State) ->
     AuthConfig = maps:get(auth_config, State, #{provider => barrel_mcp_auth_none}),
-
-    %% Extract headers for authentication
-    Headers = extract_headers(Req0),
+    Headers = barrel_mcp_http_stream:extract_headers(Req0, AuthConfig),
     AuthRequest = #{headers => Headers},
-
-    %% Authenticate the request
     case authenticate(AuthConfig, AuthRequest) of
         {ok, AuthInfo} ->
-            %% Authentication successful, process MCP request
             handle_mcp_request(Req0, State#{auth_info => AuthInfo});
         {error, Reason} ->
-            %% Authentication failed, return challenge
             handle_auth_error(Req0, State, AuthConfig, Reason)
     end.
 
 handle_mcp_request(Req0, State) ->
     {ok, Body, Req1} = cowboy_req:read_body(Req0),
-
-    Response = case barrel_mcp_protocol:decode(Body) of
+    case barrel_mcp_protocol:decode(Body) of
         {ok, Request} ->
-            %% Add auth_info to request context for handlers
             AuthInfo = maps:get(auth_info, State, undefined),
             RequestWithAuth = case AuthInfo of
                 undefined -> Request;
@@ -136,43 +128,41 @@ handle_mcp_request(Req0, State) ->
             end,
             case barrel_mcp_protocol:handle(RequestWithAuth) of
                 no_response ->
-                    %% Notification - return 204 No Content
-                    Req2 = cowboy_req:reply(204, cors_headers(), <<>>, Req1),
+                    Req2 = cowboy_req:reply(204, cors(Req0, State), <<>>, Req1),
                     {ok, Req2, State};
+                {async, Plan} ->
+                    Result = barrel_mcp_protocol:drive_async_plan(Plan, 60000),
+                    reply_json(Req0, Req1, State, 200, Result);
                 Result ->
-                    ResponseJson = barrel_mcp_protocol:encode(Result),
-                    Headers = maps:merge(#{<<"content-type">> => <<"application/json">>}, cors_headers()),
-                    Req2 = cowboy_req:reply(200, Headers, ResponseJson, Req1),
-                    {ok, Req2, State}
+                    reply_json(Req0, Req1, State, 200, Result)
             end;
         {error, parse_error} ->
             ErrorResponse = barrel_mcp_protocol:error_response(
-                null, -32700, <<"Parse error">>
-            ),
-            ResponseJson = barrel_mcp_protocol:encode(ErrorResponse),
-            Headers = maps:merge(#{<<"content-type">> => <<"application/json">>}, cors_headers()),
-            Req2 = cowboy_req:reply(400, Headers, ResponseJson, Req1),
-            {ok, Req2, State}
-    end,
-    Response.
+                null, -32700, <<"Parse error">>),
+            reply_json(Req0, Req1, State, 400, ErrorResponse)
+    end.
+
+reply_json(Req0, ReqAfterRead, State, Status, Envelope) ->
+    Json = barrel_mcp_protocol:encode(Envelope),
+    Headers = barrel_mcp_http_stream:cors_response_headers(Req0, State, #{
+        <<"content-type">> => <<"application/json">>
+    }),
+    Req2 = cowboy_req:reply(Status, Headers, Json, ReqAfterRead),
+    {ok, Req2, State}.
 
 handle_auth_error(Req0, State, AuthConfig, Reason) ->
-    {StatusCode, AuthHeaders, Body} = barrel_mcp_auth:challenge_response(AuthConfig, Reason),
-    Headers = maps:merge(AuthHeaders, cors_headers()),
+    {StatusCode, AuthHeaders, Body} =
+        barrel_mcp_auth:challenge_response(AuthConfig, Reason),
+    Headers = maps:merge(AuthHeaders, cors(Req0, State)),
     Req = cowboy_req:reply(StatusCode, Headers, Body, Req0),
     {ok, Req, State}.
 
 handle_options(Req0, State) ->
-    Req = cowboy_req:reply(204, cors_headers(), <<>>, Req0),
+    Req = cowboy_req:reply(204, cors(Req0, State), <<>>, Req0),
     {ok, Req, State}.
 
-cors_headers() ->
-    #{
-        <<"access-control-allow-origin">> => <<"*">>,
-        <<"access-control-allow-methods">> => <<"POST, OPTIONS">>,
-        <<"access-control-allow-headers">> => <<"content-type, authorization, x-api-key">>,
-        <<"access-control-expose-headers">> => <<"www-authenticate">>
-    }.
+cors(Req, State) ->
+    barrel_mcp_http_stream:cors_response_headers(Req, State, #{}).
 
 %%====================================================================
 %% Authentication
@@ -199,13 +189,3 @@ authenticate(#{provider := barrel_mcp_auth_none}, _Request) ->
     barrel_mcp_auth_none:authenticate(#{}, undefined);
 authenticate(AuthConfig, Request) ->
     barrel_mcp_auth:authenticate(AuthConfig, Request, AuthConfig).
-
-extract_headers(Req) ->
-    %% Extract relevant headers for authentication
-    HeaderNames = [<<"authorization">>, <<"x-api-key">>],
-    lists:foldl(fun(Name, Acc) ->
-        case cowboy_req:header(Name, Req) of
-            undefined -> Acc;
-            Value -> Acc#{Name => Value}
-        end
-    end, #{}, HeaderNames).

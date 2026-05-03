@@ -109,18 +109,18 @@ verify_credentials(Username, Password, #{verifier := Verifier})
     end;
 verify_credentials(Username, Password, #{credentials := Creds, hash_passwords := HashPwd})
   when map_size(Creds) > 0 ->
-    %% Lookup in credentials map
+    %% Lookup in credentials map. The unknown-user path runs the
+    %% same verify_password/2 work as the configured-user path so
+    %% timing doesn't leak username existence.
     case maps:get(Username, Creds, undefined) of
         undefined ->
-            %% Constant-time fake check to prevent timing attacks
-            _ = hash_password(Password),
+            _ = verify_password(Password, dummy_hash()),
             {error, invalid_credentials};
         ExpectedPassword when is_binary(ExpectedPassword) ->
             verify_password(Username, Password, ExpectedPassword, HashPwd);
         #{password := ExpectedPassword} = Info ->
             case verify_password(Username, Password, ExpectedPassword, HashPwd) of
                 {ok, _} ->
-                    %% Build auth info from stored info
                     AuthInfo = #{
                         subject => Username,
                         scopes => maps:get(scopes, Info, []),
@@ -241,6 +241,20 @@ parse_pbkdf2(Bin) ->
 legacy_sha256_hex(Password) ->
     Digest = crypto:hash(sha256, Password),
     encode_hex(Digest).
+
+%% Lazily-built PBKDF2 hash used as a "fake check" target on the
+%% unknown-user path so the verify_password/2 work cost matches
+%% the configured-user path. Cached in `persistent_term' so we pay
+%% the (~tens of ms) construction cost at most once per node.
+-define(DUMMY_HASH_KEY, {?MODULE, dummy_hash}).
+dummy_hash() ->
+    case persistent_term:get(?DUMMY_HASH_KEY, undefined) of
+        undefined ->
+            H = hash_password(<<"unused-timing-stand-in">>),
+            persistent_term:put(?DUMMY_HASH_KEY, H),
+            H;
+        H -> H
+    end.
 
 encode_hex(Bin) ->
     << <<(hex_digit(N))>> || <<N:4>> <= Bin >>.

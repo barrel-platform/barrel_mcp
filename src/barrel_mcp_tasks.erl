@@ -23,7 +23,8 @@
          list/2,
          cancel/2,
          finish/3,
-         fail/3]).
+         fail/3,
+         set_worker/3]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2]).
@@ -40,7 +41,9 @@
     result :: term(),
     error :: term(),
     created_at :: integer(),
-    updated_at :: integer()
+    updated_at :: integer(),
+    worker_pid :: pid() | undefined,
+    request_id :: integer() | binary() | undefined
 }).
 
 %%====================================================================
@@ -73,10 +76,21 @@ list(SessionId, _Opts) ->
     end, [], ?TABLE),
     {ok, Tasks}.
 
-%% @doc Mark a task as cancelled and notify the client.
+%% @doc Mark a task as cancelled and notify the client. Sends
+%% `{cancel, RequestId}' to the worker pid (if recorded) so
+%% cooperative arity-2 handlers can abort.
 -spec cancel(binary() | undefined, binary()) -> ok | {error, not_found}.
 cancel(SessionId, TaskId) ->
     gen_server:call(?MODULE, {cancel, SessionId, TaskId}).
+
+%% @doc Record the worker pid (and optional originating request id)
+%% on a running task so a later `tasks/cancel' can stop it.
+-spec set_worker(binary() | undefined, binary(),
+                 #{worker := pid(),
+                   request_id => integer() | binary()}) ->
+    ok | {error, not_found}.
+set_worker(SessionId, TaskId, Info) ->
+    gen_server:call(?MODULE, {set_worker, SessionId, TaskId, Info}).
 
 %% @doc Record success: store the result and emit notifications/tasks/changed.
 -spec finish(binary() | undefined, binary(), term()) -> ok | {error, not_found}.
@@ -109,7 +123,31 @@ handle_call({create, SessionId, Method}, _From, State) ->
     {reply, {ok, TaskId}, State};
 
 handle_call({cancel, SessionId, TaskId}, _From, State) ->
+    %% Best-effort: send the worker a cooperative cancel signal so
+    %% arity-2 tool handlers can short-circuit. Then transition
+    %% the stored status. Arity-1 handlers run to completion;
+    %% their result is dropped because the task is already in a
+    %% terminal state.
+    case ets:lookup(?TABLE, {SessionId, TaskId}) of
+        [{_, #task{worker_pid = Pid, request_id = ReqId}}]
+                when is_pid(Pid) ->
+            (catch Pid ! {cancel, ReqId});
+        _ -> ok
+    end,
     Reply = transition(SessionId, TaskId, cancelled, undefined, undefined),
+    {reply, Reply, State};
+
+handle_call({set_worker, SessionId, TaskId, Info}, _From, State) ->
+    Reply = case ets:lookup(?TABLE, {SessionId, TaskId}) of
+        [{_, #task{} = Task}] ->
+            Updated = Task#task{
+                worker_pid = maps:get(worker, Info),
+                request_id = maps:get(request_id, Info, undefined)
+            },
+            true = ets:insert(?TABLE, {{SessionId, TaskId}, Updated}),
+            ok;
+        [] -> {error, not_found}
+    end,
     {reply, Reply, State};
 handle_call({finish, SessionId, TaskId, Result}, _From, State) ->
     Reply = transition(SessionId, TaskId, success, Result, undefined),

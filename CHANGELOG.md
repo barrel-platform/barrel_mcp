@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Critical correctness and security fixes
+
+- **API-key auth verification.** `barrel_mcp_auth_apikey:verify_key/2` no longer returns `ok` for any HMAC-formatted stored value (it was self-comparing `Stored` with itself). The 2-arity helper now rejects HMAC formats with `{error, pepper_required}`; a new `verify_key/3` takes the pepper and does a constant-time HMAC compare. The provider state now keeps `pepper`, so `hash_keys => true` with a configured pepper actually verifies HMAC keys end to end.
+- **Async tools/call works on stdio and legacy HTTP.** `barrel_mcp_protocol:handle/2` returns `{async, AsyncPlan}` for `tools/call`; both transports now drive the plan via the new `barrel_mcp_protocol:drive_async_plan/2` helper. Tool calls over stdio went from broken to functional.
+- **Session cleanup no longer self-calls.** The cleanup timer in `barrel_mcp_session` previously routed through `gen_server:call(?MODULE, ...)` from inside its own `handle_info` and would deadlock. The cleanup is now inlined in `handle_info(cleanup, _)`.
+- **Basic auth unknown-user timing.** The unknown-user fake check now runs the same PBKDF2 work as the configured-user path via a precomputed dummy hash. Previously the configured `hash_passwords => false` path used a fast SHA-256 compare while the unknown-user path always did PBKDF2, leaking username existence.
+- **Streamable HTTP: Accept strictness.** POST clients must list both `application/json` and `text/event-stream` (or `*/*`). `application/json` alone now returns 406.
+- **Streamable HTTP: initialize with unknown session id → 404.** Previously silently created a fresh session; now forces the client to re-initialize without a session header.
+- **Legacy HTTP transport hardened.** Reuses the Streamable HTTP `validate_origin/2`, `cors_response_headers/3`, and `extract_headers/2` helpers. No more wildcard `Access-Control-Allow-Origin`; auth headers come from the configured provider's `auth_headers/1` callback (custom `header_name` flows through CORS and into header extraction).
+- **`tasks/cancel` actually stops the worker.** Long-running tools now record their worker pid on the task; `tasks/cancel` sends `{cancel, RequestId}` to the worker before transitioning the stored status. Cooperative arity-2 handlers can abort cleanly; arity-1 handlers still run to completion but their result is dropped because the task is in a terminal state.
+
 ### Spec parity additives
 
 - Long-running tools return a `taskId` immediately; clients track them via `tasks/list`, `tasks/get`, `tasks/cancel` and `notifications/tasks/changed`. Opt in with `reg_tool/4`'s `long_running => true`.

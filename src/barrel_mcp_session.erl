@@ -553,14 +553,23 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info(cleanup, State) ->
-    %% Default TTL: 30 minutes
+    %% Inline the cleanup. We can't call the public `cleanup_expired/1'
+    %% because it goes through `gen_server:call(?MODULE, …)' — a
+    %% self-call that would deadlock.
     TTL = application:get_env(barrel_mcp, session_ttl, 1800000),
-    Cleaned = cleanup_expired(TTL),
-    case Cleaned > 0 of
-        true ->
-            logger:debug("Cleaned up ~p expired MCP sessions", [Cleaned]);
-        false ->
-            ok
+    Now = erlang:system_time(millisecond),
+    Cutoff = Now - TTL,
+    Expired = ets:foldl(
+        fun({Id, #mcp_session{last_activity = LA}}, Acc)
+              when LA < Cutoff -> [Id | Acc];
+           (_, Acc) -> Acc
+        end, [], ?SESSION_TABLE),
+    lists:foreach(fun delete_inline/1, Expired),
+    case Expired of
+        [] -> ok;
+        _ ->
+            logger:debug("Cleaned up ~p expired MCP sessions",
+                         [length(Expired)])
     end,
     erlang:send_after(?CLEANUP_INTERVAL, self(), cleanup),
     {noreply, State};

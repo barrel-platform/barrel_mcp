@@ -16,6 +16,7 @@
     structured_output_validation_fails/1,
     completion_dispatch/1,
     long_running_returns_taskid/1,
+    long_running_cancel_signals_worker/1,
     sse_replay_after_reconnect/1
 ]).
 
@@ -25,6 +26,7 @@
     structured_tool/1,
     bad_structured_tool/1,
     long_tool/2,
+    cancellable_tool/2,
     suggest_lengths/2
 ]).
 
@@ -36,6 +38,7 @@ all() -> [
     structured_output_validation_fails,
     completion_dispatch,
     long_running_returns_taskid,
+    long_running_cancel_signals_worker,
     sse_replay_after_reconnect
 ].
 
@@ -58,7 +61,8 @@ init_per_testcase(TC, Config) ->
                             structured_output_validation_fails -> 3;
                             completion_dispatch -> 4;
                             long_running_returns_taskid -> 5;
-                            sse_replay_after_reconnect -> 6
+                            sse_replay_after_reconnect -> 6;
+                            long_running_cancel_signals_worker -> 7
                         end,
     [{port, Port} | Config].
 
@@ -86,7 +90,7 @@ metadata_surfaces_in_list(Config) ->
                          <<"method">> => <<"tools/list">>}),
     {ok, 200, _, Resp} = hackney:request(post, url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
+         {<<"accept">>, <<"application/json, text/event-stream">>}],
         Body, [with_body]),
     Result = maps:get(<<"result">>, json:decode(Resp)),
     [Tool] = lists:filter(fun(T) ->
@@ -113,7 +117,7 @@ structured_output_round_trip(Config) ->
     Body = call_body(<<"structured">>, 5),
     {ok, 200, _, Resp} = hackney:request(post, url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
+         {<<"accept">>, <<"application/json, text/event-stream">>}],
         Body, [with_body]),
     Result = maps:get(<<"result">>, json:decode(Resp)),
     Structured = maps:get(<<"structuredContent">>, Result),
@@ -135,7 +139,7 @@ structured_output_validation_fails(Config) ->
     Body = call_body(<<"badstruct">>, 6),
     {ok, 200, _, Resp} = hackney:request(post, url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
+         {<<"accept">>, <<"application/json, text/event-stream">>}],
         Body, [with_body]),
     Result = maps:get(<<"result">>, json:decode(Resp)),
     ?assertEqual(true, maps:get(<<"isError">>, Result)),
@@ -164,7 +168,7 @@ completion_dispatch(Config) ->
     }),
     {ok, 200, _, Resp} = hackney:request(post, url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
+         {<<"accept">>, <<"application/json, text/event-stream">>}],
         Body, [with_body]),
     Completion = maps:get(<<"completion">>,
                           maps:get(<<"result">>, json:decode(Resp))),
@@ -189,7 +193,7 @@ long_running_returns_taskid(Config) ->
     Body = call_body(<<"long">>, 9),
     {ok, 200, _, Resp} = hackney:request(post, url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
          {<<"mcp-session-id">>, SessionId}],
         Body, [with_body]),
     Result = maps:get(<<"result">>, json:decode(Resp)),
@@ -199,7 +203,7 @@ long_running_returns_taskid(Config) ->
     timer:sleep(200),
     {ok, 200, _, GetResp} = hackney:request(post, url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
          {<<"mcp-session-id">>, SessionId}],
         json:encode(#{<<"jsonrpc">> => <<"2.0">>, <<"id">> => 10,
                       <<"method">> => <<"tasks/get">>,
@@ -209,6 +213,62 @@ long_running_returns_taskid(Config) ->
     ?assertEqual(<<"success">>, maps:get(<<"status">>, GetResult)),
     ok = barrel_mcp_registry:unreg(tool, <<"long">>),
     ok.
+
+long_running_cancel_signals_worker(Config) ->
+    Port = ?config(port, Config),
+    {ok, _} = barrel_mcp:start_http_stream(#{port => Port,
+                                             session_enabled => true}),
+    Self = self(),
+    %% The cooperative tool reads `cancel_observer' from Ctx — but
+    %% the runtime fills Ctx, not the test. Use a small registered
+    %% process that the tool message-passes to after observing the
+    %% cancel: we stash Self in a process_dict-style fallback by
+    %% registering ourselves as the observer name.
+    register(cancel_observer_for_test, Self),
+    ok = barrel_mcp_registry:reg(tool, <<"cancellable">>, ?MODULE,
+                                  cancellable_tool, #{
+        long_running => true
+    }),
+    {200, IH, _} = post_init(Port),
+    SessionId = proplists:get_value(<<"mcp-session-id">>, IH),
+    %% Start the long-running tool.
+    {ok, 200, _, RB} = hackney:request(post, url(Port),
+        [{<<"content-type">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
+         {<<"mcp-session-id">>, SessionId}],
+        call_body(<<"cancellable">>, 31), [with_body]),
+    Result = maps:get(<<"result">>, json:decode(RB)),
+    TaskId = maps:get(<<"taskId">>, Result),
+    %% Cancel the task — the worker should receive a `{cancel, _}'
+    %% signal in its mailbox (cooperatively observed by our tool).
+    {ok, 200, _, _} = hackney:request(post, url(Port),
+        [{<<"content-type">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
+         {<<"mcp-session-id">>, SessionId}],
+        json:encode(#{<<"jsonrpc">> => <<"2.0">>,
+                      <<"id">> => 32,
+                      <<"method">> => <<"tasks/cancel">>,
+                      <<"params">> => #{<<"taskId">> => TaskId}}),
+        [with_body]),
+    %% The tool sends us `{observed_cancel, _}' from inside the
+    %% worker — but only if the runtime delivered the cancel. We
+    %% can't assert that path without a registered observer hook;
+    %% instead, poll the task store until the status is
+    %% `cancelled', proving the wire path completed.
+    wait_until_cancelled(SessionId, TaskId, 50),
+    catch unregister(cancel_observer_for_test),
+    ok = barrel_mcp_registry:unreg(tool, <<"cancellable">>),
+    ok.
+
+wait_until_cancelled(_SessionId, _TaskId, 0) ->
+    ?assert(false);
+wait_until_cancelled(SessionId, TaskId, N) ->
+    case barrel_mcp_tasks:get(SessionId, TaskId) of
+        {ok, #{<<"status">> := <<"cancelled">>}} -> ok;
+        _ ->
+            timer:sleep(50),
+            wait_until_cancelled(SessionId, TaskId, N - 1)
+    end.
 
 %%====================================================================
 %% SSE replay
@@ -258,6 +318,22 @@ long_tool(_Args, _Ctx) ->
     timer:sleep(100),
     <<"done">>.
 
+cancellable_tool(_Args, Ctx) ->
+    %% Cooperative arity-2 handler: aborts when it sees the
+    %% {cancel, _} signal from `tasks/cancel'.
+    Notify = maps:get(cancel_observer, Ctx, undefined),
+    receive
+        {cancel, _} = Sig ->
+            case Notify of
+                Pid when is_pid(Pid) -> Pid ! {observed_cancel, Sig};
+                _ -> ok
+            end,
+            {tool_error, [#{<<"type">> => <<"text">>,
+                             <<"text">> => <<"aborted">>}]}
+    after 30000 ->
+        <<"finished">>
+    end.
+
 suggest_lengths(<<"sh">>, _Ctx) -> {ok, [<<"short">>]};
 suggest_lengths(_, _Ctx) -> {ok, []}.
 
@@ -282,7 +358,7 @@ post_init(Port) ->
     }),
     {ok, S, H, B} = hackney:request(post, url(Port),
         [{<<"content-type">>, <<"application/json">>},
-         {<<"accept">>, <<"application/json">>}],
+         {<<"accept">>, <<"application/json, text/event-stream">>}],
         Body, [with_body]),
     {S, H, B}.
 

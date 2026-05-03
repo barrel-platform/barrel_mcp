@@ -25,7 +25,8 @@
     encode_response/2,
     encode_error/3,
     decode_envelope/1,
-    format_tool_result_external/1
+    format_tool_result_external/1,
+    drive_async_plan/2
 ]).
 
 %%====================================================================
@@ -50,7 +51,7 @@ encode(Response) ->
     iolist_to_binary(json:encode(Response)).
 
 %% @doc Handle a JSON-RPC request with default state.
--spec handle(map()) -> map() | no_response.
+-spec handle(map() | list()) -> map() | no_response | {async, map()}.
 handle(Request) ->
     handle(Request, #{}).
 
@@ -418,6 +419,50 @@ success_response(Id, Result) ->
 -spec format_tool_result_external(term()) -> [map()].
 format_tool_result_external(Result) ->
     format_tool_result(Result).
+
+%% @doc Drive an `{async, AsyncPlan}' from `handle/2' to completion
+%% on the calling process and return a JSON-RPC response map.
+%%
+%% Used by transports that don't have their own request/wait
+%% machinery (stdio, legacy HTTP). The Streamable HTTP transport
+%% drives async plans itself because it needs to record per-session
+%% in-flight entries for cancellation routing.
+-spec drive_async_plan(map(), timeout()) -> map().
+drive_async_plan(Plan, Timeout) ->
+    Self = self(),
+    RequestId = maps:get(request_id, Plan),
+    Spawn = maps:get(spawn, Plan),
+    Ctx = #{request_id => RequestId,
+            session_id => undefined,
+            progress_token => undefined,
+            emit_progress => fun(_, _, _) -> ok end,
+            reply_to => Self},
+    _Pid = Spawn(Ctx),
+    receive
+        {tool_result, RequestId, Result} ->
+            success_response(RequestId,
+                #{<<"content">> => format_tool_result_external(Result)});
+        {tool_structured, RequestId, Data, Content} ->
+            success_response(RequestId,
+                #{<<"content">> => Content,
+                  <<"structuredContent">> => Data});
+        {tool_error, RequestId, Content} ->
+            success_response(RequestId,
+                #{<<"content">> => Content,
+                  <<"isError">> => true});
+        {tool_validation_failed, RequestId, Errors} ->
+            Msg = iolist_to_binary(io_lib:format(
+                "Invalid tool input: ~p", [Errors])),
+            success_response(RequestId,
+                #{<<"content">> =>
+                    [#{<<"type">> => <<"text">>, <<"text">> => Msg}],
+                  <<"isError">> => true});
+        {tool_failed, RequestId, Reason} ->
+            error_response(RequestId, ?MCP_TOOL_ERROR,
+                iolist_to_binary(io_lib:format("~p", [Reason])))
+    after Timeout ->
+        error_response(RequestId, ?MCP_TOOL_ERROR, <<"Tool timed out">>)
+    end.
 
 format_tool_result(Result) when is_binary(Result) ->
     [#{<<"type">> => <<"text">>, <<"text">> => Result}];
