@@ -69,7 +69,8 @@
     code_challenge/1,
     build_authorization_url/2,
     exchange_code/2,
-    refresh_token/2
+    refresh_token/2,
+    client_credentials/2
 ]).
 
 -export_type([config/0, handle/0]).
@@ -82,16 +83,28 @@
     client_secret => binary(),
     resource => binary(),
     scopes => [binary()]
+} | client_credentials_config().
+
+-type client_credentials_config() :: #{
+    grant_type := client_credentials,
+    token_endpoint := binary(),
+    client_id := binary(),
+    client_secret => binary(),
+    client_assertion => binary(),
+    resource => binary(),
+    scopes => [binary()]
 }.
 
 -record(h, {
-    access_token :: binary(),
+    access_token :: binary() | undefined,
     refresh_token :: binary() | undefined,
     token_endpoint :: binary() | undefined,
     client_id :: binary() | undefined,
     client_secret :: binary() | undefined,
+    client_assertion :: binary() | undefined,
     resource :: binary() | undefined,
-    scopes :: [binary()] | undefined
+    scopes :: [binary()] | undefined,
+    mode = auth_code :: auth_code | client_credentials
 }).
 
 -type handle() :: #h{}.
@@ -110,12 +123,39 @@ init(#{access_token := AT} = Cfg) when is_binary(AT), AT =/= <<>> ->
         resource = maps:get(resource, Cfg, undefined),
         scopes = maps:get(scopes, Cfg, undefined)
     }};
+%% Client-credentials grant — fetch the token eagerly so init either
+%% returns a usable handle or fails up front.
+init(#{grant_type := client_credentials,
+       token_endpoint := TE,
+       client_id := CI} = Cfg)
+  when is_binary(TE), TE =/= <<>>, is_binary(CI), CI =/= <<>> ->
+    H0 = #h{
+        token_endpoint = TE,
+        client_id = CI,
+        client_secret = maps:get(client_secret, Cfg, undefined),
+        client_assertion = maps:get(client_assertion, Cfg, undefined),
+        resource = maps:get(resource, Cfg, undefined),
+        scopes = maps:get(scopes, Cfg, undefined),
+        mode = client_credentials
+    },
+    case acquire_via_client_credentials(H0) of
+        {ok, H1} -> {ok, H1};
+        {error, _} = Err -> Err
+    end;
+init(#{grant_type := client_credentials}) ->
+    {error, missing_token_endpoint_or_client_id};
 init(_) ->
     {error, missing_access_token}.
 
+header(#h{access_token = undefined}) ->
+    none;
 header(#h{access_token = AT}) ->
     {ok, <<"Bearer ", AT/binary>>}.
 
+%% Client-credentials mode: re-acquire via the grant on every 401.
+%% No refresh_token involved.
+refresh(#h{mode = client_credentials} = H, _Www) ->
+    acquire_via_client_credentials(H);
 refresh(#h{refresh_token = undefined}, _Www) ->
     {error, no_refresh_token};
 refresh(#h{token_endpoint = undefined}, _Www) ->
@@ -259,6 +299,43 @@ refresh_token(TokenEndpoint, Params) ->
     http_post_form(TokenEndpoint, Body1, maps:get(client_secret, Params, undefined),
                    maps:get(client_id, Params, undefined)).
 
+%% @doc Acquire an access token via the OAuth 2.1 client_credentials
+%% grant — for unattended / machine-to-machine flows where there is
+%% no human in the loop. Per the MCP `ext-auth' OAuth Client
+%% Credentials extension, callers may authenticate either with a
+%% `client_secret' (HTTP Basic, per RFC 6749) or a `client_assertion'
+%% (`private_key_jwt' per RFC 7523).
+-spec client_credentials(binary(), map()) ->
+    {ok, map()} | {error, term()}.
+client_credentials(TokenEndpoint, Params) ->
+    Body0 = #{
+        <<"grant_type">> => <<"client_credentials">>,
+        <<"client_id">> => required(client_id, Params)
+    },
+    Body1 = case maps:get(client_assertion, Params, undefined) of
+                undefined -> Body0;
+                JWT when is_binary(JWT) ->
+                    Body0#{
+                        <<"client_assertion_type">> =>
+                            <<"urn:ietf:params:oauth:client-assertion-type:jwt-bearer">>,
+                        <<"client_assertion">> => JWT
+                    }
+            end,
+    Body2 = maps:fold(fun add_optional/3, Body1, #{
+        scope => maps:get(scopes, Params, undefined),
+        resource => maps:get(resource, Params, undefined)
+    }),
+    %% `private_key_jwt' must NOT add HTTP Basic — pass the secret
+    %% only when there is no assertion.
+    Secret = case maps:get(client_assertion, Params, undefined) of
+                 undefined ->
+                     maps:get(client_secret, Params, undefined);
+                 _ ->
+                     undefined
+             end,
+    http_post_form(TokenEndpoint, Body2, Secret,
+                   maps:get(client_id, Params, undefined)).
+
 %%====================================================================
 %% Internal — refresh wired through the behaviour
 %%====================================================================
@@ -274,6 +351,26 @@ do_refresh(#h{refresh_token = RT, token_endpoint = TE,
         scopes => Scopes
     }),
     refresh_token(TE, Params).
+
+%% Fetch / re-fetch a token via the client_credentials grant and
+%% fold the response into the handle.
+acquire_via_client_credentials(#h{token_endpoint = TE,
+                                   client_id = CI,
+                                   client_secret = CS,
+                                   client_assertion = CA,
+                                   resource = Res,
+                                   scopes = Scopes} = H) ->
+    Params = drop_undefined(#{
+        client_id => CI,
+        client_secret => CS,
+        client_assertion => CA,
+        resource => Res,
+        scopes => Scopes
+    }),
+    case client_credentials(TE, Params) of
+        {ok, R} -> {ok, apply_token_response(H, R)};
+        {error, _} = Err -> Err
+    end.
 
 apply_token_response(#h{} = H, #{<<"access_token">> := AT} = R) ->
     H#h{access_token = AT,
