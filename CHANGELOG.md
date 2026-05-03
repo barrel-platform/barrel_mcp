@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### `examples/agent_host` — runnable multi-server federation demo
+
+- New example app showing the `barrel_mcp_agent` aggregator + router end-to-end. `agent_host:run/0` connects two clients to one in-process MCP server under different `ServerId`s, calls `barrel_mcp_agent:list_tools/0` to surface the namespaced catalog, and routes a `<<"beta:echo">>` call through the right client. CT case asserts the namespaced names appear and the routed result round-trips.
+- Closes the docs loop for `barrel_mcp_agent` (the module shipped without a runnable example).
+- Picked up by `make examples-test` automatically (the existing `for ex in examples/*/` loop).
+
 ### Server-side cursor pagination on `*/list`
 
 - `tools/list`, `resources/list`, `resources/templates/list`, `prompts/list`, and `tasks/list` now accept an opaque `cursor` parameter and emit `nextCursor` when more entries remain. Page size is 50, sorted by name (or `taskId` for tasks). Existing single-shot callers see the first page transparently.
