@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Server-to-client `elicitation/create`
+
+- New `barrel_mcp:elicit_create/3` façade. Sends `elicitation/create` to the client behind a session id and blocks until the client responds (or `timeout_ms` elapses, default 30s). Requires the client to have declared `elicitation` capability in its `initialize' request and an active SSE stream. Mirrors the existing `sampling_create_message/3` flow.
+- New helpers `barrel_mcp:list_sessions_with_elicitation/0`, `barrel_mcp_session:has_elicitation/1`, `barrel_mcp_session:list_elicitation_capable/0`.
+- Internally, the server's pending-request map now carries the response tag, so sampling and elicitation responses route back to the correct caller without colliding.
+
 ### Tasks spec parity (MCP 2025-11-25)
 
 - **Status vocabulary aligned with spec.** Internal `running | success | error | cancelled` replaced with `working | completed | failed | cancelled` on the wire (in `tasks/get`, `tasks/list`, `notifications/tasks/changed`, and the immediate `tools/call` response when `long_running => true`).

@@ -26,6 +26,8 @@
     set_client_capabilities/2,
     has_sampling/1,
     list_sampling_capable/0,
+    has_elicitation/1,
+    list_elicitation_capable/0,
     %% Negotiated protocol version (after `initialize').
     set_protocol_version/2,
     get_protocol_version/1,
@@ -39,6 +41,7 @@
     subscribers_for/1,
     %% Server -> client request via the session's SSE channel.
     sampling_create_message/3,
+    elicit_create/3,
     deliver_response/2,
     %% Server -> client notifications.
     broadcast_list_changed/1,
@@ -92,7 +95,8 @@
     session_id :: binary(),
     caller :: pid(),
     caller_ref :: reference(),
-    expires_at :: integer()
+    expires_at :: integer(),
+    tag = sampling_response :: atom()
 }).
 
 %%====================================================================
@@ -194,6 +198,27 @@ list_sampling_capable() ->
         end
     end, [], ?SESSION_TABLE).
 
+%% @doc Whether a session declared elicitation capability in its
+%% initialize request.
+-spec has_elicitation(binary()) -> boolean().
+has_elicitation(SessionId) ->
+    case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, #mcp_session{client_capabilities = Caps}}] ->
+            maps:is_key(<<"elicitation">>, Caps);
+        [] ->
+            false
+    end.
+
+%% @doc List session ids whose client declared elicitation capability.
+-spec list_elicitation_capable() -> [binary()].
+list_elicitation_capable() ->
+    ets:foldl(fun({Id, #mcp_session{client_capabilities = Caps}}, Acc) ->
+        case maps:is_key(<<"elicitation">>, Caps) of
+            true -> [Id | Acc];
+            false -> Acc
+        end
+    end, [], ?SESSION_TABLE).
+
 %% @doc Set the SSE process pid for a session.
 -spec set_sse_pid(binary(), pid() | undefined) -> ok | {error, not_found}.
 set_sse_pid(SessionId, Pid) ->
@@ -239,6 +264,22 @@ sampling_create_message(SessionId, Params, Opts) ->
             case get_sse_pid(SessionId) of
                 {error, _} = E -> E;
                 {ok, Pid} -> do_sampling(SessionId, Pid, Params, Opts)
+            end
+    end.
+
+%% @doc Send `elicitation/create' to the client behind a session and wait
+%% for the response. The session must (a) exist, (b) have an active
+%% sse_pid, and (c) have declared elicitation capability in initialize.
+-spec elicit_create(binary(), map(), map()) ->
+    {ok, map()}
+  | {error, timeout | not_supported | no_sse | not_found | term()}.
+elicit_create(SessionId, Params, Opts) ->
+    case has_elicitation(SessionId) of
+        false -> {error, not_supported};
+        true ->
+            case get_sse_pid(SessionId) of
+                {error, _} = E -> E;
+                {ok, Pid} -> do_elicit(SessionId, Pid, Params, Opts)
             end
     end.
 
@@ -482,9 +523,9 @@ handle_call({discard_pending, RequestId}, _From, State) ->
 
 handle_call({deliver_response, Key, Response}, _From, State) ->
     Reply = case ets:lookup(?PENDING_TABLE, Key) of
-        [{_, #pending{caller = Caller, caller_ref = Ref}}] ->
+        [{_, #pending{caller = Caller, caller_ref = Ref, tag = Tag}}] ->
             true = ets:delete(?PENDING_TABLE, Key),
-            Caller ! {sampling_response, Ref, Response},
+            Caller ! {Tag, Ref, Response},
             ok;
         [] ->
             {error, unknown_id}
@@ -650,7 +691,7 @@ ensure_inflight_table() ->
 
 do_sampling(SessionId, SsePid, Params, Opts) ->
     Timeout = maps:get(timeout_ms, Opts, ?DEFAULT_SAMPLING_TIMEOUT),
-    RequestId = generate_request_id(),
+    RequestId = generate_request_id(<<"sampling-">>),
     Ref = make_ref(),
     ok = gen_server:call(?MODULE,
         {register_pending, RequestId, #pending{
@@ -658,7 +699,8 @@ do_sampling(SessionId, SsePid, Params, Opts) ->
             session_id = SessionId,
             caller = self(),
             caller_ref = Ref,
-            expires_at = erlang:system_time(millisecond) + Timeout
+            expires_at = erlang:system_time(millisecond) + Timeout,
+            tag = sampling_response
         }}),
     Request = #{
         <<"jsonrpc">> => <<"2.0">>,
@@ -678,8 +720,39 @@ do_sampling(SessionId, SsePid, Params, Opts) ->
         {error, timeout}
     end.
 
-generate_request_id() ->
-    <<"sampling-", (integer_to_binary(erlang:unique_integer([positive])))/binary>>.
+do_elicit(SessionId, SsePid, Params, Opts) ->
+    Timeout = maps:get(timeout_ms, Opts, ?DEFAULT_SAMPLING_TIMEOUT),
+    RequestId = generate_request_id(<<"elicit-">>),
+    Ref = make_ref(),
+    ok = gen_server:call(?MODULE,
+        {register_pending, RequestId, #pending{
+            id = RequestId,
+            session_id = SessionId,
+            caller = self(),
+            caller_ref = Ref,
+            expires_at = erlang:system_time(millisecond) + Timeout,
+            tag = elicitation_response
+        }}),
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => RequestId,
+        <<"method">> => <<"elicitation/create">>,
+        <<"params">> => Params
+    },
+    SsePid ! {sse_send_message, Request},
+    receive
+        {elicitation_response, Ref, #{<<"result">> := Result}} ->
+            {ok, Result};
+        {elicitation_response, Ref, #{<<"error">> := Err}} ->
+            {error, {client_error, Err}}
+    after Timeout ->
+        _ = gen_server:call(?MODULE, {discard_pending, RequestId}),
+        {error, timeout}
+    end.
+
+generate_request_id(Prefix) ->
+    <<Prefix/binary,
+      (integer_to_binary(erlang:unique_integer([positive])))/binary>>.
 
 id_to_binary(Id) when is_binary(Id) -> Id;
 id_to_binary(Id) when is_integer(Id) -> integer_to_binary(Id);
