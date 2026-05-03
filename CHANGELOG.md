@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-05-03
+
+Builds on the 1.3.0 interop work with two new feature areas
+(server-side pagination, OAuth Client Credentials for unattended
+agent hosts) plus a runnable federation demo and one bug fix.
+No breaking wire changes.
+
 ### Cancellation race fix in Streamable HTTP
 
 - `wait_for_tool/2` now does a 50ms lookahead after every tool outcome to absorb a pending `{cancelled, _}` message that races with the worker's response. A cooperative arity-2 handler that returns `{tool_error, ...}` on cancel could deliver its outcome to the waiter's mailbox **before** the session-emitted `{cancelled, _}`, depending on scheduler — which made the HTTP path emit a JSON-RPC `isError: true` envelope instead of the spec-mandated 200 + empty body. With the lookahead the cancel always wins.
