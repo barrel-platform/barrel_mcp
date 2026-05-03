@@ -533,8 +533,10 @@ For the full task-oriented walkthrough — transport choice, auth,
 OAuth, server-to-client handlers, federation, schema validation —
 see [Building a client](guides/building-a-client.md). For
 architecture and behaviour contracts, see
-[Internals](guides/internals.md). Two runnable examples live under
-[`examples/`](examples/).
+[Internals](guides/internals.md). Three runnable examples live
+under [`examples/` on
+GitHub](https://github.com/barrel-platform/barrel_mcp/tree/main/examples)
+(`echo_client`, `sampling_host`, `agent_host`).
 
 ## Claude Desktop Configuration
 

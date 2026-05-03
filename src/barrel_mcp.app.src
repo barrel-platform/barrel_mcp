@@ -13,5 +13,15 @@
     ]},
     {modules, []},
     {licenses, ["Apache-2.0"]},
-    {links, []}
+    %% Files included in the hex package. Adds `docs/' and the
+    %% `guides/' directory to the rebar3 default set so README
+    %% links resolve in the published docs.
+    {files, ["src", "include", "priv", "rebar.config",
+             "README.md", "CHANGELOG.md", "LICENSE",
+             "guides", "docs"]},
+    {links, [
+        {"GitHub", "https://github.com/barrel-platform/barrel_mcp"},
+        {"Changelog",
+            "https://github.com/barrel-platform/barrel_mcp/blob/main/CHANGELOG.md"}
+    ]}
 ]}.
