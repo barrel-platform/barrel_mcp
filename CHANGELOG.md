@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Interop coverage: server-to-client sampling/createMessage
+
+- Direction A of the Python interop suite now exercises the full sampling round-trip against the reference SDK: a server-side tool calls `barrel_mcp:sampling_create_message/3`, the Python `sampling_callback` returns a canned reply, the tool surfaces that text as its result. Verifies that the pending-request map, SSE delivery, response correlation, and capability gating all interoperate with the reference implementation.
+
 ### Interop coverage: resources/subscribe + notifications/resources/updated
 
 - Direction A of the Python interop suite now exercises the full subscribe round-trip: subscribe to a URI, trigger a server-side `notify_resource_updated/1`, wait for the inbound `notifications/resources/updated` to arrive on the client SSE stream, unsubscribe. Verifies that `barrel_mcp_session:subscribe_resource/2`, `notify_resource_updated/1`, and the SSE delivery path all interoperate correctly with the reference implementation's notification handling.

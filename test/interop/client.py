@@ -15,6 +15,7 @@ import traceback
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.types import CreateMessageResult, TextContent
 
 
 EXPECTED_TOOL = "echo"
@@ -25,6 +26,19 @@ EXPECTED_PROMPT = "hello_prompt"
 def fail(msg: str) -> None:
     print(f"FAIL: {msg}")
     sys.exit(1)
+
+
+SAMPLED_REPLY = "the canned answer"
+
+
+async def sampling_callback(_context, _params):
+    """Server-to-client sampling/createMessage handler. Returns a
+    canned reply so the round-trip is deterministic in CI."""
+    return CreateMessageResult(
+        role="assistant",
+        content=TextContent(type="text", text=SAMPLED_REPLY),
+        model="canned-test-model",
+    )
 
 
 async def run(url: str) -> None:
@@ -46,7 +60,9 @@ async def run(url: str) -> None:
 
     async with streamable_http_client(url) as (read, write, _):
         async with ClientSession(
-            read, write, message_handler=on_message
+            read, write,
+            message_handler=on_message,
+            sampling_callback=sampling_callback,
         ) as session:
             await session.initialize()
 
@@ -97,6 +113,20 @@ async def run(url: str) -> None:
             except asyncio.TimeoutError:
                 fail("did not receive notifications/resources/updated")
             await session.unsubscribe_resource(EXPECTED_RESOURCE_URI)
+
+            # Server-to-client sampling round-trip. The server's
+            # ask_llm tool sends sampling/createMessage to us; our
+            # sampling_callback returns SAMPLED_REPLY; the tool
+            # surfaces that text as its result.
+            sampling_result = await session.call_tool(
+                "ask_llm", arguments={}
+            )
+            text_blocks = [
+                b for b in sampling_result.content
+                if getattr(b, "text", None)
+            ]
+            if not text_blocks or text_blocks[0].text != SAMPLED_REPLY:
+                fail(f"sampling round-trip failed: {sampling_result}")
 
     print("OK")
 
