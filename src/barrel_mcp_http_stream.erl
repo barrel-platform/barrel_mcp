@@ -137,12 +137,9 @@ start(Opts) ->
                         idle_timeout => infinity
                     });
                 _ ->
-                    %% SO_REUSEADDR avoids EADDRINUSE on rapid
-                    %% start/stop cycles (e.g. CT suites).
                     cowboy:start_clear(?STREAM_LISTENER, [
                         {port, Port},
-                        {ip, Ip},
-                        {reuseaddr, true}
+                        {ip, Ip}
                     ], #{
                         env => #{dispatch => Dispatch},
                         idle_timeout => infinity

@@ -58,6 +58,11 @@
     list_prompts/1, list_prompts/2,
     list_prompts_all/1,
     get_prompt/3,
+    %% Tasks (long-running operations, MCP 2025-11-25)
+    tasks_list/1, tasks_list/2,
+    tasks_list_all/1,
+    tasks_get/2,
+    tasks_cancel/2,
     %% Misc
     complete/3,
     set_log_level/2,
@@ -288,6 +293,35 @@ complete(Pid, Ref, Argument) ->
 -spec set_log_level(pid(), binary()) -> {ok, map()} | {error, term()}.
 set_log_level(Pid, Level) when is_binary(Level) ->
     request(Pid, <<"logging/setLevel">>, #{<<"level">> => Level}).
+
+%% @doc List long-running tasks owned by the connected session.
+%% Single page; use {@link tasks_list/2} with `#{want_cursor =>
+%% true}' or {@link tasks_list_all/1} to walk pagination.
+-spec tasks_list(pid()) -> {ok, [map()]} | {error, term()}.
+tasks_list(Pid) ->
+    tasks_list(Pid, #{}).
+
+-spec tasks_list(pid(), map()) -> {ok, [map()], binary() | undefined} |
+                                   {ok, [map()]} | {error, term()}.
+tasks_list(Pid, Opts) ->
+    paged(Pid, <<"tasks/list">>, <<"tasks">>, Opts).
+
+%% @doc Walk every `tasks/list' page.
+-spec tasks_list_all(pid()) -> {ok, [map()]} | {error, term()}.
+tasks_list_all(Pid) ->
+    walk_all(fun(Cursor) -> tasks_list(Pid, page_opts(Cursor)) end).
+
+%% @doc Fetch a single task by id.
+-spec tasks_get(pid(), binary()) -> {ok, map()} | {error, term()}.
+tasks_get(Pid, TaskId) ->
+    request(Pid, <<"tasks/get">>, #{<<"taskId">> => TaskId}).
+
+%% @doc Cancel a long-running task by id. Returns `{ok, _}' on
+%% acceptance; the task transitions to `cancelled' status, which the
+%% server then broadcasts via `notifications/tasks/changed'.
+-spec tasks_cancel(pid(), binary()) -> {ok, map()} | {error, term()}.
+tasks_cancel(Pid, TaskId) ->
+    request(Pid, <<"tasks/cancel">>, #{<<"taskId">> => TaskId}).
 
 %% @doc Send a `ping' request and wait for the response.
 -spec ping(pid()) -> {ok, map()} | {error, term()}.
@@ -842,6 +876,8 @@ is_supported(<<"completion/", _/binary>>, #data{server_capabilities = Caps}) ->
     maps:is_key(<<"completions">>, Caps) orelse maps:is_key(<<"completion">>, Caps);
 is_supported(<<"logging/", _/binary>>, #data{server_capabilities = Caps}) ->
     maps:is_key(<<"logging">>, Caps);
+is_supported(<<"tasks/", _/binary>>, #data{server_capabilities = Caps}) ->
+    maps:is_key(<<"tasks">>, Caps);
 is_supported(_, _) -> true.
 
 do_cancel(Id, #data{pending = Pending} = Data) ->

@@ -30,6 +30,7 @@ client_test_() ->
          {"list_tools_all walks pagination", fun test_list_tools_all/0},
          {"call_tool returns content", fun test_call_tool/0},
          {"protocol version negotiates downward", fun test_version_downgrade/0},
+         {"tasks_list returns []", fun test_tasks_list/0},
          {"close shuts down cleanly", fun test_close/0}
      ]}}.
 
@@ -98,6 +99,14 @@ test_version_downgrade() ->
     {ok, Pid} = start_client(),
     {ok, Version} = barrel_mcp_client:protocol_version(Pid),
     ?assertEqual(<<"2025-11-25">>, Version),
+    ok = barrel_mcp_client:close(Pid),
+    wait_dead(Pid).
+
+test_tasks_list() ->
+    %% No long-running tools registered -> tasks_list returns [].
+    {ok, Pid} = start_client(),
+    {ok, Tasks} = barrel_mcp_client:tasks_list(Pid),
+    ?assertEqual([], Tasks),
     ok = barrel_mcp_client:close(Pid),
     wait_dead(Pid).
 
