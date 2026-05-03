@@ -22,7 +22,12 @@
 %% Build the auth handle from a config term.
 %%   `none' — no auth header sent.
 %%   `{bearer, Token}' — static bearer token.
-%%   `{oauth, Config}' — OAuth 2.1 + PKCE.
+%%   `{oauth, Config}' — OAuth 2.1 + PKCE (authorization_code grant).
+%%   `{oauth_client_credentials, Config}' — OAuth 2.1 client_credentials
+%%       grant (RFC 6749, plus the MCP `ext-auth' OAuth Client
+%%       Credentials extension). For unattended agent hosts. Config
+%%       requires `token_endpoint' and `client_id'; supply either
+%%       `client_secret' or `client_assertion' (private_key_jwt).
 -callback init(Config :: term()) -> {ok, handle()} | {error, term()}.
 
 %% Return the value to put in the `Authorization' header.
@@ -41,7 +46,10 @@
 %%====================================================================
 
 %% @doc Construct an auth handle from a user-facing config term.
--spec new(none | {bearer, binary()} | {oauth, map()}) ->
+-spec new(none
+        | {bearer, binary()}
+        | {oauth, map()}
+        | {oauth_client_credentials, map()}) ->
     t() | {error, term()}.
 new(none) ->
     none;
@@ -52,6 +60,12 @@ new({bearer, Token}) when is_binary(Token) ->
     end;
 new({oauth, Config}) when is_map(Config) ->
     case barrel_mcp_client_auth_oauth:init(Config) of
+        {ok, H} -> {barrel_mcp_client_auth_oauth, H};
+        Err -> Err
+    end;
+new({oauth_client_credentials, Config}) when is_map(Config) ->
+    Cfg = Config#{grant_type => client_credentials},
+    case barrel_mcp_client_auth_oauth:init(Cfg) of
         {ok, H} -> {barrel_mcp_client_auth_oauth, H};
         Err -> Err
     end.

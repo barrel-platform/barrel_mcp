@@ -74,7 +74,15 @@ refresh_round_trip_test_() ->
          {"discover PRM",            fun test_discover_prm/0},
          {"discover AS metadata",    fun test_discover_as/0},
          {"refresh_token grant",     fun test_refresh_token/0},
-         {"behaviour refresh path",  fun test_behaviour_refresh/0}
+         {"behaviour refresh path",  fun test_behaviour_refresh/0},
+         {"client_credentials grant",
+          fun test_client_credentials/0},
+         {"client_credentials via auth handle",
+          fun test_client_credentials_handle/0},
+         {"client_credentials with private_key_jwt",
+          fun test_client_credentials_jwt/0},
+         {"client_credentials re-acquires on 401",
+          fun test_client_credentials_refresh/0}
      ]}}.
 
 setup_mock() ->
@@ -124,6 +132,27 @@ init(Req0, token) ->
                 maps:get(<<"resource">>, Form),
             #{<<"access_token">> => <<"new-access">>,
               <<"refresh_token">> => <<"new-refresh">>,
+              <<"token_type">> => <<"Bearer">>,
+              <<"expires_in">> => 3600};
+        <<"client_credentials">> ->
+            %% Authentication is via HTTP Basic for the secret path;
+            %% the secret-bearing variant strips client_id from body.
+            %% The private_key_jwt variant carries client_assertion.
+            case maps:get(<<"client_assertion">>, Form, undefined) of
+                undefined ->
+                    %% client_secret_basic
+                    AuthHdr = cowboy_req:header(<<"authorization">>, Req0),
+                    true = is_binary(AuthHdr),
+                    <<"Basic ", _/binary>> = AuthHdr;
+                JWT when is_binary(JWT), JWT =/= <<>> ->
+                    <<"urn:ietf:params:oauth:client-assertion-type:"
+                      "jwt-bearer">> =
+                        maps:get(<<"client_assertion_type">>, Form),
+                    %% client_id should still be present in the body
+                    %% for private_key_jwt.
+                    <<"client-1">> = maps:get(<<"client_id">>, Form)
+            end,
+            #{<<"access_token">> => <<"cc-access">>,
               <<"token_type">> => <<"Bearer">>,
               <<"expires_in">> => 3600};
         _ ->
@@ -176,4 +205,52 @@ test_behaviour_refresh() ->
                  barrel_mcp_client_auth:header(Auth)),
     {ok, Auth1} = barrel_mcp_client_auth:refresh(Auth, <<"Bearer error=expired">>),
     ?assertEqual({ok, <<"Bearer new-access">>},
+                 barrel_mcp_client_auth:header(Auth1)).
+
+test_client_credentials() ->
+    {ok, Resp} = barrel_mcp_client_auth_oauth:client_credentials(
+        <<?BASE/binary, "/oauth/token">>,
+        #{client_id => <<"client-1">>,
+          client_secret => <<"top-secret">>,
+          scopes => [<<"read">>, <<"write">>],
+          resource => <<"http://127.0.0.1:19494/mcp">>}),
+    ?assertEqual(<<"cc-access">>, maps:get(<<"access_token">>, Resp)),
+    ?assertEqual(<<"Bearer">>, maps:get(<<"token_type">>, Resp)).
+
+test_client_credentials_handle() ->
+    %% End-to-end via the connect-spec entry the user passes to
+    %% barrel_mcp_client. init/1 must fetch the token eagerly.
+    Auth = barrel_mcp_client_auth:new({oauth_client_credentials, #{
+        token_endpoint => <<?BASE/binary, "/oauth/token">>,
+        client_id => <<"client-1">>,
+        client_secret => <<"top-secret">>,
+        resource => <<"http://127.0.0.1:19494/mcp">>
+    }}),
+    ?assertNotMatch({error, _}, Auth),
+    ?assertEqual({ok, <<"Bearer cc-access">>},
+                 barrel_mcp_client_auth:header(Auth)).
+
+test_client_credentials_jwt() ->
+    %% Private-key JWT (client_assertion) variant: secret omitted,
+    %% assertion + assertion_type carried in the form body.
+    {ok, Resp} = barrel_mcp_client_auth_oauth:client_credentials(
+        <<?BASE/binary, "/oauth/token">>,
+        #{client_id => <<"client-1">>,
+          client_assertion => <<"signed.jwt.token">>,
+          resource => <<"http://127.0.0.1:19494/mcp">>}),
+    ?assertEqual(<<"cc-access">>, maps:get(<<"access_token">>, Resp)).
+
+test_client_credentials_refresh() ->
+    %% A 401 in client_credentials mode should re-acquire via the
+    %% same grant — no refresh_token involved.
+    Auth = barrel_mcp_client_auth:new({oauth_client_credentials, #{
+        token_endpoint => <<?BASE/binary, "/oauth/token">>,
+        client_id => <<"client-1">>,
+        client_secret => <<"top-secret">>
+    }}),
+    ?assertEqual({ok, <<"Bearer cc-access">>},
+                 barrel_mcp_client_auth:header(Auth)),
+    {ok, Auth1} = barrel_mcp_client_auth:refresh(
+                     Auth, <<"Bearer error=expired">>),
+    ?assertEqual({ok, <<"Bearer cc-access">>},
                  barrel_mcp_client_auth:header(Auth1)).

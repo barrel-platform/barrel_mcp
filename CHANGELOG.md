@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Cancellation race fix in Streamable HTTP
+
+- `wait_for_tool/2` now does a 50ms lookahead after every tool outcome to absorb a pending `{cancelled, _}` message that races with the worker's response. A cooperative arity-2 handler that returns `{tool_error, ...}` on cancel could deliver its outcome to the waiter's mailbox **before** the session-emitted `{cancelled, _}`, depending on scheduler — which made the HTTP path emit a JSON-RPC `isError: true` envelope instead of the spec-mandated 200 + empty body. With the lookahead the cancel always wins.
+
+### OAuth Client Credentials grant (MCP `ext-auth` extension)
+
+- `barrel_mcp_client_auth_oauth` now supports the OAuth 2.1 `client_credentials` grant for unattended agent hosts. Pass `auth => {oauth_client_credentials, Config}` on the connect spec; required keys are `token_endpoint` and `client_id`, plus either `client_secret` (HTTP Basic per RFC 6749) or `client_assertion` (`private_key_jwt`, RFC 7523). Optional `scopes`, `resource`.
+- New public exchanger `barrel_mcp_client_auth_oauth:client_credentials/2` for direct use outside the auth-handle flow.
+- The library fetches the token eagerly during `init/1` (so a misconfigured client fails fast) and re-acquires via the same grant on every 401 — no refresh_token involved. Reuses the existing PRM + AS metadata discovery code.
+- Implements the OAuth Client Credentials extension from `modelcontextprotocol/ext-auth`. The Enterprise-Managed Authorization extension (token-exchange + JWT bearer assertions) is left for follow-up; ask if you need it.
+
 ### Doc cleanup: stale roadmap items + subscription session scope
 
 - `guides/features.md`'s roadmap section called out a "periodic deadline timer" and "client-side `Last-Event-ID` resume" as missing. Both turn out to be either by-design (default request timeout already bounds every call; explicit `infinity` is a deliberate caller choice) or already shipped (the transport's `reopen_sse` loop preserves `sse_last_event_id` across server-initiated SSE closes, and a full client restart re-initializes the session anyway). Replaced the roadmap section with notes explaining each.

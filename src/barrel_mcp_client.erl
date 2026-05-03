@@ -86,7 +86,10 @@
       client_info => #{name => binary(), version => binary()},
       capabilities => map(),
       handler => {module(), term()},
-      auth => none | {bearer, binary()} | {oauth, map()},
+      auth => none
+            | {bearer, binary()}
+            | {oauth, map()}
+            | {oauth_client_credentials, map()},
       protocol_version => binary(),
       request_timeout => pos_integer(),
       init_timeout => pos_integer(),

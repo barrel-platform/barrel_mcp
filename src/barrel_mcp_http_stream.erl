@@ -465,7 +465,7 @@ emit_progress_fun(SessionId, Token) ->
     end.
 
 wait_for_tool(RequestId, Timeout) ->
-    receive
+    Outcome = receive
         {tool_result, RequestId, Result} -> {result, Result};
         {tool_structured, RequestId, Data, Content} ->
             {structured, Data, Content};
@@ -476,6 +476,24 @@ wait_for_tool(RequestId, Timeout) ->
         {cancelled, RequestId} -> cancelled
     after Timeout ->
         timeout
+    end,
+    case Outcome of
+        cancelled -> cancelled;
+        timeout -> timeout;
+        _ ->
+            %% Cancellation race: when `notifications/cancelled'
+            %% arrives, the session sends `{cancel, _}' to the
+            %% worker AND `{cancelled, _}' to us. A cooperative
+            %% worker that returns `{tool_error, ...}' on cancel
+            %% can land its outcome in our mailbox before the
+            %% `{cancelled, _}' is delivered, depending on
+            %% scheduler. Per the MCP spec the receiver MUST NOT
+            %% send a JSON-RPC response for a cancelled request,
+            %% so look briefly for a pending cancel and prefer it.
+            receive
+                {cancelled, RequestId} -> cancelled
+            after 50 -> Outcome
+            end
     end.
 
 deliver_tool_outcome(Req0, State, SessionId, _RequestId, cancelled) ->

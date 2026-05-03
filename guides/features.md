@@ -184,9 +184,18 @@ by the spec.
     Connect fallback).
   - PKCE: `gen_code_verifier/0`, `code_challenge/1` (S256),
     `build_authorization_url/2`.
-  - Token endpoint: `exchange_code/2`, `refresh_token/2`. Both attach
-    the RFC 8707 `resource` parameter; confidential clients use HTTP
-    Basic.
+  - Token endpoint: `exchange_code/2`, `refresh_token/2`,
+    `client_credentials/2`. All three attach the RFC 8707 `resource`
+    parameter; confidential clients use HTTP Basic.
+  - Client Credentials grant (MCP `ext-auth` extension) for
+    unattended agent hosts: pass
+    `auth => {oauth_client_credentials, Config}` on the connect
+    spec. Required keys: `token_endpoint`, `client_id`. Authenticate
+    with `client_secret` (HTTP Basic) or `client_assertion`
+    (`private_key_jwt`, RFC 7523). Optional `scopes`, `resource`.
+    The library fetches the token eagerly during `init/1` and
+    re-acquires via the same grant on 401 — no refresh_token
+    needed.
   - As an auth handle: when used through `auth => {oauth, Config}` on
     the client spec, the library attaches `Authorization: Bearer ...`
     on every request and runs the refresh-token grant on 401 if a
