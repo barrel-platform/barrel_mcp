@@ -7,12 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.4.0] - 2026-05-03
+## [1.2.0] - 2026-05-03
 
-Builds on the 1.3.0 interop work with two new feature areas
-(server-side pagination, OAuth Client Credentials for unattended
-agent hosts) plus a runnable federation demo and one bug fix.
-No breaking wire changes.
+A large release that consolidates everything since 1.1.0:
+hardened security on both HTTP transports, full server-side
+spec parity for MCP `2025-11-25` (including the new `tasks/*`
+surface and the three server-to-client primitives), the
+agent-host story (federation registry, multi-server aggregator,
+LLM provider tool-shape bridge), a Python interop harness that
+exercises every wire surface against `mcp 1.27.0` in both
+directions, server-side cursor pagination on every `*/list`
+endpoint, the OAuth Client Credentials grant from
+`modelcontextprotocol/ext-auth`, and three runnable example
+apps. The default `protocol_version` env is now `2025-11-25`
+(was `2025-03-26`).
+
+**Breaking wire-level changes since 1.1.0** — hosts that
+produced or consumed these envelopes need to update:
+
+- `notifications/tasks/changed` was renamed to `notifications/tasks/status` (the spec method name).
+- `tools/call` for `long_running => true` tools wraps the immediate response as `CreateTaskResult` (`{<<"task">> => Task}`) instead of the flat `{taskId, status}`.
+- Task envelopes use `lastUpdatedAt` (was `updatedAt`) and include a `ttl` field (always `null` for now).
+- `tasks/cancel` returns the cancelled `Task` instead of `{}`.
+- `tasks/result` returns a `CallToolResult` (`{<<"content">>, <<"structuredContent">>?}`) instead of the raw stored value.
+- Task status vocabulary is now `working | completed | failed | cancelled` (was `running | success | error | cancelled`).
+- Task timestamps are RFC 3339 strings (were integer milliseconds).
+- `initialize` advertises `tasks.list` / `get` / `cancel` / `result` as objects, not bare booleans.
+- POST `tools/call` clients on Streamable HTTP must now list **both** `application/json` and `text/event-stream` in `Accept` (or `*/*`).
+- `Origin` is structurally validated on every Streamable HTTP method; public binds require explicit `allowed_origins`.
+- `barrel_mcp_http_stream` defaults to loopback (`{127, 0, 0, 1}`).
+- Top-level JSON-RPC arrays (batch requests) are rejected with `-32600`.
+- JSON-RPC `id` MUST be a string or integer; `null` and other shapes are rejected.
 
 ### Cancellation race fix in Streamable HTTP
 
@@ -40,24 +65,6 @@ No breaking wire changes.
 
 - `tools/list`, `resources/list`, `resources/templates/list`, `prompts/list`, and `tasks/list` now accept an opaque `cursor` parameter and emit `nextCursor` when more entries remain. Page size is 50, sorted by name (or `taskId` for tasks). Existing single-shot callers see the first page transparently.
 - Direction A of the Python interop suite registers 60 dummy tools and walks `tools/list` via `cursor` until exhausted, asserting at least one `nextCursor` was emitted, no duplicates across pages, and that all fixture tools are visible across the walk.
-
-## [1.3.0] - 2026-05-03
-
-This release is driven by a Python interop harness (PR #24) that
-exercises every spec wire surface against the official `mcp 1.27.0`
-Python SDK in both directions on every CI run. The harness
-surfaced several wire bugs we then fixed; this release captures
-all of them. Breaking wire-level changes are listed up front.
-
-**Breaking wire-level changes since 1.2.0** — hosts that produced
-or consumed these envelopes need to update:
-
-- `notifications/tasks/changed` was renamed to `notifications/tasks/status` (the spec method name).
-- `tools/call` for `long_running => true` tools wraps the immediate response as `CreateTaskResult` (`{<<"task">> => Task}`) instead of the flat `{taskId, status}`.
-- Task envelopes now use `lastUpdatedAt` (was `updatedAt`) and include a `ttl` field (always `null` for now).
-- `tasks/cancel` returns the cancelled `Task` instead of `{}`.
-- `tasks/result` returns a `CallToolResult` (`{<<"content">>, <<"structuredContent">>?}`) instead of the raw stored value.
-- `initialize` advertises `tasks.list` / `get` / `cancel` / `result` as objects, not bare booleans.
 
 ### Interop assertions tightened to value level
 
@@ -122,15 +129,6 @@ Together with sampling / elicitation / roots / progress / subscribe / tasks alre
 - New `test/barrel_mcp_python_interop_SUITE` Common Test suite drives both directions: Python client → Erlang server (initialize, list_tools / call_tool, list_resources / read_resource, list_prompts, set_logging_level), and Erlang client → Python server (list_tools, call_tool round-trip).
 - `make interop-setup` creates the venv, `make interop-test` runs the suite. The CT cases skip cleanly when `INTEROP_PYTHON` is unset, so the default `rebar3 ct` loop is unaffected by missing Python tooling.
 - New `interop` CI job runs both directions on Linux with Python 3.12 + OTP 28.
-
-## [1.2.0] - 2026-05-03
-
-This release lands the agent-host story (server federation +
-provider-shape bridge + multi-server aggregator) on top of a major
-spec-conformance pass for MCP `2025-11-25`. The server's
-`protocol_version` env default is now `<<"2025-11-25">>` (was
-`<<"2025-03-26">>`).
-
 
 ### `barrel_mcp_agent` — multi-server tool aggregator
 
