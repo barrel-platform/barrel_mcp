@@ -28,7 +28,7 @@
 
 %% Tool / resource / prompt handlers exported for the registry.
 -export([echo_tool/1, slow_tool/2, trigger_update_tool/1,
-         greeting_resource/1, hello_prompt/1]).
+         ask_llm_tool/1, greeting_resource/1, hello_prompt/1]).
 
 -define(PORT, 22451).
 
@@ -127,6 +127,11 @@ ensure_fixture() ->
         description => <<"Push notifications/resources/updated for the greeting URI">>,
         input_schema => #{<<"type">> => <<"object">>}
     }),
+    ok = barrel_mcp_registry:reg(tool, <<"ask_llm">>, ?MODULE,
+                                  ask_llm_tool, #{
+        description => <<"Ask the connected client to sample a message">>,
+        input_schema => #{<<"type">> => <<"object">>}
+    }),
     ok = barrel_mcp_registry:reg(resource, <<"greeting">>, ?MODULE,
                                   greeting_resource, #{
         name => <<"Greeting">>,
@@ -145,6 +150,7 @@ cleanup_fixture() ->
     catch barrel_mcp_registry:unreg(tool, <<"echo">>),
     catch barrel_mcp_registry:unreg(tool, <<"slow_echo">>),
     catch barrel_mcp_registry:unreg(tool, <<"trigger_update">>),
+    catch barrel_mcp_registry:unreg(tool, <<"ask_llm">>),
     catch barrel_mcp_registry:unreg(resource, <<"greeting">>),
     catch barrel_mcp_registry:unreg(prompt, <<"hello_prompt">>),
     ok.
@@ -154,6 +160,22 @@ echo_tool(#{<<"text">> := T}) -> T.
 trigger_update_tool(_) ->
     ok = barrel_mcp:notify_resource_updated(<<"mem://greeting">>),
     <<"triggered">>.
+
+%% Ask the only sampling-capable session for a message and return
+%% the text. Mirrors examples/sampling_host's ask_sampler/1.
+ask_llm_tool(_) ->
+    [SessionId | _] = barrel_mcp:list_sessions_with_sampling(),
+    Params = #{
+        <<"messages">> =>
+            [#{<<"role">> => <<"user">>,
+               <<"content">> => #{<<"type">> => <<"text">>,
+                                   <<"text">> => <<"hi">>}}],
+        <<"maxTokens">> => 32
+    },
+    {ok, Result, _Usage} =
+        barrel_mcp:sampling_create_message(SessionId, Params,
+                                           #{timeout_ms => 5000}),
+    maps:get(<<"text">>, maps:get(<<"content">>, Result)).
 
 %% Long-running arity-2 handler. Sleeps briefly then echoes back so
 %% the Python client can see the task transition through `working' →
