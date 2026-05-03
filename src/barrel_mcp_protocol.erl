@@ -131,15 +131,18 @@ handle_request(<<"initialize">>, Params, Id, State) ->
             ok;
         _ -> ok
     end,
+    BaseCaps = #{
+        <<"tools">> => #{<<"listChanged">> => true},
+        <<"resources">> => #{<<"subscribe">> => true,
+                              <<"listChanged">> => true},
+        <<"prompts">> => #{<<"listChanged">> => true},
+        <<"logging">> => #{},
+        <<"tasks">> => #{<<"listChanged">> => true}
+    },
+    Caps = maybe_advertise_completions(BaseCaps),
     success_response(Id, #{
         <<"protocolVersion">> => NegotiatedVersion,
-        <<"capabilities">> => #{
-            <<"tools">> => #{<<"listChanged">> => true},
-            <<"resources">> => #{<<"subscribe">> => true,
-                                  <<"listChanged">> => true},
-            <<"prompts">> => #{<<"listChanged">> => true},
-            <<"logging">> => #{}
-        },
+        <<"capabilities">> => Caps,
         <<"serverInfo">> => #{
             <<"name">> => ServerName,
             <<"version">> => ServerVersion
@@ -152,11 +155,16 @@ handle_request(<<"ping">>, _Params, Id, _State) ->
 %% Tools
 handle_request(<<"tools/list">>, _Params, Id, _State) ->
     Tools = lists:map(fun({Name, Handler}) ->
-        #{
+        Base = #{
             <<"name">> => Name,
             <<"description">> => maps:get(description, Handler, <<>>),
             <<"inputSchema">> => maps:get(input_schema, Handler, #{<<"type">> => <<"object">>})
-        }
+        },
+        with_optional_fields(Base, Handler, [
+            {<<"outputSchema">>, output_schema},
+            {<<"title">>, title},
+            {<<"icons">>, icons}
+        ])
     end, barrel_mcp_registry:all(tool)),
     success_response(Id, #{<<"tools">> => Tools});
 
@@ -191,12 +199,16 @@ handle_request(<<"tools/call">>, Params, Id, _State) ->
 %% Resources
 handle_request(<<"resources/list">>, _Params, Id, _State) ->
     Resources = lists:map(fun({_Name, Handler}) ->
-        #{
+        Base = #{
             <<"uri">> => maps:get(uri, Handler, <<>>),
             <<"name">> => maps:get(name, Handler, <<>>),
             <<"description">> => maps:get(description, Handler, <<>>),
             <<"mimeType">> => maps:get(mime_type, Handler, <<"text/plain">>)
-        }
+        },
+        with_optional_fields(Base, Handler, [
+            {<<"title">>, title},
+            {<<"icons">>, icons}
+        ])
     end, barrel_mcp_registry:all(resource)),
     success_response(Id, #{<<"resources">> => Resources});
 
@@ -225,8 +237,11 @@ handle_request(<<"resources/templates/list">>, _Params, Id, _State) ->
             <<"description">> => maps:get(description, Handler, <<>>),
             <<"mimeType">> => maps:get(mime_type, Handler, <<"text/plain">>)
         },
-        %% Drop empty fields so the wire envelope stays compact.
-        maps:filter(fun(_K, V) -> V =/= <<>> end, Base)
+        Compact = maps:filter(fun(_K, V) -> V =/= <<>> end, Base),
+        with_optional_fields(Compact, Handler, [
+            {<<"title">>, title},
+            {<<"icons">>, icons}
+        ])
     end, barrel_mcp_registry:all(resource_template)),
     success_response(Id, #{<<"resourceTemplates">> => Templates});
 
@@ -255,7 +270,7 @@ handle_request(<<"resources/unsubscribe">>, Params, Id, State) ->
 %% Prompts
 handle_request(<<"prompts/list">>, _Params, Id, _State) ->
     Prompts = lists:map(fun({Name, Handler}) ->
-        #{
+        Base = #{
             <<"name">> => Name,
             <<"description">> => maps:get(description, Handler, <<>>),
             <<"arguments">> => lists:map(fun(Arg) ->
@@ -265,7 +280,11 @@ handle_request(<<"prompts/list">>, _Params, Id, _State) ->
                     <<"required">> => maps:get(required, Arg, false)
                 }
             end, maps:get(arguments, Handler, []))
-        }
+        },
+        with_optional_fields(Base, Handler, [
+            {<<"title">>, title},
+            {<<"icons">>, icons}
+        ])
     end, barrel_mcp_registry:all(prompt)),
     success_response(Id, #{<<"prompts">> => Prompts});
 
@@ -282,6 +301,55 @@ handle_request(<<"prompts/get">>, Params, Id, _State) ->
             error_response(Id, ?JSONRPC_METHOD_NOT_FOUND, <<"Prompt not found">>);
         {error, Reason} ->
             error_response(Id, ?MCP_PROMPT_ERROR, format_error(Reason))
+    end;
+
+%% Tasks
+handle_request(<<"tasks/list">>, _Params, Id, State) ->
+    SessionId = maps:get(session_id, State, undefined),
+    {ok, Tasks} = barrel_mcp_tasks:list(SessionId, #{}),
+    success_response(Id, #{<<"tasks">> => Tasks});
+
+handle_request(<<"tasks/get">>, Params, Id, State) ->
+    SessionId = maps:get(session_id, State, undefined),
+    TaskId = maps:get(<<"taskId">>, Params, <<>>),
+    case barrel_mcp_tasks:get(SessionId, TaskId) of
+        {ok, Task} -> success_response(Id, Task);
+        {error, not_found} ->
+            error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
+    end;
+
+handle_request(<<"tasks/cancel">>, Params, Id, State) ->
+    SessionId = maps:get(session_id, State, undefined),
+    TaskId = maps:get(<<"taskId">>, Params, <<>>),
+    case barrel_mcp_tasks:cancel(SessionId, TaskId) of
+        ok -> success_response(Id, #{});
+        {error, not_found} ->
+            error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
+    end;
+
+%% Completions
+handle_request(<<"completion/complete">>, Params, Id, _State) ->
+    Ref = maps:get(<<"ref">>, Params, #{}),
+    Argument = maps:get(<<"argument">>, Params, #{}),
+    ArgName = maps:get(<<"name">>, Argument, <<>>),
+    Value = maps:get(<<"value">>, Argument, <<>>),
+    case completion_lookup_key(Ref, ArgName) of
+        undefined ->
+            success_response(Id, #{<<"completion">> => empty_completion()});
+        Key ->
+            case barrel_mcp_registry:run_completion(Key, Value, #{}) of
+                {ok, {ok, Values}} ->
+                    success_response(Id, #{<<"completion">> =>
+                                            completion_payload(Values, false)});
+                {ok, {ok, Values, #{has_more := HasMore}}} ->
+                    success_response(Id, #{<<"completion">> =>
+                                            completion_payload(Values, HasMore)});
+                {error, {not_found, _, _}} ->
+                    success_response(Id, #{<<"completion">> => empty_completion()});
+                {error, Reason} ->
+                    error_response(Id, ?JSONRPC_INTERNAL_ERROR,
+                                   format_error(Reason))
+            end
     end;
 
 %% Logging
@@ -378,6 +446,41 @@ format_resource_result(Uri, Result) ->
 
 format_error({Class, Reason, _Stack}) ->
     iolist_to_binary(io_lib:format("~p:~p", [Class, Reason])).
+
+maybe_advertise_completions(Caps) ->
+    case barrel_mcp_registry:all(completion) of
+        [] -> Caps;
+        _ -> Caps#{<<"completions">> => #{}}
+    end.
+
+completion_lookup_key(#{<<"type">> := <<"ref/prompt">>, <<"name">> := Name},
+                       ArgName) when is_binary(Name) ->
+    <<"prompt:", Name/binary, ":", ArgName/binary>>;
+completion_lookup_key(#{<<"type">> := <<"ref/resource">>, <<"uri">> := Uri},
+                       ArgName) when is_binary(Uri) ->
+    <<"resource_template:", Uri/binary, ":", ArgName/binary>>;
+completion_lookup_key(_, _) -> undefined.
+
+empty_completion() ->
+    #{<<"values">> => [], <<"hasMore">> => false}.
+
+completion_payload(Values, HasMore) when is_list(Values) ->
+    #{<<"values">> => Values,
+      <<"hasMore">> => HasMore =:= true,
+      <<"total">> => length(Values)}.
+
+%% Add optional fields from a Handler map to a wire envelope. Each
+%% pair `{WireKey, HandlerKey}' becomes `WireKey => Value' in the
+%% envelope only when the value is present and not the empty
+%% binary; this keeps wire payloads compact and back-compat.
+with_optional_fields(Envelope, Handler, Fields) ->
+    lists:foldl(fun({WireKey, HandlerKey}, Acc) ->
+        case maps:get(HandlerKey, Handler, undefined) of
+            undefined -> Acc;
+            <<>> -> Acc;
+            V -> Acc#{WireKey => V}
+        end
+    end, Envelope, Fields).
 
 %% Pick the protocol version to advertise in the `initialize'
 %% response. If the client's requested version is one we speak, echo

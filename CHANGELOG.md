@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Spec parity additives
+
+- Long-running tools return a `taskId` immediately; clients track them via `tasks/list`, `tasks/get`, `tasks/cancel` and `notifications/tasks/changed`. Opt in with `reg_tool/4`'s `long_running => true`.
+- Tools can return structured output via `{structured, Data}` or `{structured, Data, Content}`; the response includes `structuredContent`. Opt-in `validate_output => true` schema-checks the output and surfaces failures as `isError: true`.
+- `completion/complete` is backed by a registry. Hosts call `barrel_mcp:reg_completion(Ref, Mod, Fun, Opts)` to provide suggestions for prompt or resource-template arguments. The `completions` capability is advertised when at least one is registered.
+- Tool, resource, prompt, and resource-template registrations accept `title` and `icons`; the matching `*/list` responses surface them.
+- Streamable HTTP keeps a per-session ring buffer of recent SSE events. Reconnecting clients with `Last-Event-ID` get every event newer than that id replayed before live mode; an out-of-window id yields a synthetic `notifications/replay_truncated`. Buffer size configurable via `start/1`'s `sse_buffer_size`.
+
 ### Spec parity: protocol bump, async tools, list-changed, auth hardening
 
 - **Server protocol bumped to `2025-11-25`.** `initialize' negotiates with the client: when the client requests a version we speak, we echo it; otherwise we reply with our preferred version. Capabilities advertised in `initialize' now include `listChanged: true' on `tools', `resources', and `prompts'.

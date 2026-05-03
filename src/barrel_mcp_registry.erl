@@ -60,6 +60,7 @@
     unreg/2,
     run/3,
     run_tool/3,
+    run_completion/3,
     find/2,
     all/0,
     all/1
@@ -246,6 +247,23 @@ run(Type, Name, Args) ->
             {error, {not_found, Type, Name}}
     end.
 
+%% @doc Run a completion handler synchronously. Completion handlers
+%% are arity 2: `(PartialValue, Ctx)'.
+-spec run_completion(Key :: binary(), Value :: binary(), Ctx :: map()) ->
+    {ok, term()} | {error, term()}.
+run_completion(Key, Value, Ctx) ->
+    case find(completion, Key) of
+        {ok, #{module := M, function := F}} ->
+            try
+                {ok, M:F(Value, Ctx)}
+            catch
+                Class:Reason:Stack ->
+                    {error, {Class, Reason, Stack}}
+            end;
+        error ->
+            {error, {not_found, completion, Key}}
+    end.
+
 %% @doc Execute a tool handler asynchronously. Spawns a worker that
 %% calls `Mod:Fun(Args, Ctx)' (when arity 2 is exported) or
 %% `Mod:Fun(Args)' otherwise. The worker reports back to
@@ -295,22 +313,57 @@ validate_tool_input(Args, Handler) ->
         _ -> ok
     end.
 
-invoke_tool_handler(Args, Ctx, #{module := M, function := F}, ReplyTo, RequestId) ->
+invoke_tool_handler(Args, Ctx, #{module := M, function := F} = Handler,
+                     ReplyTo, RequestId) ->
     try
         Result = case erlang:function_exported(M, F, 2) of
                      true -> M:F(Args, Ctx);
                      false -> M:F(Args)
                  end,
-        case Result of
-            {tool_error, Content} ->
-                ReplyTo ! {tool_error, RequestId, Content};
-            _ ->
-                ReplyTo ! {tool_result, RequestId, Result}
-        end
+        deliver_tool_result(Result, Handler, ReplyTo, RequestId)
     catch
         Class:Reason:Stack ->
             ReplyTo ! {tool_failed, RequestId, {Class, Reason, Stack}}
     end.
+
+deliver_tool_result({tool_error, Content}, _Handler, ReplyTo, RequestId) ->
+    ReplyTo ! {tool_error, RequestId, Content};
+deliver_tool_result({structured, Data}, Handler, ReplyTo, RequestId) ->
+    deliver_structured(Data, default_content_for(Data), Handler, ReplyTo, RequestId);
+deliver_tool_result({structured, Data, Content}, Handler, ReplyTo, RequestId) ->
+    deliver_structured(Data, Content, Handler, ReplyTo, RequestId);
+deliver_tool_result(Result, _Handler, ReplyTo, RequestId) ->
+    ReplyTo ! {tool_result, RequestId, Result}.
+
+deliver_structured(Data, Content, Handler, ReplyTo, RequestId) ->
+    case validate_tool_output(Data, Handler) of
+        ok ->
+            ReplyTo ! {tool_structured, RequestId, Data, Content};
+        {error, Errors} ->
+            ReplyTo ! {tool_validation_failed, RequestId,
+                       {output, Errors}}
+    end.
+
+validate_tool_output(Data, Handler) ->
+    case maps:get(validate_output, Handler, false) of
+        true ->
+            case maps:find(output_schema, Handler) of
+                {ok, Schema} -> barrel_mcp_schema:validate(Data, Schema);
+                error -> ok
+            end;
+        _ -> ok
+    end.
+
+%% Build a sensible default human-readable content list when the
+%% caller returned `{structured, Data}' without a Content companion.
+default_content_for(Data) when is_binary(Data) ->
+    [#{<<"type">> => <<"text">>, <<"text">> => Data}];
+default_content_for(Data) when is_map(Data); is_list(Data) ->
+    [#{<<"type">> => <<"text">>,
+       <<"text">> => iolist_to_binary(json:encode(Data))}];
+default_content_for(Data) ->
+    [#{<<"type">> => <<"text">>,
+       <<"text">> => iolist_to_binary(io_lib:format("~p", [Data]))}].
 
 %% @doc Find a handler by type and name.
 %%
@@ -457,6 +510,7 @@ do_reg(Type, Name, Module, Function, Opts) ->
     %% prompts and resource templates remain arity 1.
     Arities = case Type of
                   tool -> [2, 1];
+                  completion -> [2];
                   _ -> [1]
               end,
     case any_exported(Module, Function, Arities) of
@@ -481,42 +535,65 @@ do_unreg(Type, Name) ->
     ok.
 
 build_handler(tool, Module, Function, Opts) ->
-    #{
+    Base = #{
         module => Module,
         function => Function,
         description => maps:get(description, Opts, <<>>),
         input_schema => maps:get(input_schema, Opts, #{type => <<"object">>}),
-        validate_input => maps:get(validate_input, Opts, false)
-    };
+        validate_input => maps:get(validate_input, Opts, false),
+        long_running => maps:get(long_running, Opts, false),
+        validate_output => maps:get(validate_output, Opts, false)
+    },
+    add_metadata(maps:merge(Base, opt_field(output_schema, Opts)), Opts);
 build_handler(resource, Module, Function, Opts) ->
-    #{
+    Base = #{
         module => Module,
         function => Function,
         name => maps:get(name, Opts, <<>>),
         uri => maps:get(uri, Opts, <<>>),
         description => maps:get(description, Opts, <<>>),
         mime_type => maps:get(mime_type, Opts, <<"text/plain">>)
-    };
+    },
+    add_metadata(Base, Opts);
 build_handler(prompt, Module, Function, Opts) ->
-    #{
+    Base = #{
         module => Module,
         function => Function,
         name => maps:get(name, Opts, <<>>),
         description => maps:get(description, Opts, <<>>),
         arguments => maps:get(arguments, Opts, [])
-    };
+    },
+    add_metadata(Base, Opts);
 build_handler(resource_template, Module, Function, Opts) ->
-    %% RFC 6570 URI template registry. The handler function expands
-    %% the template (called when the matching `resources/read'
-    %% arrives — currently lib-side dispatching is left to hosts).
-    #{
+    Base = #{
         module => Module,
         function => Function,
         name => maps:get(name, Opts, <<>>),
         uri_template => maps:get(uri_template, Opts, <<>>),
         description => maps:get(description, Opts, <<>>),
         mime_type => maps:get(mime_type, Opts, <<"text/plain">>)
-    }.
+    },
+    add_metadata(Base, Opts);
+build_handler(completion, Module, Function, _Opts) ->
+    %% Completion handlers are arity 2: (PartialValue, Ctx) ->
+    %%   {ok, [Suggestion]} | {ok, [Suggestion], #{has_more => true}}.
+    #{module => Module, function => Function}.
+
+add_metadata(Handler, Opts) ->
+    Handler1 = case maps:get(title, Opts, undefined) of
+                   undefined -> Handler;
+                   T -> Handler#{title => T}
+               end,
+    case maps:get(icons, Opts, undefined) of
+        undefined -> Handler1;
+        I -> Handler1#{icons => I}
+    end.
+
+opt_field(Key, Opts) ->
+    case maps:get(Key, Opts, undefined) of
+        undefined -> #{};
+        V -> #{Key => V}
+    end.
 
 sync_persistent_term() ->
     Handlers = ets:foldl(fun({Key, Handler}, Acc) ->

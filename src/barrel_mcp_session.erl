@@ -46,7 +46,11 @@
     %% In-flight tool tracking (used by `notifications/cancelled').
     record_in_flight/4,
     cancel_in_flight/2,
-    clear_in_flight/2
+    clear_in_flight/2,
+    %% SSE replay (Last-Event-ID).
+    record_sse_event/3,
+    events_since/2,
+    set_sse_buffer_max/2
 ]).
 
 %% gen_server callbacks
@@ -69,7 +73,10 @@
     client_info :: map(),
     client_capabilities :: map(),
     protocol_version :: binary(),
-    sse_pid :: pid() | undefined  %% Process handling SSE stream
+    sse_pid :: pid() | undefined,  %% Process handling SSE stream
+    %% Recent SSE events (newest first) for `Last-Event-ID' replay.
+    sse_buffer = [] :: [{binary(), map()}],
+    sse_buffer_max = 256 :: pos_integer()
 }).
 
 %% Async tool call in-flight tracking.
@@ -247,10 +254,10 @@ deliver_response(Id, Response) ->
 %% session manager (e.g. during stdio-only operation).
 -spec broadcast_list_changed(handler_type()) -> ok.
 broadcast_list_changed(Kind) ->
-    case whereis(?MODULE) of
-        undefined -> ok;
-        _ ->
-            Method = list_changed_method(Kind),
+    case {whereis(?MODULE), list_changed_method(Kind)} of
+        {undefined, _} -> ok;
+        {_, undefined} -> ok;  %% kind has no list_changed notification
+        {_, Method} ->
             Notif = #{<<"jsonrpc">> => <<"2.0">>,
                       <<"method">> => Method,
                       <<"params">> => #{}},
@@ -260,7 +267,8 @@ broadcast_list_changed(Kind) ->
 list_changed_method(tool)              -> <<"notifications/tools/list_changed">>;
 list_changed_method(resource)          -> <<"notifications/resources/list_changed">>;
 list_changed_method(resource_template) -> <<"notifications/resources/list_changed">>;
-list_changed_method(prompt)            -> <<"notifications/prompts/list_changed">>.
+list_changed_method(prompt)            -> <<"notifications/prompts/list_changed">>;
+list_changed_method(completion)        -> undefined.
 
 broadcast_to_sse_sessions(Notification) ->
     %% Reads from a `protected' ETS via direct ets:foldl/3 work fine
@@ -298,6 +306,42 @@ cancel_in_flight(SessionId, RequestId) ->
 clear_in_flight(SessionId, RequestId) ->
     gen_server:call(?MODULE, {clear_in_flight, SessionId, RequestId}).
 
+%% @doc Append an SSE event to the session's ring buffer for later
+%% replay via `Last-Event-ID'.
+-spec record_sse_event(binary(), binary(), map()) -> ok.
+record_sse_event(SessionId, EventId, Payload) ->
+    gen_server:call(?MODULE,
+                    {record_sse_event, SessionId, EventId, Payload}).
+
+%% @doc Return SSE events newer than `LastId' (oldest first), or
+%% `truncated' when `LastId' is older than the oldest buffered event.
+-spec events_since(binary(), binary()) ->
+    {ok, [{binary(), map()}]} | truncated | {error, not_found}.
+events_since(SessionId, LastId) ->
+    case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, #mcp_session{sse_buffer = Buf}}] ->
+            collect_after(Buf, LastId);
+        [] -> {error, not_found}
+    end.
+
+%% Buffer is newest-first. Return events after `LastId' in
+%% chronological order (oldest first), or `truncated' if LastId
+%% isn't in the window.
+collect_after(Buf, LastId) ->
+    case lists:splitwith(fun({Id, _}) -> Id =/= LastId end, Buf) of
+        {_, []} ->
+            %% LastId not found — buffer rolled over.
+            truncated;
+        {Newer, [_ | _]} ->
+            {ok, lists:reverse(Newer)}
+    end.
+
+%% @doc Configure the maximum number of SSE events buffered per
+%% session for replay.
+-spec set_sse_buffer_max(binary(), pos_integer()) -> ok | {error, not_found}.
+set_sse_buffer_max(SessionId, Max) when is_integer(Max), Max > 0 ->
+    gen_server:call(?MODULE, {set_sse_buffer_max, SessionId, Max}).
+
 %% @doc Push a `notifications/progress' envelope to a specific
 %% session over its SSE channel. `Token' is the progressToken the
 %% client supplied on the originating request.
@@ -325,6 +369,10 @@ notify_progress(SessionId, Token, Progress, Total) ->
 -spec cleanup_expired(pos_integer()) -> non_neg_integer().
 cleanup_expired(TTL) ->
     gen_server:call(?MODULE, {cleanup_expired, TTL}).
+
+%% Trim a newest-first list to at most `Max' entries.
+trim(List, Max) when length(List) =< Max -> List;
+trim(List, Max) -> lists:sublist(List, Max).
 
 %% Inline session delete, only called from inside the gen_server.
 delete_inline(SessionId) ->
@@ -465,6 +513,27 @@ handle_call({cancel_in_flight, SessionId, RequestId}, _From, State) ->
 handle_call({clear_in_flight, SessionId, RequestId}, _From, State) ->
     true = ets:delete(?INFLIGHT_TABLE, {SessionId, RequestId}),
     {reply, ok, State};
+
+handle_call({record_sse_event, SessionId, EventId, Payload}, _From, State) ->
+    case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, #mcp_session{sse_buffer = Buf, sse_buffer_max = Max} = S}] ->
+            NewBuf = trim([{EventId, Payload} | Buf], Max),
+            true = ets:insert(?SESSION_TABLE,
+                              {SessionId, S#mcp_session{sse_buffer = NewBuf}}),
+            ok;
+        [] -> ok
+    end,
+    {reply, ok, State};
+
+handle_call({set_sse_buffer_max, SessionId, Max}, _From, State) ->
+    Reply = case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, S}] ->
+            true = ets:insert(?SESSION_TABLE,
+                              {SessionId, S#mcp_session{sse_buffer_max = Max}}),
+            ok;
+        [] -> {error, not_found}
+    end,
+    {reply, Reply, State};
 
 handle_call({cleanup_expired, TTL}, _From, State) ->
     Now = erlang:system_time(millisecond),

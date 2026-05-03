@@ -76,6 +76,12 @@
     list_prompts/0
 ]).
 
+%% Completion API
+-export([
+    reg_completion/4,
+    unreg_completion/1
+]).
+
 %% Server API
 -export([
     start_http/1,
@@ -422,6 +428,45 @@ get_prompt(Name, Args) ->
 -spec list_prompts() -> [{binary(), map()}].
 list_prompts() ->
     barrel_mcp_registry:all(prompt).
+
+%%====================================================================
+%% Completion API
+%%====================================================================
+
+%% @doc Register a completion handler for a prompt argument or a
+%% resource-template argument. Handlers receive `(PartialValue, Ctx)'
+%% and return `{ok, [Suggestion]}' or
+%% `{ok, [Suggestion], #{has_more => true}}'.
+-spec reg_completion(Ref, Module, Function, Opts) -> ok | {error, term()} when
+    Ref :: {prompt, binary(), binary()}
+         | {resource_template, binary(), binary()},
+    Module :: module(),
+    Function :: atom(),
+    Opts :: map().
+reg_completion({prompt, PromptName, ArgName}, Module, Function, Opts)
+  when is_binary(PromptName), is_binary(ArgName) ->
+    Key = completion_key(prompt, PromptName, ArgName),
+    barrel_mcp_registry:reg(completion, Key, Module, Function, Opts);
+reg_completion({resource_template, TemplateUri, ArgName}, Module, Function, Opts)
+  when is_binary(TemplateUri), is_binary(ArgName) ->
+    Key = completion_key(resource_template, TemplateUri, ArgName),
+    barrel_mcp_registry:reg(completion, Key, Module, Function, Opts).
+
+-spec unreg_completion(term()) -> ok.
+unreg_completion({prompt, PromptName, ArgName}) ->
+    barrel_mcp_registry:unreg(completion,
+                              completion_key(prompt, PromptName, ArgName));
+unreg_completion({resource_template, TemplateUri, ArgName}) ->
+    barrel_mcp_registry:unreg(completion,
+                              completion_key(resource_template,
+                                             TemplateUri, ArgName)).
+
+completion_key(Kind, Outer, Arg) ->
+    K = case Kind of
+            prompt -> <<"prompt">>;
+            resource_template -> <<"resource_template">>
+        end,
+    <<K/binary, ":", Outer/binary, ":", Arg/binary>>.
 
 %%====================================================================
 %% Server API
