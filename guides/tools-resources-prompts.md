@@ -512,7 +512,7 @@ SSE channel:
 
 | Notification | Façade |
 | --- | --- |
-| `notifications/resources/updated` | `barrel_mcp:notify_resource_updated/1,2` |
+| `notifications/resources/updated` | `barrel_mcp:notify_resource_updated/1,2`. Subscriptions are scoped to the calling `Mcp-Session-Id` — when a client re-initializes (or its session expires) the new session id has no carry-over subscriptions, and the host must subscribe again. This matches the spec's session-lifecycle model. |
 | `notifications/tools/list_changed`<br>`notifications/resources/list_changed`<br>`notifications/prompts/list_changed` | `barrel_mcp:notify_list_changed/1` (tool, resource, prompt). `reg_tool/4`/`unreg_tool/1` and friends emit it automatically; call the façade if you mutate the catalogue out of band. |
 | `notifications/progress` | `barrel_mcp:notify_progress/3,4` (or via `Ctx` from an arity-2 tool handler). |
 | `notifications/tasks/status` | Emitted by `barrel_mcp_tasks` on every status transition. |
