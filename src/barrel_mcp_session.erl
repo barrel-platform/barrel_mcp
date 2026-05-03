@@ -39,7 +39,14 @@
     subscribers_for/1,
     %% Server -> client request via the session's SSE channel.
     sampling_create_message/3,
-    deliver_response/2
+    deliver_response/2,
+    %% Server -> client notifications.
+    broadcast_list_changed/1,
+    notify_progress/4,
+    %% In-flight tool tracking (used by `notifications/cancelled').
+    record_in_flight/4,
+    cancel_in_flight/2,
+    clear_in_flight/2
 ]).
 
 %% gen_server callbacks
@@ -50,6 +57,8 @@
 -define(SESSION_TABLE, barrel_mcp_sessions).
 -define(SUBSCRIPTIONS_TABLE, barrel_mcp_resource_subs).
 -define(PENDING_TABLE, barrel_mcp_pending_requests).
+%% In-flight tool calls per session: {{SessionId, RequestId} => #in_flight{}}
+-define(INFLIGHT_TABLE, barrel_mcp_inflight).
 -define(CLEANUP_INTERVAL, 60000). %% 1 minute
 -define(DEFAULT_SAMPLING_TIMEOUT, 30000).
 
@@ -61,6 +70,14 @@
     client_capabilities :: map(),
     protocol_version :: binary(),
     sse_pid :: pid() | undefined  %% Process handling SSE stream
+}).
+
+%% Async tool call in-flight tracking.
+-record(in_flight, {
+    session_id :: binary(),
+    request_id :: integer() | binary(),
+    worker_pid :: pid(),
+    waiter_pid :: pid()
 }).
 
 -record(pending, {
@@ -225,6 +242,83 @@ sampling_create_message(SessionId, Params, Opts) ->
 deliver_response(Id, Response) ->
     gen_server:call(?MODULE, {deliver_response, id_to_binary(Id), Response}).
 
+%% @doc Push a `notifications/<kind>/list_changed' envelope to every
+%% session that has an active SSE channel. Tolerates a missing
+%% session manager (e.g. during stdio-only operation).
+-spec broadcast_list_changed(handler_type()) -> ok.
+broadcast_list_changed(Kind) ->
+    case whereis(?MODULE) of
+        undefined -> ok;
+        _ ->
+            Method = list_changed_method(Kind),
+            Notif = #{<<"jsonrpc">> => <<"2.0">>,
+                      <<"method">> => Method,
+                      <<"params">> => #{}},
+            broadcast_to_sse_sessions(Notif)
+    end.
+
+list_changed_method(tool)              -> <<"notifications/tools/list_changed">>;
+list_changed_method(resource)          -> <<"notifications/resources/list_changed">>;
+list_changed_method(resource_template) -> <<"notifications/resources/list_changed">>;
+list_changed_method(prompt)            -> <<"notifications/prompts/list_changed">>.
+
+broadcast_to_sse_sessions(Notification) ->
+    %% Reads from a `protected' ETS via direct ets:foldl/3 work fine
+    %% from any process. We only need the gen_server when we mutate
+    %% the table.
+    case ets:whereis(?SESSION_TABLE) of
+        undefined -> ok;
+        _ ->
+            ets:foldl(fun
+                ({_Id, #mcp_session{sse_pid = Pid}}, Acc) when is_pid(Pid) ->
+                    Pid ! {sse_send_message, Notification},
+                    Acc;
+                (_, Acc) -> Acc
+            end, ok, ?SESSION_TABLE)
+    end.
+
+%% @doc Record an in-flight tool call so a later
+%% `notifications/cancelled' can find the worker and waiter.
+-spec record_in_flight(binary(), integer() | binary(), pid(), pid()) -> ok.
+record_in_flight(SessionId, RequestId, WorkerPid, WaiterPid) ->
+    gen_server:call(?MODULE,
+                    {record_in_flight, SessionId, RequestId,
+                     WorkerPid, WaiterPid}).
+
+%% @doc Cancel an in-flight tool call. Sends `{cancel, RequestId}'
+%% to the worker and `{cancelled, RequestId}' to the waiter, then
+%% drops the entry. Idempotent: a missing entry returns `ok'.
+-spec cancel_in_flight(binary(), integer() | binary()) -> ok.
+cancel_in_flight(SessionId, RequestId) ->
+    gen_server:call(?MODULE, {cancel_in_flight, SessionId, RequestId}).
+
+%% @doc Drop an in-flight entry (called by the waiter after a normal
+%% completion).
+-spec clear_in_flight(binary(), integer() | binary()) -> ok.
+clear_in_flight(SessionId, RequestId) ->
+    gen_server:call(?MODULE, {clear_in_flight, SessionId, RequestId}).
+
+%% @doc Push a `notifications/progress' envelope to a specific
+%% session over its SSE channel. `Token' is the progressToken the
+%% client supplied on the originating request.
+-spec notify_progress(binary(), term(), number(), number() | undefined) -> ok.
+notify_progress(SessionId, Token, Progress, Total) ->
+    case get_sse_pid(SessionId) of
+        {ok, Pid} ->
+            Params0 = #{<<"progressToken">> => Token,
+                        <<"progress">> => Progress},
+            Params = case Total of
+                         undefined -> Params0;
+                         _ -> Params0#{<<"total">> => Total}
+                     end,
+            Pid ! {sse_send_message,
+                   #{<<"jsonrpc">> => <<"2.0">>,
+                     <<"method">> => <<"notifications/progress">>,
+                     <<"params">> => Params}},
+            ok;
+        _ -> ok
+    end.
+
 %% @doc Cleanup sessions older than TTL milliseconds. Routes through
 %% the gen_server (the table owner under the new `protected'
 %% visibility); the handler deletes expired entries inline.
@@ -251,6 +345,7 @@ init([]) ->
     _ = ensure_session_table(),
     _ = ensure_subs_table(),
     _ = ensure_pending_table(),
+    _ = ensure_inflight_table(),
     %% Schedule periodic cleanup
     _ = erlang:send_after(?CLEANUP_INTERVAL, self(), cleanup),
     {ok, #{}}.
@@ -348,6 +443,29 @@ handle_call({deliver_response, Key, Response}, _From, State) ->
     end,
     {reply, Reply, State};
 
+handle_call({record_in_flight, SessionId, RequestId, Worker, Waiter},
+            _From, State) ->
+    InFlight = #in_flight{
+        session_id = SessionId, request_id = RequestId,
+        worker_pid = Worker, waiter_pid = Waiter
+    },
+    true = ets:insert(?INFLIGHT_TABLE, {{SessionId, RequestId}, InFlight}),
+    {reply, ok, State};
+
+handle_call({cancel_in_flight, SessionId, RequestId}, _From, State) ->
+    case ets:lookup(?INFLIGHT_TABLE, {SessionId, RequestId}) of
+        [{_, #in_flight{worker_pid = W, waiter_pid = Wt}}] ->
+            (catch W ! {cancel, RequestId}),
+            (catch Wt ! {cancelled, RequestId}),
+            true = ets:delete(?INFLIGHT_TABLE, {SessionId, RequestId});
+        [] -> ok
+    end,
+    {reply, ok, State};
+
+handle_call({clear_in_flight, SessionId, RequestId}, _From, State) ->
+    true = ets:delete(?INFLIGHT_TABLE, {SessionId, RequestId}),
+    {reply, ok, State};
+
 handle_call({cleanup_expired, TTL}, _From, State) ->
     Now = erlang:system_time(millisecond),
     Cutoff = Now - TTL,
@@ -436,6 +554,16 @@ ensure_pending_table() ->
     case ets:whereis(?PENDING_TABLE) of
         undefined ->
             ets:new(?PENDING_TABLE, [
+                named_table, protected, set,
+                {read_concurrency, true}
+            ]);
+        _ -> ok
+    end.
+
+ensure_inflight_table() ->
+    case ets:whereis(?INFLIGHT_TABLE) of
+        undefined ->
+            ets:new(?INFLIGHT_TABLE, [
                 named_table, protected, set,
                 {read_concurrency, true}
             ]);

@@ -59,6 +59,7 @@
     reg/5,
     unreg/2,
     run/3,
+    run_tool/3,
     find/2,
     all/0,
     all/1
@@ -245,6 +246,72 @@ run(Type, Name, Args) ->
             {error, {not_found, Type, Name}}
     end.
 
+%% @doc Execute a tool handler asynchronously. Spawns a worker that
+%% calls `Mod:Fun(Args, Ctx)' (when arity 2 is exported) or
+%% `Mod:Fun(Args)' otherwise. The worker reports back to
+%% `maps:get(reply_to, Ctx)' as either:
+%% <ul>
+%%   <li>`{tool_result, RequestId, Result}' on a normal return</li>
+%%   <li>`{tool_error, RequestId, Content}' for `{tool_error, _}'</li>
+%%   <li>`{tool_failed, RequestId, Reason}' on exception</li>
+%%   <li>`{tool_validation_failed, RequestId, Errors}' if input
+%%       validation was enabled and the args didn't match
+%%       `input_schema'.</li>
+%% </ul>
+%%
+%% Returns the worker pid.
+-spec run_tool(Name :: binary(), Args :: map(), Ctx :: map()) ->
+    {ok, pid()} | {error, term()}.
+run_tool(Name, Args, Ctx) ->
+    case find(tool, Name) of
+        {ok, Handler} ->
+            ReplyTo = maps:get(reply_to, Ctx),
+            RequestId = maps:get(request_id, Ctx),
+            Pid = spawn(fun() ->
+                run_tool_worker(Name, Args, Ctx, Handler, ReplyTo, RequestId)
+            end),
+            {ok, Pid};
+        error ->
+            {error, {not_found, tool, Name}}
+    end.
+
+run_tool_worker(_Name, Args, Ctx, Handler, ReplyTo, RequestId) ->
+    %% Optional input validation against the registered input_schema.
+    case validate_tool_input(Args, Handler) of
+        ok ->
+            invoke_tool_handler(Args, Ctx, Handler, ReplyTo, RequestId);
+        {error, Errors} ->
+            ReplyTo ! {tool_validation_failed, RequestId, Errors}
+    end.
+
+validate_tool_input(Args, Handler) ->
+    case maps:get(validate_input, Handler, false) of
+        true ->
+            Schema = maps:get(input_schema, Handler, #{}),
+            case barrel_mcp_schema:validate(Args, Schema) of
+                ok -> ok;
+                {error, Errors} -> {error, Errors}
+            end;
+        _ -> ok
+    end.
+
+invoke_tool_handler(Args, Ctx, #{module := M, function := F}, ReplyTo, RequestId) ->
+    try
+        Result = case erlang:function_exported(M, F, 2) of
+                     true -> M:F(Args, Ctx);
+                     false -> M:F(Args)
+                 end,
+        case Result of
+            {tool_error, Content} ->
+                ReplyTo ! {tool_error, RequestId, Content};
+            _ ->
+                ReplyTo ! {tool_result, RequestId, Result}
+        end
+    catch
+        Class:Reason:Stack ->
+            ReplyTo ! {tool_failed, RequestId, {Class, Reason, Stack}}
+    end.
+
 %% @doc Find a handler by type and name.
 %%
 %% Looks up handler metadata without executing it.
@@ -385,19 +452,32 @@ wait_for_proc(Parent, Proc) ->
     end.
 
 do_reg(Type, Name, Module, Function, Opts) ->
-    case erlang:function_exported(Module, Function, 1) of
+    %% Tools may register handlers as arity 1 (legacy) or arity 2
+    %% (new, accepts Ctx with progress and cancel hooks). Resources,
+    %% prompts and resource templates remain arity 1.
+    Arities = case Type of
+                  tool -> [2, 1];
+                  _ -> [1]
+              end,
+    case any_exported(Module, Function, Arities) of
         true ->
             Handler = build_handler(Type, Module, Function, Opts),
             true = ets:insert(?REGISTRY_TABLE, {{Type, Name}, Handler}),
             sync_persistent_term(),
+            barrel_mcp_session:broadcast_list_changed(Type),
             ok;
         false ->
-            {error, {function_not_exported, Module, Function, 1}}
+            {error, {function_not_exported, Module, Function, lists:max(Arities)}}
     end.
+
+any_exported(Module, Function, Arities) ->
+    lists:any(fun(A) -> erlang:function_exported(Module, Function, A) end,
+              Arities).
 
 do_unreg(Type, Name) ->
     true = ets:delete(?REGISTRY_TABLE, {Type, Name}),
     sync_persistent_term(),
+    barrel_mcp_session:broadcast_list_changed(Type),
     ok.
 
 build_handler(tool, Module, Function, Opts) ->
@@ -405,7 +485,8 @@ build_handler(tool, Module, Function, Opts) ->
         module => Module,
         function => Function,
         description => maps:get(description, Opts, <<>>),
-        input_schema => maps:get(input_schema, Opts, #{type => <<"object">>})
+        input_schema => maps:get(input_schema, Opts, #{type => <<"object">>}),
+        validate_input => maps:get(validate_input, Opts, false)
     };
 build_handler(resource, Module, Function, Opts) ->
     #{
@@ -423,6 +504,18 @@ build_handler(prompt, Module, Function, Opts) ->
         name => maps:get(name, Opts, <<>>),
         description => maps:get(description, Opts, <<>>),
         arguments => maps:get(arguments, Opts, [])
+    };
+build_handler(resource_template, Module, Function, Opts) ->
+    %% RFC 6570 URI template registry. The handler function expands
+    %% the template (called when the matching `resources/read'
+    %% arrives — currently lib-side dispatching is left to hosts).
+    #{
+        module => Module,
+        function => Function,
+        name => maps:get(name, Opts, <<>>),
+        uri_template => maps:get(uri_template, Opts, <<>>),
+        description => maps:get(description, Opts, <<>>),
+        mime_type => maps:get(mime_type, Opts, <<"text/plain">>)
     }.
 
 sync_persistent_term() ->

@@ -6,8 +6,11 @@
 -ifndef(BARREL_MCP_HRL).
 -define(BARREL_MCP_HRL, true).
 
-%% MCP Protocol Version (Streamable HTTP transport, server side)
--define(MCP_PROTOCOL_VERSION, <<"2025-03-26">>).
+%% MCP Protocol Version (the server's preferred version, used in
+%% `initialize' responses when the client requests one we don't
+%% speak). The actual negotiated value for a session is whatever the
+%% client asked for if it's in `?MCP_SUPPORTED_VERSIONS'.
+-define(MCP_PROTOCOL_VERSION, <<"2025-11-25">>).
 %% Legacy protocol version (JSON-RPC only transport)
 -define(MCP_PROTOCOL_VERSION_LEGACY, <<"2024-11-05">>).
 %% Latest protocol version targeted by the client; the client negotiates
@@ -35,7 +38,7 @@
 -define(MCP_PROMPT_ERROR, -32002).
 
 %% Handler types
--type handler_type() :: tool | resource | prompt.
+-type handler_type() :: tool | resource | prompt | resource_template.
 
 %% Tool definition
 -type tool_def() :: #{

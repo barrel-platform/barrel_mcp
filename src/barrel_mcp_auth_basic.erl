@@ -31,8 +31,14 @@
 
 %% Utilities
 -export([
-    hash_password/1
+    hash_password/1,
+    hash_password/2,
+    verify_password/2
 ]).
+
+-define(PBKDF2_ITERATIONS, 100000).
+-define(PBKDF2_SALT_BYTES, 16).
+-define(PBKDF2_HASH_BYTES, 32).
 
 %%====================================================================
 %% barrel_mcp_auth callbacks
@@ -131,19 +137,16 @@ verify_credentials(_Username, _Password, _State) ->
     {error, {error, no_credentials_configured}}.
 
 verify_password(Username, Password, ExpectedPassword, true) ->
-    %% Passwords are hashed - compare hashes (same length)
-    HashedInput = hash_password(Password),
-    case crypto:hash_equals(HashedInput, ExpectedPassword) of
-        true ->
+    case verify_password(Password, ExpectedPassword) of
+        ok ->
             {ok, #{subject => Username, scopes => [], claims => #{}}};
-        false ->
+        {error, invalid_credentials} ->
             {error, invalid_credentials}
     end;
 verify_password(Username, Password, ExpectedPassword, false) ->
-    %% Plain text comparison - hash both for constant-time comparison
-    %% crypto:hash_equals requires same length, so hash both
-    HashedInput = hash_password(Password),
-    HashedExpected = hash_password(ExpectedPassword),
+    %% Plain-text comparison via constant-time hash compare.
+    HashedInput = legacy_sha256_hex(Password),
+    HashedExpected = legacy_sha256_hex(ExpectedPassword),
     case crypto:hash_equals(HashedInput, HashedExpected) of
         true ->
             {ok, #{subject => Username, scopes => [], claims => #{}}};
@@ -155,10 +158,87 @@ verify_password(Username, Password, ExpectedPassword, false) ->
 %% Utilities
 %%====================================================================
 
-%% @doc Hash a password using SHA256.
-%% Use this to create hashed passwords for the credentials configuration.
+%% @doc Hash a password using the default modern algorithm
+%% (PBKDF2-SHA256). Use {@link hash_password/2} to choose
+%% explicitly.
 -spec hash_password(Password :: binary()) -> binary().
 hash_password(Password) ->
+    hash_password(Password, #{}).
+
+%% @doc Hash a password using the chosen algorithm.
+%%
+%% `Opts' may contain:
+%% <ul>
+%%   <li>`algorithm' — `pbkdf2-sha256' (default) or `sha256-hex'
+%%       (deprecated; kept for migration only).</li>
+%%   <li>`iterations' — PBKDF2 iteration count (default 100000).</li>
+%% </ul>
+%%
+%% Stored format for the modern hash:
+%% `pbkdf2-sha256$<iters>$<base64(salt)>$<base64(hash)>'.
+-spec hash_password(Password :: binary(), Opts :: map()) -> binary().
+hash_password(Password, Opts) ->
+    case maps:get(algorithm, Opts, 'pbkdf2-sha256') of
+        'sha256-hex' ->
+            legacy_sha256_hex(Password);
+        'pbkdf2-sha256' ->
+            Iterations = maps:get(iterations, Opts, ?PBKDF2_ITERATIONS),
+            Salt = crypto:strong_rand_bytes(?PBKDF2_SALT_BYTES),
+            Hash = crypto:pbkdf2_hmac(sha256, Password, Salt,
+                                       Iterations, ?PBKDF2_HASH_BYTES),
+            iolist_to_binary([
+                <<"pbkdf2-sha256$">>,
+                integer_to_binary(Iterations), <<"$">>,
+                base64:encode(Salt), <<"$">>,
+                base64:encode(Hash)
+            ])
+    end.
+
+%% @doc Verify a plaintext `Password' against a `Stored' hash. Accepts
+%% both the modern `pbkdf2-sha256$...' format and legacy hex SHA-256
+%% digests (the latter for one release, with a logger warning on
+%% match). Returns `ok' or `{error, invalid_credentials}'.
+-spec verify_password(Password :: binary(), Stored :: binary()) ->
+    ok | {error, invalid_credentials}.
+verify_password(Password, <<"pbkdf2-sha256$", Rest/binary>>) ->
+    case parse_pbkdf2(Rest) of
+        {ok, Iterations, Salt, ExpectedHash} ->
+            ActualHash = crypto:pbkdf2_hmac(sha256, Password, Salt,
+                                            Iterations, byte_size(ExpectedHash)),
+            case crypto:hash_equals(ActualHash, ExpectedHash) of
+                true -> ok;
+                false -> {error, invalid_credentials}
+            end;
+        error ->
+            {error, invalid_credentials}
+    end;
+verify_password(Password, Stored) when byte_size(Stored) =:= 64 ->
+    %% Legacy hex SHA-256.
+    case crypto:hash_equals(legacy_sha256_hex(Password), Stored) of
+        true ->
+            logger:warning("barrel_mcp_auth_basic: legacy sha256-hex "
+                           "password hash accepted; rotate to "
+                           "pbkdf2-sha256"),
+            ok;
+        false -> {error, invalid_credentials}
+    end;
+verify_password(_Password, _Stored) ->
+    {error, invalid_credentials}.
+
+parse_pbkdf2(Bin) ->
+    case binary:split(Bin, <<"$">>, [global]) of
+        [IterBin, SaltB64, HashB64] ->
+            try
+                {ok, binary_to_integer(IterBin),
+                     base64:decode(SaltB64),
+                     base64:decode(HashB64)}
+            catch
+                _:_ -> error
+            end;
+        _ -> error
+    end.
+
+legacy_sha256_hex(Password) ->
     Digest = crypto:hash(sha256, Password),
     encode_hex(Digest).
 

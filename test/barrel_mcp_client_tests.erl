@@ -92,10 +92,12 @@ test_list_tools_all() ->
     wait_dead(Pid).
 
 test_version_downgrade() ->
-    %% Server reports 2025-03-26; client targets 2025-11-25 by default.
+    %% Both sides target 2025-11-25 now, so negotiation echoes the
+    %% client's version. The downgrade path stays exercised by the
+    %% server-side protocol_version_unsupported_returns_400 case.
     {ok, Pid} = start_client(),
     {ok, Version} = barrel_mcp_client:protocol_version(Pid),
-    ?assertEqual(<<"2025-03-26">>, Version),
+    ?assertEqual(<<"2025-11-25">>, Version),
     ok = barrel_mcp_client:close(Pid),
     wait_dead(Pid).
 

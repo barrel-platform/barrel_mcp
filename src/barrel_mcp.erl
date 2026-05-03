@@ -61,7 +61,11 @@
     reg_resource/4,
     unreg_resource/1,
     read_resource/1,
-    list_resources/0
+    list_resources/0,
+    %% Resource templates (RFC 6570 URI templates).
+    reg_resource_template/4,
+    unreg_resource_template/1,
+    list_resource_templates/0
 ]).
 
 %% Prompt API
@@ -91,12 +95,16 @@
     find/1
 ]).
 
-%% Server-to-client primitives (sampling + resource notifications).
+%% Server-to-client primitives (sampling + resource notifications +
+%% progress + list-changed).
 -export([
     sampling_create_message/3,
     list_sessions_with_sampling/0,
     notify_resource_updated/1,
-    notify_resource_updated/2
+    notify_resource_updated/2,
+    notify_progress/3,
+    notify_progress/4,
+    notify_list_changed/1
 ]).
 
 %% MCP client API (connecting to remote MCP servers).
@@ -291,6 +299,43 @@ read_resource(Name) ->
 -spec list_resources() -> [{binary(), map()}].
 list_resources() ->
     barrel_mcp_registry:all(resource).
+
+%% @doc Register a resource template (RFC 6570 URI template).
+%%
+%% Resource templates surface as `resources/templates/list' on the
+%% wire and let clients discover URI patterns the server can serve
+%% via `resources/read'.
+%%
+%% Options:
+%% <ul>
+%%   <li>`name' — display name.</li>
+%%   <li>`uri_template' — RFC 6570 URI template (e.g.
+%%       `<<"file:///{path}">>').</li>
+%%   <li>`description' — human-readable description.</li>
+%%   <li>`mime_type' — content type (default `<<"text/plain">>').</li>
+%% </ul>
+-spec reg_resource_template(Name, Module, Function, Opts) -> ok | {error, term()} when
+    Name :: binary(),
+    Module :: module(),
+    Function :: atom(),
+    Opts :: #{
+        name => binary(),
+        uri_template => binary(),
+        description => binary(),
+        mime_type => binary()
+    }.
+reg_resource_template(Name, Module, Function, Opts) ->
+    barrel_mcp_registry:reg(resource_template, Name, Module, Function, Opts).
+
+%% @doc Unregister a resource template.
+-spec unreg_resource_template(Name :: binary()) -> ok.
+unreg_resource_template(Name) ->
+    barrel_mcp_registry:unreg(resource_template, Name).
+
+%% @doc List all registered resource templates.
+-spec list_resource_templates() -> [{binary(), map()}].
+list_resource_templates() ->
+    barrel_mcp_registry:all(resource_template).
 
 %%====================================================================
 %% Prompt API
@@ -650,6 +695,26 @@ notify_resource_updated(Uri, Extra) when is_binary(Uri) ->
         end
     end, Subscribers),
     ok.
+
+%% @doc Emit `notifications/progress' to a session. `Total' may be
+%% omitted (defaults to `undefined' = absent in the wire payload).
+-spec notify_progress(binary(), term(), number()) -> ok.
+notify_progress(SessionId, Token, Progress) ->
+    notify_progress(SessionId, Token, Progress, undefined).
+
+-spec notify_progress(binary(), term(), number(), number() | undefined) -> ok.
+notify_progress(SessionId, Token, Progress, Total) ->
+    barrel_mcp_session:notify_progress(SessionId, Token, Progress, Total).
+
+%% @doc Push a `notifications/<kind>/list_changed' envelope to every
+%% currently-connected SSE session. Hosts call this when they mutate
+%% the catalogue out-of-band (the registry already calls it for
+%% `reg/4,5' and `unreg/2').
+-spec notify_list_changed(tool | resource | prompt) -> ok.
+notify_list_changed(Kind) when Kind =:= tool;
+                                Kind =:= resource;
+                                Kind =:= prompt ->
+    barrel_mcp_session:broadcast_list_changed(Kind).
 
 %%====================================================================
 %% MCP client API

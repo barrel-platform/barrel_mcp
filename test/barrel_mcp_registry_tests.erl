@@ -154,6 +154,8 @@ test_namespace_isolation() ->
     barrel_mcp_registry:unreg(resource, Name).
 
 test_function_validation() ->
-    %% Try to register a function that doesn't exist
-    {error, {function_not_exported, ?MODULE, nonexistent_function, 1}} =
+    %% Tool registration accepts arity 1 (legacy) or arity 2 (new
+    %% Ctx-aware shape); the error reports the highest arity it
+    %% checked.
+    {error, {function_not_exported, ?MODULE, nonexistent_function, 2}} =
         barrel_mcp_registry:reg(tool, <<"bad">>, ?MODULE, nonexistent_function, #{}).

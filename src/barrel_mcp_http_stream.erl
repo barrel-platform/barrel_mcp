@@ -316,16 +316,15 @@ handle_dispatch(Req0, State, SessionId, Request) ->
                               end,
             case barrel_mcp_protocol:handle(RequestWithAuth, ProtocolState) of
                 no_response ->
-                    %% Notification accepted: 202 with empty body.
                     Headers = add_session_header(
                                 cors_response_headers(Req0, State, #{}),
                                 SessionId),
                     Req = cowboy_req:reply(202, Headers, <<>>, Req0),
                     {ok, Req, State};
+                {async, AsyncPlan} ->
+                    handle_async_tool_call(Req0, State, SessionId,
+                                            Method, RequestWithAuth, AsyncPlan);
                 Result ->
-                    %% Capture protocol_version from a successful initialize
-                    %% so subsequent requests can fall back to the
-                    %% session-stored value when the header is missing.
                     State1 = maybe_capture_initialize_version(
                                 State, SessionId, Method, Result),
                     case wants_sse_response(Req0) of
@@ -344,6 +343,115 @@ handle_dispatch(Req0, State, SessionId, Request) ->
                     end
             end
     end.
+
+%% Drive an async tool call: build Ctx, spawn the worker, record the
+%% in-flight entry, wait for the result or cancellation.
+handle_async_tool_call(Req0, State, SessionId, _Method,
+                        RequestWithAuth, AsyncPlan) ->
+    RequestId = maps:get(request_id, AsyncPlan),
+    Spawn = maps:get(spawn, AsyncPlan),
+    Timeout = maps:get(timeout, AsyncPlan, 60000),
+    Params = maps:get(<<"params">>, RequestWithAuth, #{}),
+    ProgressToken = case Params of
+                        #{<<"_meta">> := #{<<"progressToken">> := T}} -> T;
+                        _ -> undefined
+                    end,
+    Self = self(),
+    Ctx = #{
+        session_id => SessionId,
+        request_id => RequestId,
+        progress_token => ProgressToken,
+        emit_progress => emit_progress_fun(SessionId, ProgressToken),
+        reply_to => Self
+    },
+    WorkerPid = Spawn(Ctx),
+    case SessionId of
+        undefined -> ok;
+        _ -> ok = barrel_mcp_session:record_in_flight(
+                    SessionId, RequestId, WorkerPid, Self)
+    end,
+    Outcome = wait_for_tool(RequestId, Timeout),
+    case SessionId of
+        undefined -> ok;
+        _ -> ok = barrel_mcp_session:clear_in_flight(SessionId, RequestId)
+    end,
+    deliver_tool_outcome(Req0, State, SessionId, RequestId, Outcome).
+
+emit_progress_fun(undefined, _Token) ->
+    fun(_, _, _) -> ok end;
+emit_progress_fun(_Sid, undefined) ->
+    fun(_, _, _) -> ok end;
+emit_progress_fun(SessionId, Token) ->
+    fun(Progress, Total, _Message) ->
+        barrel_mcp_session:notify_progress(SessionId, Token, Progress, Total)
+    end.
+
+wait_for_tool(RequestId, Timeout) ->
+    receive
+        {tool_result, RequestId, Result} -> {result, Result};
+        {tool_error, RequestId, Content} -> {tool_error, Content};
+        {tool_failed, RequestId, Reason} -> {failed, Reason};
+        {tool_validation_failed, RequestId, Errors} ->
+            {validation_failed, Errors};
+        {cancelled, RequestId} -> cancelled
+    after Timeout ->
+        timeout
+    end.
+
+deliver_tool_outcome(Req0, State, SessionId, _RequestId, cancelled) ->
+    %% Per the MCP cancellation guidance the receiver SHOULD NOT
+    %% send a JSON-RPC response for a cancelled request. We close
+    %% the HTTP request with a 200 + empty body so the connection
+    %% wraps cleanly without a JSON envelope.
+    Headers = add_session_header(
+                cors_response_headers(Req0, State, #{}), SessionId),
+    Req = cowboy_req:reply(200, Headers, <<>>, Req0),
+    {ok, Req, State};
+deliver_tool_outcome(Req0, State, SessionId, RequestId, {result, Result}) ->
+    Content = barrel_mcp_protocol:format_tool_result_external(Result),
+    send_tool_envelope(Req0, State, SessionId, RequestId,
+                       #{<<"content">> => Content});
+deliver_tool_outcome(Req0, State, SessionId, RequestId,
+                      {tool_error, Content}) ->
+    send_tool_envelope(Req0, State, SessionId, RequestId,
+                       #{<<"content">> => Content,
+                         <<"isError">> => true});
+deliver_tool_outcome(Req0, State, SessionId, RequestId,
+                      {validation_failed, Errors}) ->
+    Msg = iolist_to_binary(io_lib:format("Invalid tool input: ~p", [Errors])),
+    send_tool_envelope(Req0, State, SessionId, RequestId,
+                       #{<<"content">> =>
+                            [#{<<"type">> => <<"text">>, <<"text">> => Msg}],
+                         <<"isError">> => true});
+deliver_tool_outcome(Req0, State, SessionId, RequestId, {failed, Reason}) ->
+    send_jsonrpc_error_envelope(Req0, State, SessionId, RequestId,
+                                ?MCP_TOOL_ERROR,
+                                iolist_to_binary(io_lib:format("~p", [Reason])));
+deliver_tool_outcome(Req0, State, SessionId, RequestId, timeout) ->
+    send_jsonrpc_error_envelope(Req0, State, SessionId, RequestId,
+                                ?MCP_TOOL_ERROR, <<"Tool timed out">>).
+
+send_tool_envelope(Req0, State, SessionId, RequestId, Result) ->
+    Resp = #{<<"jsonrpc">> => <<"2.0">>,
+             <<"id">> => RequestId,
+             <<"result">> => Result},
+    Json = barrel_mcp_protocol:encode(Resp),
+    Headers = add_session_header(
+                cors_response_headers(Req0, State, #{
+                    <<"content-type">> => <<"application/json">>}),
+                SessionId),
+    Req = cowboy_req:reply(200, Headers, Json, Req0),
+    {ok, Req, State}.
+
+send_jsonrpc_error_envelope(Req0, State, SessionId, Id, Code, Message) ->
+    Resp = barrel_mcp_protocol:error_response(Id, Code, Message),
+    Json = barrel_mcp_protocol:encode(Resp),
+    Headers = add_session_header(
+                cors_response_headers(Req0, State, #{
+                    <<"content-type">> => <<"application/json">>}),
+                SessionId),
+    Req = cowboy_req:reply(200, Headers, Json, Req0),
+    {ok, Req, State}.
 
 reply_jsonrpc_error(Req0, State, SessionId, Status, Id, Code, Message) ->
     ErrorResponse = barrel_mcp_protocol:error_response(Id, Code, Message),

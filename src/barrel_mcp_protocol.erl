@@ -24,7 +24,8 @@
     encode_notification/2,
     encode_response/2,
     encode_error/3,
-    decode_envelope/1
+    decode_envelope/1,
+    format_tool_result_external/1
 ]).
 
 %%====================================================================
@@ -55,10 +56,21 @@ handle(Request) ->
 
 %% @doc Handle a JSON-RPC request with state.
 %%
+%% Returns one of:
+%% <ul>
+%%   <li>`map()' — a JSON-RPC response envelope ready to encode.</li>
+%%   <li>`no_response' — for inbound notifications.</li>
+%%   <li>`{async, AsyncPlan}' — for `tools/call'. The transport
+%%       spawns the worker via `(maps:get(spawn, AsyncPlan))(Ctx)'
+%%       and waits on its mailbox for a `tool_result' / `tool_error' /
+%%       `tool_failed' / `tool_validation_failed' / `cancelled'
+%%       message.</li>
+%% </ul>
+%%
 %% MCP forbids JSON-RPC batches (a top-level JSON array) — they are
 %% rejected here with `Invalid Request' so non-HTTP callers see the
 %% same error as the HTTP transport.
--spec handle(map() | list(), map()) -> map() | no_response.
+-spec handle(map() | list(), map()) -> map() | no_response | {async, map()}.
 handle(L, _State) when is_list(L) ->
     error_response(null, ?JSONRPC_INVALID_REQUEST,
                    <<"Batch requests are not supported">>);
@@ -106,20 +118,26 @@ notification_response() ->
 handle_request(<<"initialize">>, Params, Id, State) ->
     ServerName = application:get_env(barrel_mcp, server_name, <<"barrel">>),
     ServerVersion = application:get_env(barrel_mcp, server_version, <<"1.0.0">>),
+    NegotiatedVersion = negotiate_protocol_version(
+                          maps:get(<<"protocolVersion">>, Params, undefined)),
     %% Persist client capabilities (notably `sampling') so the server can
     %% later issue server-to-client requests via barrel_mcp_session.
+    %% Also persist the negotiated protocol_version on the session.
     _ = case maps:find(session_id, State) of
         {ok, SessionId} when is_binary(SessionId) ->
             ClientCaps = maps:get(<<"capabilities">>, Params, #{}),
-            barrel_mcp_session:set_client_capabilities(SessionId, ClientCaps);
+            _ = barrel_mcp_session:set_client_capabilities(SessionId, ClientCaps),
+            _ = barrel_mcp_session:set_protocol_version(SessionId, NegotiatedVersion),
+            ok;
         _ -> ok
     end,
     success_response(Id, #{
-        <<"protocolVersion">> => ?MCP_PROTOCOL_VERSION,
+        <<"protocolVersion">> => NegotiatedVersion,
         <<"capabilities">> => #{
-            <<"tools">> => #{},
-            <<"resources">> => #{<<"subscribe">> => true},
-            <<"prompts">> => #{},
+            <<"tools">> => #{<<"listChanged">> => true},
+            <<"resources">> => #{<<"subscribe">> => true,
+                                  <<"listChanged">> => true},
+            <<"prompts">> => #{<<"listChanged">> => true},
             <<"logging">> => #{}
         },
         <<"serverInfo">> => #{
@@ -145,15 +163,30 @@ handle_request(<<"tools/list">>, _Params, Id, _State) ->
 handle_request(<<"tools/call">>, Params, Id, _State) ->
     Name = maps:get(<<"name">>, Params, <<>>),
     Args = maps:get(<<"arguments">>, Params, #{}),
-    case barrel_mcp_registry:run(tool, Name, Args) of
-        {ok, Result} ->
-            Content = format_tool_result(Result),
-            success_response(Id, #{<<"content">> => Content});
-        {error, {not_found, _, _}} ->
-            error_response(Id, ?JSONRPC_METHOD_NOT_FOUND, <<"Tool not found">>);
-        {error, Reason} ->
-            error_response(Id, ?MCP_TOOL_ERROR, format_error(Reason))
-    end;
+    %% Tool dispatch is asynchronous. The transport drives the
+    %% lifecycle: it builds `Ctx', invokes the spawn closure, records
+    %% the in-flight entry, and waits on its mailbox for one of
+    %% `{tool_result, _, _}', `{tool_error, _, _}',
+    %% `{tool_failed, _, _}', `{tool_validation_failed, _, _}', or
+    %% `{cancelled, _}' (sent by `barrel_mcp_session:cancel_in_flight/2').
+    Plan = #{
+        request_id => Id,
+        spawn => fun(Ctx) ->
+            case barrel_mcp_registry:run_tool(Name, Args, Ctx) of
+                {ok, Pid} -> Pid;
+                {error, _} = Err ->
+                    %% Surface as if the worker reported it: the
+                    %% transport then maps the error.
+                    ReplyTo = maps:get(reply_to, Ctx),
+                    RequestId = maps:get(request_id, Ctx),
+                    ReplyTo ! {tool_failed, RequestId, Err},
+                    %% Return a transient pid so the in-flight
+                    %% record has something monitorable.
+                    spawn(fun() -> ok end)
+            end
+        end
+    },
+    {async, Plan};
 
 %% Resources
 handle_request(<<"resources/list">>, _Params, Id, _State) ->
@@ -185,8 +218,17 @@ handle_request(<<"resources/read">>, Params, Id, _State) ->
     end;
 
 handle_request(<<"resources/templates/list">>, _Params, Id, _State) ->
-    %% Return empty list for now - templates can be added later
-    success_response(Id, #{<<"resourceTemplates">> => []});
+    Templates = lists:map(fun({_Name, Handler}) ->
+        Base = #{
+            <<"uriTemplate">> => maps:get(uri_template, Handler, <<>>),
+            <<"name">> => maps:get(name, Handler, <<>>),
+            <<"description">> => maps:get(description, Handler, <<>>),
+            <<"mimeType">> => maps:get(mime_type, Handler, <<"text/plain">>)
+        },
+        %% Drop empty fields so the wire envelope stays compact.
+        maps:filter(fun(_K, V) -> V =/= <<>> end, Base)
+    end, barrel_mcp_registry:all(resource_template)),
+    success_response(Id, #{<<"resourceTemplates">> => Templates});
 
 handle_request(<<"resources/subscribe">>, Params, Id, State) ->
     Uri = maps:get(<<"uri">>, Params, <<>>),
@@ -262,17 +304,31 @@ handle_notification(<<"notifications/initialized">>, _Params, _State) ->
 handle_notification(<<"initialized">>, _Params, _State) ->
     ok;
 
-handle_notification(<<"notifications/cancelled">>, _Params, _State) ->
-    %% Request cancellation - not implemented yet
-    ok;
+handle_notification(<<"notifications/cancelled">>, Params, State) ->
+    case maps:find(session_id, State) of
+        {ok, SessionId} when is_binary(SessionId) ->
+            case maps:find(<<"requestId">>, Params) of
+                {ok, RequestId} ->
+                    barrel_mcp_session:cancel_in_flight(SessionId, RequestId);
+                error -> ok
+            end;
+        _ -> ok
+    end;
 
 handle_notification(<<"notifications/progress">>, _Params, _State) ->
-    %% Progress updates - not implemented yet
+    %% The server doesn't currently emit anything special on inbound
+    %% client-side progress notifications (used for client→server
+    %% requests, which we don't have). Acknowledge silently.
     ok;
 
-handle_notification(<<"notifications/roots/list_changed">>, _Params, _State) ->
-    %% Roots changed - not implemented yet
-    ok;
+handle_notification(<<"notifications/roots/list_changed">>, Params, State) ->
+    case application:get_env(barrel_mcp, roots_changed_handler) of
+        {ok, {Mod, Fun}} ->
+            try Mod:Fun(Params, State)
+            catch _:_ -> ok
+            end;
+        _ -> ok
+    end;
 
 handle_notification(_, _Params, _State) ->
     ok.
@@ -287,6 +343,13 @@ success_response(Id, Result) ->
         <<"id">> => Id,
         <<"result">> => Result
     }.
+
+%% @doc Format a tool handler's plain return value into the MCP
+%% content-block list shape. Public so transports driving async
+%% tool calls (HTTP / stdio) can produce identical envelopes.
+-spec format_tool_result_external(term()) -> [map()].
+format_tool_result_external(Result) ->
+    format_tool_result(Result).
 
 format_tool_result(Result) when is_binary(Result) ->
     [#{<<"type">> => <<"text">>, <<"text">> => Result}];
@@ -315,6 +378,17 @@ format_resource_result(Uri, Result) ->
 
 format_error({Class, Reason, _Stack}) ->
     iolist_to_binary(io_lib:format("~p:~p", [Class, Reason])).
+
+%% Pick the protocol version to advertise in the `initialize'
+%% response. If the client's requested version is one we speak, echo
+%% it; otherwise return our preferred version and let the client
+%% decide.
+negotiate_protocol_version(undefined) -> ?MCP_PROTOCOL_VERSION;
+negotiate_protocol_version(Requested) when is_binary(Requested) ->
+    case lists:member(Requested, ?MCP_SUPPORTED_VERSIONS) of
+        true -> Requested;
+        false -> ?MCP_PROTOCOL_VERSION
+    end.
 
 %%====================================================================
 %% JSON-RPC envelope helpers
