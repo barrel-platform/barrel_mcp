@@ -556,7 +556,7 @@ build_handler(resource, Module, Function, Opts) ->
         description => maps:get(description, Opts, <<>>),
         mime_type => maps:get(mime_type, Opts, <<"text/plain">>)
     },
-    add_metadata(Base, Opts);
+    add_metadata(maps:merge(Base, opt_field(annotations, Opts)), Opts);
 build_handler(prompt, Module, Function, Opts) ->
     Base = #{
         module => Module,
@@ -565,7 +565,7 @@ build_handler(prompt, Module, Function, Opts) ->
         description => maps:get(description, Opts, <<>>),
         arguments => maps:get(arguments, Opts, [])
     },
-    add_metadata(Base, Opts);
+    add_metadata(maps:merge(Base, opt_field(annotations, Opts)), Opts);
 build_handler(resource_template, Module, Function, Opts) ->
     Base = #{
         module => Module,
@@ -575,7 +575,7 @@ build_handler(resource_template, Module, Function, Opts) ->
         description => maps:get(description, Opts, <<>>),
         mime_type => maps:get(mime_type, Opts, <<"text/plain">>)
     },
-    add_metadata(Base, Opts);
+    add_metadata(maps:merge(Base, opt_field(annotations, Opts)), Opts);
 build_handler(completion, Module, Function, _Opts) ->
     %% Completion handlers are arity 2: (PartialValue, Ctx) ->
     %%   {ok, [Suggestion]} | {ok, [Suggestion], #{has_more => true}}.

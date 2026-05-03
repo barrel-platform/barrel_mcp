@@ -215,7 +215,8 @@ handle_request(<<"resources/list">>, _Params, Id, _State) ->
         },
         with_optional_fields(Base, Handler, [
             {<<"title">>, title},
-            {<<"icons">>, icons}
+            {<<"icons">>, icons},
+            {<<"annotations">>, annotations}
         ])
     end, barrel_mcp_registry:all(resource)),
     success_response(Id, #{<<"resources">> => Resources});
@@ -248,7 +249,8 @@ handle_request(<<"resources/templates/list">>, _Params, Id, _State) ->
         Compact = maps:filter(fun(_K, V) -> V =/= <<>> end, Base),
         with_optional_fields(Compact, Handler, [
             {<<"title">>, title},
-            {<<"icons">>, icons}
+            {<<"icons">>, icons},
+            {<<"annotations">>, annotations}
         ])
     end, barrel_mcp_registry:all(resource_template)),
     success_response(Id, #{<<"resourceTemplates">> => Templates});
@@ -291,7 +293,8 @@ handle_request(<<"prompts/list">>, _Params, Id, _State) ->
         },
         with_optional_fields(Base, Handler, [
             {<<"title">>, title},
-            {<<"icons">>, icons}
+            {<<"icons">>, icons},
+            {<<"annotations">>, annotations}
         ])
     end, barrel_mcp_registry:all(prompt)),
     success_response(Id, #{<<"prompts">> => Prompts});
