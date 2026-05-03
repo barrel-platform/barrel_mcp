@@ -540,16 +540,40 @@ format_tool_result(Result) when is_list(Result) ->
 format_tool_result(Result) ->
     [#{<<"type">> => <<"text">>, <<"text">> => io_lib:format("~p", [Result])}].
 
+format_resource_result(Uri, Result) when is_list(Result) ->
+    [add_resource_uri(Uri, B) || B <- Result];
 format_resource_result(Uri, Result) when is_binary(Result) ->
     [#{<<"uri">> => Uri, <<"text">> => Result}];
-format_resource_result(Uri, #{text := Text}) ->
-    [#{<<"uri">> => Uri, <<"text">> => Text}];
-format_resource_result(Uri, #{blob := Blob, mimeType := MimeType}) ->
-    [#{<<"uri">> => Uri, <<"blob">> => base64:encode(Blob), <<"mimeType">> => MimeType}];
+format_resource_result(Uri, #{text := Text} = M) ->
+    Block = #{<<"uri">> => Uri, <<"text">> => Text},
+    [decorate_block(Block, M)];
+format_resource_result(Uri, #{blob := Blob, mimeType := MimeType} = M) ->
+    Block = #{<<"uri">> => Uri,
+              <<"blob">> => base64:encode(Blob),
+              <<"mimeType">> => MimeType},
+    [decorate_block(Block, M)];
 format_resource_result(Uri, Result) when is_map(Result) ->
     [#{<<"uri">> => Uri, <<"text">> => iolist_to_binary(json:encode(Result))}];
 format_resource_result(Uri, Result) ->
     [#{<<"uri">> => Uri, <<"text">> => io_lib:format("~p", [Result])}].
+
+%% Pass `annotations' / `mimeType' through onto an already-built block.
+decorate_block(Block, M) ->
+    Block1 = case maps:find(mimeType, M) of
+                 {ok, Mime} -> Block#{<<"mimeType">> => Mime};
+                 error -> Block
+             end,
+    case maps:find(annotations, M) of
+        {ok, Ann} -> Block1#{<<"annotations">> => Ann};
+        error -> Block1
+    end.
+
+%% Inject `uri' into a pre-built content block (binary-keyed map).
+add_resource_uri(Uri, Block) when is_map(Block) ->
+    case maps:is_key(<<"uri">>, Block) of
+        true -> Block;
+        false -> Block#{<<"uri">> => Uri}
+    end.
 
 format_error({Class, Reason, _Stack}) ->
     iolist_to_binary(io_lib:format("~p:~p", [Class, Reason])).
