@@ -108,6 +108,9 @@
     list_sessions_with_sampling/0,
     elicit_create/3,
     list_sessions_with_elicitation/0,
+    roots_list/1,
+    roots_list/2,
+    list_sessions_with_roots/0,
     notify_resource_updated/1,
     notify_resource_updated/2,
     notify_progress/3,
@@ -736,6 +739,30 @@ elicit_create(SessionId, Params, Opts) ->
 -spec list_sessions_with_elicitation() -> [binary()].
 list_sessions_with_elicitation() ->
     barrel_mcp_session:list_elicitation_capable().
+
+%% @doc Send `roots/list' to the client behind a session to enumerate
+%% the host's available roots (typically filesystem or workspace roots
+%% the host has authorised the server to operate on). Requires the
+%% client to have declared roots capability in its `initialize' request
+%% and an active SSE stream. Blocks until the client responds or
+%% `timeout_ms' (default 30s) elapses.
+-spec roots_list(binary()) ->
+    {ok, [map()]}
+  | {error, timeout | not_supported | no_sse | not_found | term()}.
+roots_list(SessionId) ->
+    roots_list(SessionId, #{}).
+
+-spec roots_list(binary(), map()) ->
+    {ok, [map()]}
+  | {error, timeout | not_supported | no_sse | not_found | term()}.
+roots_list(SessionId, Opts) ->
+    barrel_mcp_session:roots_list(SessionId, Opts).
+
+%% @doc Return the ids of currently connected sessions whose client
+%% declared roots capability.
+-spec list_sessions_with_roots() -> [binary()].
+list_sessions_with_roots() ->
+    barrel_mcp_session:list_roots_capable().
 
 %% @doc Notify all subscribers of a resource that it has changed.
 %% The notification body is a JSON-RPC notification with no params; the

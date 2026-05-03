@@ -78,8 +78,8 @@ Erlang MCP library. See `CHANGELOG.md` for release-by-release detail.
   `barrel_mcp_session`'s gen_server.
 - `Mcp-Session-Id` lifecycle with TTL-based cleanup.
 - Server-to-client sampling (`sampling/createMessage`),
-  elicitation (`elicitation/create`), and resource update
-  notifications.
+  elicitation (`elicitation/create`), roots query (`roots/list`),
+  and resource update notifications.
 
 ### Authentication
 
@@ -101,6 +101,7 @@ Erlang MCP library. See `CHANGELOG.md` for release-by-release detail.
 | `barrel_mcp:notify_list_changed/1` | `notifications/tools/list_changed`, `.../resources/list_changed`, or `.../prompts/list_changed` to every active SSE session. Auto-emitted on `reg_*`/`unreg_*`. |
 | `barrel_mcp:sampling_create_message/3` | Server→client `sampling/createMessage` (requires the client to declare `sampling` capability). |
 | `barrel_mcp:elicit_create/3` | Server→client `elicitation/create` to ask the host for structured user input (requires the client to declare `elicitation` capability). |
+| `barrel_mcp:roots_list/1,2` | Server→client `roots/list` to enumerate the host's available roots (requires the client to declare `roots` capability). |
 | `barrel_mcp_tasks:create/3`, `finish/3`, `fail/3`, `cancel/2` | Long-running operation lifecycle. |
 
 ## Client (`barrel_mcp_client`)

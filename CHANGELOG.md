@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Server-to-client `roots/list`
+
+- New `barrel_mcp:roots_list/1,2` façade. Sends `roots/list` to the connected client behind a session id and returns the host's roots. Requires the client to have declared `roots` capability in its `initialize' request and an active SSE stream.
+- New helpers `barrel_mcp:list_sessions_with_roots/0`, `barrel_mcp_session:has_roots/1`, `barrel_mcp_session:list_roots_capable/0`.
+
 ### Server-to-client `elicitation/create`
 
 - New `barrel_mcp:elicit_create/3` façade. Sends `elicitation/create` to the client behind a session id and blocks until the client responds (or `timeout_ms` elapses, default 30s). Requires the client to have declared `elicitation` capability in its `initialize' request and an active SSE stream. Mirrors the existing `sampling_create_message/3` flow.

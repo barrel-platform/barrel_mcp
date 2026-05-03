@@ -233,6 +233,69 @@ test_elicit_timeout() ->
     exit(Pid, kill).
 
 %% ============================================================================
+%% roots_list round-trip
+%% ============================================================================
+
+roots_list_test_() ->
+    {setup, fun setup/0, fun teardown/1, fun(_) ->
+        [
+            {"declines without roots capability",
+             fun test_roots_not_supported/0},
+            {"happy path: response routed to caller",
+             fun test_roots_round_trip/0},
+            {"timeout when no response arrives",
+             fun test_roots_timeout/0}
+        ]
+    end}.
+
+test_roots_not_supported() ->
+    {ok, S1} = barrel_mcp_session:create(#{}),
+    ?assertEqual({error, not_supported},
+                 barrel_mcp:roots_list(S1)).
+
+test_roots_round_trip() ->
+    {ok, S1} = barrel_mcp_session:create(#{}),
+    ok = barrel_mcp_session:set_client_capabilities(
+        S1, #{<<"roots">> => #{}}),
+    Self = self(),
+    Pid = spawn(fun() -> sampling_responder(Self) end),
+    ok = barrel_mcp_session:set_sse_pid(S1, Pid),
+    spawn(fun() ->
+        Self ! {result,
+                barrel_mcp:roots_list(S1, #{timeout_ms => 2000})}
+    end),
+    Request = receive
+        {got_message, Msg} -> Msg
+    after 1000 -> ?assert(false), undefined
+    end,
+    Id = maps:get(<<"id">>, Request),
+    ?assertEqual(<<"roots/list">>, maps:get(<<"method">>, Request)),
+    ok = barrel_mcp_session:deliver_response(Id, #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => Id,
+        <<"result">> => #{<<"roots">> =>
+            [#{<<"uri">> => <<"file:///workspace">>,
+               <<"name">> => <<"Workspace">>}]}
+    }),
+    receive
+        {result, {ok, Roots}} ->
+            ?assertMatch([#{<<"uri">> := <<"file:///workspace">>}], Roots)
+    after 2000 ->
+        ?assert(false)
+    end,
+    exit(Pid, kill).
+
+test_roots_timeout() ->
+    {ok, S1} = barrel_mcp_session:create(#{}),
+    ok = barrel_mcp_session:set_client_capabilities(
+        S1, #{<<"roots">> => #{}}),
+    Pid = spawn(fun() -> idle_loop() end),
+    ok = barrel_mcp_session:set_sse_pid(S1, Pid),
+    ?assertEqual({error, timeout},
+                 barrel_mcp:roots_list(S1, #{timeout_ms => 100})),
+    exit(Pid, kill).
+
+%% ============================================================================
 %% Helpers
 %% ============================================================================
 
