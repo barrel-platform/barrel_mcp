@@ -38,7 +38,8 @@
 -define(MCP_PROMPT_ERROR, -32002).
 
 %% Handler types
--type handler_type() :: tool | resource | prompt | resource_template.
+-type handler_type() :: tool | resource | prompt | resource_template
+                       | completion.
 
 %% Tool definition
 -type tool_def() :: #{

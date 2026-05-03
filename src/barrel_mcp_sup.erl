@@ -49,6 +49,15 @@ init([]) ->
         modules => [barrel_mcp_session]
     },
 
+    Tasks = #{
+        id => barrel_mcp_tasks,
+        start => {barrel_mcp_tasks, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [barrel_mcp_tasks]
+    },
+
     ClientSup = #{
         id => barrel_mcp_client_sup,
         start => {barrel_mcp_client_sup, start_link, []},
@@ -67,4 +76,4 @@ init([]) ->
         modules => [barrel_mcp_clients]
     },
 
-    {ok, {SupFlags, [Registry, Session, ClientSup, Clients]}}.
+    {ok, {SupFlags, [Registry, Session, Tasks, ClientSup, Clients]}}.

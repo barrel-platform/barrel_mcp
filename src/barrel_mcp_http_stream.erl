@@ -108,7 +108,8 @@ start(Opts) ->
                 auth_config => AuthConfig,
                 session_enabled => SessionEnabled,
                 allowed_origins => AllowedOrigins,
-                allow_missing_origin => AllowMissing
+                allow_missing_origin => AllowMissing,
+                sse_buffer_size => maps:get(sse_buffer_size, Opts, 256)
             },
 
             Routes = [
@@ -136,9 +137,12 @@ start(Opts) ->
                         idle_timeout => infinity
                     });
                 _ ->
+                    %% SO_REUSEADDR avoids EADDRINUSE on rapid
+                    %% start/stop cycles (e.g. CT suites).
                     cowboy:start_clear(?STREAM_LISTENER, [
                         {port, Port},
-                        {ip, Ip}
+                        {ip, Ip},
+                        {reuseaddr, true}
                     ], #{
                         env => #{dispatch => Dispatch},
                         idle_timeout => infinity
@@ -184,15 +188,14 @@ info(session_terminated, Req, State) ->
     {stop, Req, State};
 
 info({sse_event, EventId, Data}, Req, State) ->
-    %% Send SSE event
     send_sse_event(Req, EventId, Data),
+    record_event(State, EventId, Data),
     {ok, Req, State};
 
 info({sse_send_message, Message}, Req, State) ->
-    %% Server-initiated message (e.g. sampling/createMessage request or a
-    %% notifications/resources/updated notification). Format as an SSE
-    %% event with a fresh id.
-    send_sse_event(Req, generate_event_id(), Message),
+    EventId = generate_event_id(),
+    send_sse_event(Req, EventId, Message),
+    record_event(State, EventId, Message),
     {ok, Req, State};
 
 info(_Info, Req, State) ->
@@ -346,36 +349,95 @@ handle_dispatch(Req0, State, SessionId, Request) ->
 
 %% Drive an async tool call: build Ctx, spawn the worker, record the
 %% in-flight entry, wait for the result or cancellation.
+%%
+%% When the tool is registered with `long_running => true', return
+%% immediately with a `taskId' and let the worker continue in the
+%% background; clients track progress via `tasks/get'.
 handle_async_tool_call(Req0, State, SessionId, _Method,
                         RequestWithAuth, AsyncPlan) ->
     RequestId = maps:get(request_id, AsyncPlan),
     Spawn = maps:get(spawn, AsyncPlan),
     Timeout = maps:get(timeout, AsyncPlan, 60000),
     Params = maps:get(<<"params">>, RequestWithAuth, #{}),
+    ToolName = maps:get(<<"name">>, Params, <<>>),
+    LongRunning = is_long_running_tool(ToolName),
     ProgressToken = case Params of
                         #{<<"_meta">> := #{<<"progressToken">> := T}} -> T;
                         _ -> undefined
                     end,
     Self = self(),
+    case LongRunning of
+        true ->
+            handle_long_running_call(Req0, State, SessionId, RequestId,
+                                      ToolName, ProgressToken, Spawn);
+        false ->
+            Ctx = #{
+                session_id => SessionId,
+                request_id => RequestId,
+                progress_token => ProgressToken,
+                emit_progress => emit_progress_fun(SessionId, ProgressToken),
+                reply_to => Self
+            },
+            WorkerPid = Spawn(Ctx),
+            case SessionId of
+                undefined -> ok;
+                _ -> ok = barrel_mcp_session:record_in_flight(
+                            SessionId, RequestId, WorkerPid, Self)
+            end,
+            Outcome = wait_for_tool(RequestId, Timeout),
+            case SessionId of
+                undefined -> ok;
+                _ -> ok = barrel_mcp_session:clear_in_flight(SessionId, RequestId)
+            end,
+            deliver_tool_outcome(Req0, State, SessionId, RequestId, Outcome)
+    end.
+
+is_long_running_tool(Name) ->
+    case barrel_mcp_registry:find(tool, Name) of
+        {ok, Handler} -> maps:get(long_running, Handler, false);
+        error -> false
+    end.
+
+%% Long-running tool: create a task, spawn the worker bound to a
+%% private collector that updates the task store, return the taskId
+%% to the caller right away.
+handle_long_running_call(Req0, State, SessionId, RequestId, ToolName,
+                          ProgressToken, Spawn) ->
+    {ok, TaskId} = barrel_mcp_tasks:create(SessionId, ToolName, #{}),
+    Collector = spawn_task_collector(SessionId, TaskId),
     Ctx = #{
         session_id => SessionId,
         request_id => RequestId,
         progress_token => ProgressToken,
         emit_progress => emit_progress_fun(SessionId, ProgressToken),
-        reply_to => Self
+        reply_to => Collector
     },
-    WorkerPid = Spawn(Ctx),
-    case SessionId of
-        undefined -> ok;
-        _ -> ok = barrel_mcp_session:record_in_flight(
-                    SessionId, RequestId, WorkerPid, Self)
-    end,
-    Outcome = wait_for_tool(RequestId, Timeout),
-    case SessionId of
-        undefined -> ok;
-        _ -> ok = barrel_mcp_session:clear_in_flight(SessionId, RequestId)
-    end,
-    deliver_tool_outcome(Req0, State, SessionId, RequestId, Outcome).
+    _Worker = Spawn(Ctx),
+    Result = #{<<"taskId">> => TaskId,
+               <<"status">> => <<"running">>},
+    send_tool_envelope(Req0, State, SessionId, RequestId, Result).
+
+%% Tiny worker that funnels tool outcomes into the task registry.
+spawn_task_collector(SessionId, TaskId) ->
+    spawn(fun() -> task_collector_loop(SessionId, TaskId) end).
+
+task_collector_loop(SessionId, TaskId) ->
+    receive
+        {tool_result, _ReqId, Result} ->
+            barrel_mcp_tasks:finish(SessionId, TaskId, Result);
+        {tool_structured, _ReqId, Data, _Content} ->
+            barrel_mcp_tasks:finish(SessionId, TaskId, Data);
+        {tool_error, _ReqId, Content} ->
+            barrel_mcp_tasks:fail(SessionId, TaskId, {tool_error, Content});
+        {tool_failed, _ReqId, Reason} ->
+            barrel_mcp_tasks:fail(SessionId, TaskId, Reason);
+        {tool_validation_failed, _ReqId, Errors} ->
+            barrel_mcp_tasks:fail(SessionId, TaskId, {validation_failed, Errors});
+        {cancelled, _ReqId} ->
+            barrel_mcp_tasks:cancel(SessionId, TaskId);
+        _Other ->
+            task_collector_loop(SessionId, TaskId)
+    end.
 
 emit_progress_fun(undefined, _Token) ->
     fun(_, _, _) -> ok end;
@@ -389,6 +451,8 @@ emit_progress_fun(SessionId, Token) ->
 wait_for_tool(RequestId, Timeout) ->
     receive
         {tool_result, RequestId, Result} -> {result, Result};
+        {tool_structured, RequestId, Data, Content} ->
+            {structured, Data, Content};
         {tool_error, RequestId, Content} -> {tool_error, Content};
         {tool_failed, RequestId, Reason} -> {failed, Reason};
         {tool_validation_failed, RequestId, Errors} ->
@@ -411,6 +475,11 @@ deliver_tool_outcome(Req0, State, SessionId, RequestId, {result, Result}) ->
     Content = barrel_mcp_protocol:format_tool_result_external(Result),
     send_tool_envelope(Req0, State, SessionId, RequestId,
                        #{<<"content">> => Content});
+deliver_tool_outcome(Req0, State, SessionId, RequestId,
+                      {structured, Data, Content}) ->
+    send_tool_envelope(Req0, State, SessionId, RequestId,
+                       #{<<"content">> => Content,
+                         <<"structuredContent">> => Data});
 deliver_tool_outcome(Req0, State, SessionId, RequestId,
                       {tool_error, Content}) ->
     send_tool_envelope(Req0, State, SessionId, RequestId,
@@ -475,6 +544,8 @@ lookup_session_for_request(Req, State, true, Method) ->
     case {Method, Header} of
         {<<"initialize">>, undefined} ->
             {ok, SessionId} = barrel_mcp_session:create(#{}),
+            BufMax = maps:get(sse_buffer_size, State, 256),
+            _ = barrel_mcp_session:set_sse_buffer_max(SessionId, BufMax),
             {ok, SessionId, State#{session_id => SessionId}};
         {<<"initialize">>, SessionId} ->
             case barrel_mcp_session:get(SessionId) of
@@ -559,6 +630,8 @@ handle_get_sse(Req0, State) ->
                                     <<"connection">> => <<"keep-alive">>
                                 }), SessionId),
                             Req = cowboy_req:stream_reply(200, ResponseHeaders, Req0),
+                            ok = replay_sse_events(Req, SessionId,
+                                cowboy_req:header(<<"last-event-id">>, Req0)),
                             _ = barrel_mcp_session:set_sse_pid(SessionId, self()),
                             {cowboy_loop, Req, State#{sse_session => SessionId}};
                         {error, not_found} ->
@@ -631,6 +704,39 @@ send_sse_event(Req, EventId, Data) ->
 
 generate_event_id() ->
     integer_to_binary(erlang:system_time(microsecond)).
+
+%% Buffer the SSE event on the owning session so a later GET with
+%% `Last-Event-Id' can replay it.
+record_event(State, EventId, Payload) ->
+    case maps:get(sse_session, State, undefined) of
+        undefined -> ok;
+        SessionId ->
+            _ = barrel_mcp_session:record_sse_event(SessionId, EventId, Payload),
+            ok
+    end.
+
+%% Replay SSE events newer than `LastId' on a freshly opened GET
+%% stream. When the buffered window has rolled past `LastId', emit a
+%% synthetic `notifications/replay_truncated' event so the client
+%% knows to resync.
+replay_sse_events(_Req, _SessionId, undefined) ->
+    ok;
+replay_sse_events(Req, SessionId, LastId) ->
+    case barrel_mcp_session:events_since(SessionId, LastId) of
+        {ok, Events} ->
+            lists:foreach(fun({EventId, Payload}) ->
+                send_sse_event(Req, EventId, Payload)
+            end, Events),
+            ok;
+        truncated ->
+            send_sse_event(Req, generate_event_id(), #{
+                <<"jsonrpc">> => <<"2.0">>,
+                <<"method">> => <<"notifications/replay_truncated">>,
+                <<"params">> => #{}
+            }),
+            ok;
+        {error, not_found} -> ok
+    end.
 
 %%====================================================================
 %% Session Helpers

@@ -2,7 +2,7 @@
     {description, "MCP Protocol Library for Erlang"},
     {vsn, "1.1.1"},
     {registered, [barrel_mcp_registry, barrel_mcp_sup, barrel_mcp_session,
-                  barrel_mcp_client_sup]},
+                  barrel_mcp_tasks, barrel_mcp_client_sup]},
     {mod, {barrel_mcp_app, []}},
     {applications, [kernel, stdlib, crypto, cowboy, hackney]},
     {env, [
