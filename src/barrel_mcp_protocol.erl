@@ -337,7 +337,13 @@ handle_request(<<"tasks/cancel">>, Params, Id, State) ->
     SessionId = maps:get(session_id, State, undefined),
     TaskId = maps:get(<<"taskId">>, Params, <<>>),
     case barrel_mcp_tasks:cancel(SessionId, TaskId) of
-        ok -> success_response(Id, #{});
+        ok ->
+            %% Spec / reference SDK expect the cancelled Task back,
+            %% not an empty object.
+            case barrel_mcp_tasks:get(SessionId, TaskId) of
+                {ok, Task} -> success_response(Id, Task);
+                {error, not_found} -> success_response(Id, #{})
+            end;
         {error, not_found} ->
             error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
     end;

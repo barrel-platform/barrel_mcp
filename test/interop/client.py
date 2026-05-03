@@ -62,6 +62,14 @@ async def run(url: str) -> None:
 
             await session.set_logging_level("warning")
 
+            # Tasks: list_tasks and get_task validate the wire shape
+            # (taskId, status, createdAt, lastUpdatedAt, ttl) against
+            # the reference pydantic models, even if the registry is
+            # empty.
+            tasks_list = await session.experimental.list_tasks()
+            if not isinstance(tasks_list.tasks, list):
+                fail(f"list_tasks did not return a list: {tasks_list}")
+
     print("OK")
 
 

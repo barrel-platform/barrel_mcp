@@ -470,7 +470,7 @@ fetch_task_result(Pid, TaskId) ->
 ```
 
 Status values on the wire are `working`, `completed`, `failed`,
-and `cancelled`; `createdAt` and `updatedAt` are RFC 3339 strings.
+and `cancelled`; `createdAt` and `lastUpdatedAt` are RFC 3339 strings.
 
 When you registered a `progress_token` on the originating call,
 the same task usually emits `notifications/progress` updates that
