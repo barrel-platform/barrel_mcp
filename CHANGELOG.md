@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Interop coverage: resources/subscribe + notifications/resources/updated
+
+- Direction A of the Python interop suite now exercises the full subscribe round-trip: subscribe to a URI, trigger a server-side `notify_resource_updated/1`, wait for the inbound `notifications/resources/updated` to arrive on the client SSE stream, unsubscribe. Verifies that `barrel_mcp_session:subscribe_resource/2`, `notify_resource_updated/1`, and the SSE delivery path all interoperate correctly with the reference implementation's notification handling.
+
 ### Tasks Task-shape wire alignment
 
 - Renamed the wire field `updatedAt` → `lastUpdatedAt` on every Task envelope (`tasks/get`, `tasks/list`, `notifications/tasks/changed`). The reference Python SDK models the field as `lastUpdatedAt`, and accepts no other name.
