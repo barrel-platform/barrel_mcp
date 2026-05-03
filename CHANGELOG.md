@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Cancellation race fix in Streamable HTTP
+
+- `wait_for_tool/2` now does a 50ms lookahead after every tool outcome to absorb a pending `{cancelled, _}` message that races with the worker's response. A cooperative arity-2 handler that returns `{tool_error, ...}` on cancel could deliver its outcome to the waiter's mailbox **before** the session-emitted `{cancelled, _}`, depending on scheduler — which made the HTTP path emit a JSON-RPC `isError: true` envelope instead of the spec-mandated 200 + empty body. With the lookahead the cancel always wins.
+
 ### OAuth Client Credentials grant (MCP `ext-auth` extension)
 
 - `barrel_mcp_client_auth_oauth` now supports the OAuth 2.1 `client_credentials` grant for unattended agent hosts. Pass `auth => {oauth_client_credentials, Config}` on the connect spec; required keys are `token_endpoint` and `client_id`, plus either `client_secret` (HTTP Basic per RFC 6749) or `client_assertion` (`private_key_jwt`, RFC 7523). Optional `scopes`, `resource`.
