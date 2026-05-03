@@ -109,106 +109,66 @@ test_list_tools_empty() ->
     Tools = maps:get(<<"tools">>, Result),
     ?assertEqual([], Tools).
 
-test_call_tool_text() ->
-    ok = barrel_mcp_registry:reg(tool, <<"echo">>, ?MODULE, echo_tool, #{}),
-
+%% Drive an async tools/call and return either the formatted content
+%% blocks (for a result), or the outcome tuple (for failures).
+drive_call(Name, Args) ->
     Request = #{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => 1,
         <<"method">> => <<"tools/call">>,
-        <<"params">> => #{
-            <<"name">> => <<"echo">>,
-            <<"arguments">> => #{<<"input">> => <<"hello">>}
-        }
+        <<"params">> => #{<<"name">> => Name, <<"arguments">> => Args}
     },
-    Response = barrel_mcp_protocol:handle(Request),
-    Result = maps:get(<<"result">>, Response),
-    Content = maps:get(<<"content">>, Result),
+    {async, Plan} = barrel_mcp_protocol:handle(Request),
+    Self = self(),
+    Ctx = #{request_id => 1, reply_to => Self,
+            session_id => undefined,
+            progress_token => undefined,
+            emit_progress => fun(_, _, _) -> ok end},
+    _Pid = (maps:get(spawn, Plan))(Ctx),
+    receive
+        {tool_result, 1, Result} ->
+            {result, barrel_mcp_protocol:format_tool_result_external(Result)};
+        {tool_failed, 1, Reason} -> {failed, Reason};
+        {tool_error, 1, Content} -> {tool_error, Content};
+        {tool_validation_failed, 1, Errors} -> {validation_failed, Errors}
+    after 2000 ->
+        timeout
+    end.
 
+test_call_tool_text() ->
+    ok = barrel_mcp_registry:reg(tool, <<"echo">>, ?MODULE, echo_tool, #{}),
+    {result, Content} = drive_call(<<"echo">>, #{<<"input">> => <<"hello">>}),
     ?assertEqual(1, length(Content)),
     [Block] = Content,
     ?assertEqual(<<"text">>, maps:get(<<"type">>, Block)),
     ?assertEqual(<<"Echo: hello">>, maps:get(<<"text">>, Block)),
-
     barrel_mcp_registry:unreg(tool, <<"echo">>).
 
 test_call_tool_map() ->
     ok = barrel_mcp_registry:reg(tool, <<"map_tool">>, ?MODULE, map_result_tool, #{}),
-
-    Request = #{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => 1,
-        <<"method">> => <<"tools/call">>,
-        <<"params">> => #{
-            <<"name">> => <<"map_tool">>,
-            <<"arguments">> => #{}
-        }
-    },
-    Response = barrel_mcp_protocol:handle(Request),
-    Result = maps:get(<<"result">>, Response),
-    Content = maps:get(<<"content">>, Result),
-
+    {result, Content} = drive_call(<<"map_tool">>, #{}),
     ?assertEqual(1, length(Content)),
     [Block] = Content,
     ?assertEqual(<<"text">>, maps:get(<<"type">>, Block)),
-    %% Map should be JSON encoded
-    Text = maps:get(<<"text">>, Block),
-    ?assert(is_binary(Text)),
-
+    ?assert(is_binary(maps:get(<<"text">>, Block))),
     barrel_mcp_registry:unreg(tool, <<"map_tool">>).
 
 test_call_tool_list() ->
     ok = barrel_mcp_registry:reg(tool, <<"list_tool">>, ?MODULE, list_result_tool, #{}),
-
-    Request = #{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => 1,
-        <<"method">> => <<"tools/call">>,
-        <<"params">> => #{
-            <<"name">> => <<"list_tool">>,
-            <<"arguments">> => #{}
-        }
-    },
-    Response = barrel_mcp_protocol:handle(Request),
-    Result = maps:get(<<"result">>, Response),
-    Content = maps:get(<<"content">>, Result),
-
+    {result, Content} = drive_call(<<"list_tool">>, #{}),
     ?assertEqual(2, length(Content)),
-
     barrel_mcp_registry:unreg(tool, <<"list_tool">>).
 
 test_call_tool_not_found() ->
-    Request = #{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => 1,
-        <<"method">> => <<"tools/call">>,
-        <<"params">> => #{
-            <<"name">> => <<"nonexistent">>,
-            <<"arguments">> => #{}
-        }
-    },
-    Response = barrel_mcp_protocol:handle(Request),
-    ?assert(maps:is_key(<<"error">>, Response)),
-    Error = maps:get(<<"error">>, Response),
-    ?assertEqual(-32601, maps:get(<<"code">>, Error)).
+    %% A missing tool surfaces via the worker as `tool_failed' with
+    %% the registry's not_found error.
+    {failed, {error, {not_found, tool, <<"nonexistent">>}}} =
+        drive_call(<<"nonexistent">>, #{}).
 
 test_call_tool_error() ->
+    %% Handler raises an error -> worker reports `tool_failed'.
     ok = barrel_mcp_registry:reg(tool, <<"error_tool">>, ?MODULE, error_tool, #{}),
-
-    Request = #{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => 1,
-        <<"method">> => <<"tools/call">>,
-        <<"params">> => #{
-            <<"name">> => <<"error_tool">>,
-            <<"arguments">> => #{}
-        }
-    },
-    Response = barrel_mcp_protocol:handle(Request),
-    ?assert(maps:is_key(<<"error">>, Response)),
-    Error = maps:get(<<"error">>, Response),
-    ?assertEqual(-32000, maps:get(<<"code">>, Error)),
-
+    {failed, _} = drive_call(<<"error_tool">>, #{}),
     barrel_mcp_registry:unreg(tool, <<"error_tool">>).
 
 test_tool_input_schema() ->

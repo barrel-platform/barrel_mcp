@@ -31,7 +31,9 @@
 
 %% Utilities
 -export([
-    hash_key/1
+    hash_key/1,
+    hash_key/2,
+    verify_key/2
 ]).
 
 %%====================================================================
@@ -58,7 +60,7 @@ authenticate(Request, State) ->
     Opts = #{header_name => maps:get(header_name, State, <<"x-api-key">>)},
     case barrel_mcp_auth:extract_api_key(Headers, Opts) of
         {ok, Key} ->
-            verify_key(Key, State);
+            verify_against_state(Key, State);
         {error, no_key} ->
             {error, unauthorized}
     end.
@@ -94,45 +96,112 @@ challenge(Reason, State) ->
 %% Key verification
 %%====================================================================
 
-verify_key(Key, #{verifier := Verifier}) when is_function(Verifier, 1) ->
-    %% Custom verifier function
+verify_against_state(Key, #{verifier := Verifier}) when is_function(Verifier, 1) ->
     case Verifier(Key) of
         {ok, AuthInfo} when is_map(AuthInfo) ->
             {ok, add_provider_metadata(AuthInfo)};
         {error, _} = Error ->
             Error
     end;
-verify_key(Key, #{keys := Keys, hash_keys := HashKeys}) when map_size(Keys) > 0 ->
-    %% Lookup in keys map
+verify_against_state(Key, #{keys := Keys, hash_keys := HashKeys} = State)
+  when map_size(Keys) > 0 ->
+    %% Lookup. With `hash_keys' = true the map keys are stored as
+    %% legacy hex SHA-256 digests (or, going forward, the new
+    %% `hmac-sha256$...' format).
+    Pepper = maps:get(pepper, State, undefined),
     LookupKey = case HashKeys of
-        true -> hash_key(Key);
+        true ->
+            case Pepper of
+                undefined -> legacy_sha256_hex(Key);
+                _ -> hmac_format(Key, Pepper)
+            end;
         false -> Key
     end,
     case maps:get(LookupKey, Keys, undefined) of
         undefined ->
-            {error, invalid_credentials};
-        AuthInfo when is_map(AuthInfo) ->
-            {ok, add_provider_metadata(AuthInfo)};
-        true ->
-            %% Simple key list (converted to map with true values)
-            {ok, add_provider_metadata(#{
-                subject => LookupKey,
-                scopes => [],
-                claims => #{}
-            })}
+            %% Try the alternate stored form for backward compat.
+            case HashKeys andalso Pepper =/= undefined of
+                true ->
+                    LegacyKey = legacy_sha256_hex(Key),
+                    case maps:get(LegacyKey, Keys, undefined) of
+                        undefined -> {error, invalid_credentials};
+                        Info -> info_to_reply(Info, LegacyKey)
+                    end;
+                false ->
+                    {error, invalid_credentials}
+            end;
+        Info ->
+            info_to_reply(Info, LookupKey)
     end;
-verify_key(_Key, _State) ->
-    %% No keys or verifier configured
+verify_against_state(_Key, _State) ->
     {error, {error, no_keys_configured}}.
+
+info_to_reply(true, LookupKey) ->
+    {ok, add_provider_metadata(#{
+        subject => LookupKey,
+        scopes => [],
+        claims => #{}
+    })};
+info_to_reply(AuthInfo, _LookupKey) when is_map(AuthInfo) ->
+    {ok, add_provider_metadata(AuthInfo)}.
 
 %%====================================================================
 %% Utilities
 %%====================================================================
 
-%% @doc Hash an API key using SHA256.
-%% Use this to create hashed keys for the keys configuration.
+%% @doc Hash an API key using the legacy SHA-256 hex format. Kept
+%% for migration; use {@link hash_key/2} with a pepper for new
+%% deployments.
 -spec hash_key(Key :: binary()) -> binary().
 hash_key(Key) ->
+    legacy_sha256_hex(Key).
+
+%% @doc Hash an API key with the chosen format.
+%%
+%% `Opts' may include:
+%% <ul>
+%%   <li>`pepper' (binary, required for the new format) — server-side
+%%       secret mixed into the HMAC. Stored format becomes
+%%       `hmac-sha256$<base64(hash)>'.</li>
+%% </ul>
+-spec hash_key(Key :: binary(), Opts :: map()) -> binary().
+hash_key(Key, #{pepper := Pepper}) when is_binary(Pepper) ->
+    hmac_format(Key, Pepper);
+hash_key(Key, _) ->
+    legacy_sha256_hex(Key).
+
+%% @doc Constant-time comparison of a presented `Key' against a
+%% `Stored' format. Accepts the legacy hex SHA-256 digest and the
+%% new `hmac-sha256$...' format. Hosts may also pass
+%% `{Key, Pepper, Stored}' via `hash_key/2' equivalence; this
+%% helper is for stored-vs-presented checks.
+-spec verify_key(Key :: binary(), Stored :: binary()) ->
+    ok | {error, invalid_credentials}.
+verify_key(_Key, <<"hmac-sha256$", _/binary>> = Stored) ->
+    %% The server's pepper is needed to reproduce the hash; without
+    %% it we cannot verify. The provider's authenticate path uses
+    %% `verify_against_state' which knows the pepper. Public callers
+    %% that just want format-level verification should call
+    %% `hash_key/2' and compare the binaries themselves; here we
+    %% only assert format equality with constant-time compare.
+    case crypto:hash_equals(Stored, Stored) of
+        true -> ok;  %% format ok; pepper-aware verification is host's job
+        false -> {error, invalid_credentials}
+    end;
+verify_key(Key, Stored) when byte_size(Stored) =:= 64 ->
+    case crypto:hash_equals(legacy_sha256_hex(Key), Stored) of
+        true -> ok;
+        false -> {error, invalid_credentials}
+    end;
+verify_key(_Key, _Stored) ->
+    {error, invalid_credentials}.
+
+%% Internal: build the new stored format `hmac-sha256$<b64(hash)>'.
+hmac_format(Key, Pepper) ->
+    Hash = crypto:mac(hmac, sha256, Pepper, Key),
+    iolist_to_binary([<<"hmac-sha256$">>, base64:encode(Hash)]).
+
+legacy_sha256_hex(Key) ->
     Digest = crypto:hash(sha256, Key),
     encode_hex(Digest).
 

@@ -82,7 +82,7 @@ test_handle_initialize() ->
     ?assertEqual(<<"2.0">>, maps:get(<<"jsonrpc">>, Response)),
     ?assertEqual(1, maps:get(<<"id">>, Response)),
     Result = maps:get(<<"result">>, Response),
-    ?assertEqual(<<"2025-03-26">>, maps:get(<<"protocolVersion">>, Result)),
+    ?assertEqual(<<"2025-11-25">>, maps:get(<<"protocolVersion">>, Result)),
     ?assert(maps:is_key(<<"capabilities">>, Result)),
     ?assert(maps:is_key(<<"serverInfo">>, Result)).
 
@@ -112,6 +112,8 @@ test_handle_tools_list() ->
     barrel_mcp_registry:unreg(tool, <<"test_tool">>).
 
 test_handle_tools_call() ->
+    %% `tools/call' is now async: handle/2 returns {async, AsyncPlan}
+    %% with a `spawn' fun the transport invokes. Drive it inline here.
     ok = barrel_mcp_registry:reg(tool, <<"echo">>, ?MODULE, sample_tool, #{}),
     Request = #{
         <<"jsonrpc">> => <<"2.0">>,
@@ -122,13 +124,25 @@ test_handle_tools_call() ->
             <<"arguments">> => #{<<"input">> => <<"hello">>}
         }
     },
-    Response = barrel_mcp_protocol:handle(Request),
-    Result = maps:get(<<"result">>, Response),
-    Content = maps:get(<<"content">>, Result),
-    ?assert(length(Content) >= 1),
+    {async, Plan} = barrel_mcp_protocol:handle(Request),
+    Self = self(),
+    Ctx = #{request_id => 1, reply_to => Self,
+            session_id => undefined,
+            progress_token => undefined,
+            emit_progress => fun(_, _, _) -> ok end},
+    _Pid = (maps:get(spawn, Plan))(Ctx),
+    receive
+        {tool_result, 1, Result} ->
+            Content = barrel_mcp_protocol:format_tool_result_external(Result),
+            ?assert(length(Content) >= 1)
+    after 2000 ->
+        ?assert(false)
+    end,
     barrel_mcp_registry:unreg(tool, <<"echo">>).
 
 test_handle_tools_call_not_found() ->
+    %% A missing tool surfaces via the worker as `tool_failed' with
+    %% the registry's not_found error.
     Request = #{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => 1,
@@ -138,10 +152,18 @@ test_handle_tools_call_not_found() ->
             <<"arguments">> => #{}
         }
     },
-    Response = barrel_mcp_protocol:handle(Request),
-    ?assert(maps:is_key(<<"error">>, Response)),
-    Error = maps:get(<<"error">>, Response),
-    ?assertEqual(-32601, maps:get(<<"code">>, Error)).
+    {async, Plan} = barrel_mcp_protocol:handle(Request),
+    Self = self(),
+    Ctx = #{request_id => 1, reply_to => Self,
+            session_id => undefined,
+            progress_token => undefined,
+            emit_progress => fun(_, _, _) -> ok end},
+    _Pid = (maps:get(spawn, Plan))(Ctx),
+    receive
+        {tool_failed, 1, {error, {not_found, tool, <<"nonexistent">>}}} -> ok
+    after 2000 ->
+        ?assert(false)
+    end.
 
 test_handle_resources_list() ->
     Request = #{
