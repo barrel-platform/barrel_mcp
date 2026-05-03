@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### `barrel_mcp_tool_format` — LLM provider tool-shape translator
+
+- New module bridging MCP tool definitions and the tool shapes the LLM provider APIs expect.
+- `to_anthropic/1`, `to_openai/1` translate MCP `tools/list` entries (single map or list) to the Anthropic Messages API and OpenAI Chat Completions tool shapes.
+- `from_anthropic_call/1`, `from_openai_call/1` translate a model's tool-call back to the `(Name, Arguments)` pair `barrel_mcp_client:call_tool/4` expects. Accepts both parsed arguments (already a map) and the wire form (JSON string).
+- Closes the bridge an agent host needs when it hands MCP tools to a model and routes the model's tool calls back through an MCP client.
+
 ### `resources/read` content-block flexibility
 
 - Resource handlers may now return a list of pre-built content blocks; each block is passed through verbatim, with `uri` auto-injected when the handler omits it.

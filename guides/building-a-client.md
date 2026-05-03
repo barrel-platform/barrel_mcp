@@ -164,6 +164,31 @@ list_every_tool(Pid) ->
 The same shape applies to `list_resources/1,2`,
 `list_resource_templates/1,2`, and `list_prompts/1,2`.
 
+### Translate to provider tool shapes
+
+`barrel_mcp_tool_format` converts MCP tool maps to the shapes the
+LLM provider APIs expect, and vice versa. Use it when you're
+building an agent host that hands MCP tools to Anthropic / OpenAI
+models and routes the model's tool calls back through the MCP
+client.
+
+```erlang
+agent_tool_loop(McpPid) ->
+    {ok, McpTools} = barrel_mcp_client:list_tools_all(McpPid),
+    AnthropicTools = barrel_mcp_tool_format:to_anthropic(McpTools),
+    %% ... call Anthropic with AnthropicTools, get tool_use blocks ...
+    Block = receive_tool_use_block(),
+    {Name, Args} = barrel_mcp_tool_format:from_anthropic_call(Block),
+    barrel_mcp_client:call_tool(McpPid, Name, Args).
+receive_tool_use_block() ->
+    %% Replace with your real LLM client.
+    #{<<"name">> => <<"echo">>,
+      <<"input">> => #{<<"text">> => <<"hi">>}}.
+```
+
+`to_openai/1` and `from_openai_call/1` follow the same pattern for
+the OpenAI Chat Completions tool-call envelope.
+
 ---
 
 ## 7. Call a tool

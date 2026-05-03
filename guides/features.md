@@ -193,6 +193,17 @@ by the spec.
     `refresh_token` was supplied. The interactive authorization-code
     redirect stays a host concern.
 
+### LLM provider bridge (`barrel_mcp_tool_format`)
+
+Translates MCP tool maps to the shapes the major LLM provider
+APIs expect, and translates a model's tool-call back into the
+`(Name, Arguments)` pair `barrel_mcp_client:call_tool/4` consumes.
+
+- `to_anthropic/1`, `to_openai/1` — MCP tool → provider tool.
+- `from_anthropic_call/1`, `from_openai_call/1` — provider call →
+  `{Name, Args}`. Accepts both parsed maps and JSON-string
+  arguments (the OpenAI wire shape).
+
 ### Schema validation (`barrel_mcp_schema`)
 
 Pure-Erlang JSON Schema subset validator hosts can use to pre-flight
