@@ -72,7 +72,8 @@
     refresh_token/2,
     client_credentials/2,
     token_exchange/2,
-    jwt_bearer/2
+    jwt_bearer/2,
+    register_client/2
 ]).
 
 -export_type([config/0, handle/0]).
@@ -492,6 +493,38 @@ jwt_bearer(TokenEndpoint, Params) ->
              end,
     http_post_form(TokenEndpoint, Body2, Secret,
                    maps:get(client_id, Params, undefined)).
+
+%% @doc Dynamic Client Registration ([RFC 7591][rfc7591]). Posts
+%% the supplied client metadata to the AS's `registration_endpoint'
+%% and returns the AS's response unchanged: typically including
+%% `client_id', optionally `client_secret',
+%% `client_id_issued_at', `client_secret_expires_at', plus any
+%% client-metadata echo the AS chose to include.
+%%
+%% Hosts that receive a fresh `client_id' (and `client_secret', if
+%% issued) feed it into a subsequent `{oauth, ...}',
+%% `{oauth_client_credentials, ...}', or `{oauth_enterprise, ...}'
+%% connect spec. This stays a standalone exchanger; auto-wiring
+%% would require persisting credentials, which is host policy.
+%%
+%% [rfc7591]: https://datatracker.ietf.org/doc/html/rfc7591
+-spec register_client(RegistrationEndpoint :: binary(),
+                       Metadata :: map()) ->
+    {ok, ClientInfo :: map()} | {error, term()}.
+register_client(RegistrationEndpoint, Metadata) when is_map(Metadata) ->
+    Headers = [{<<"content-type">>, <<"application/json">>},
+               {<<"accept">>, <<"application/json">>}],
+    Body = iolist_to_binary(json:encode(Metadata)),
+    case hackney:request(post, RegistrationEndpoint, Headers, Body,
+                          [with_body]) of
+        {ok, Status, _Hdrs, Resp}
+          when Status >= 200, Status < 300 ->
+            try {ok, json:decode(Resp)}
+            catch _:_ -> {error, {invalid_json, Resp}} end;
+        {ok, Status, _Hdrs, Resp} ->
+            {error, {http_error, Status, Resp}};
+        {error, _} = Err -> Err
+    end.
 
 %%====================================================================
 %% Internal — refresh wired through the behaviour

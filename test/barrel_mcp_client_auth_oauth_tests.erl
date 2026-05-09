@@ -92,7 +92,13 @@ refresh_round_trip_test_() ->
          {"enterprise-managed re-acquires on 401",
           fun test_enterprise_managed_refresh/0},
          {"expired subject_token surfaces typed error",
-          fun test_enterprise_managed_subject_token_expired/0}
+          fun test_enterprise_managed_subject_token_expired/0},
+         {"register_client returns just the client_id",
+          fun test_register_client_public/0},
+         {"register_client returns client_id + client_secret",
+          fun test_register_client_confidential/0},
+         {"register_client surfaces 4xx errors",
+          fun test_register_client_error/0}
      ]}}.
 
 setup_mock() ->
@@ -103,7 +109,8 @@ setup_mock() ->
         {"/.well-known/oauth-authorization-server", ?MODULE, as},
         {"/oauth/token", ?MODULE, token},
         %% IdP token endpoint for the EMA token-exchange step.
-        {"/idp/token", ?MODULE, idp_token}
+        {"/idp/token", ?MODULE, idp_token},
+        {"/oauth/register", ?MODULE, register}
     ]}]),
     {ok, _} = cowboy:start_clear(?MODULE, [{port, ?PORT}],
                                  #{env => #{dispatch => Dispatch}}),
@@ -220,6 +227,41 @@ init(Req0, idp_token) ->
                                   <<"urn:ietf:params:oauth:token-type:id-jag">>,
                               <<"token_type">> => <<"Bearer">>}), Req),
             {ok, R, idp_token}
+    end;
+%% Mock dynamic client registration endpoint (RFC 7591).
+init(Req0, register) ->
+    {ok, Body, Req} = cowboy_req:read_body(Req0),
+    Metadata = json:decode(Body),
+    Name = maps:get(<<"client_name">>, Metadata, <<"unnamed">>),
+    %% Test marker: client_name="confidential" provokes a
+    %% client_secret in the response; "bad" provokes a 400.
+    case Name of
+        <<"bad">> ->
+            R = cowboy_req:reply(400,
+                #{<<"content-type">> => <<"application/json">>},
+                json_encode(#{<<"error">> => <<"invalid_redirect_uri">>}),
+                Req),
+            {ok, R, register};
+        <<"confidential">> ->
+            R = cowboy_req:reply(201,
+                #{<<"content-type">> => <<"application/json">>},
+                json_encode(#{
+                    <<"client_id">> => <<"new-client-id">>,
+                    <<"client_secret">> => <<"new-secret">>,
+                    <<"client_id_issued_at">> => 1700000000,
+                    <<"client_secret_expires_at">> => 0,
+                    <<"client_name">> => Name
+                }), Req),
+            {ok, R, register};
+        _ ->
+            R = cowboy_req:reply(201,
+                #{<<"content-type">> => <<"application/json">>},
+                json_encode(#{
+                    <<"client_id">> => <<"new-client-id">>,
+                    <<"client_id_issued_at">> => 1700000000,
+                    <<"client_name">> => Name
+                }), Req),
+            {ok, R, register}
     end.
 
 json_encode(M) -> iolist_to_binary(json:encode(M)).
@@ -396,3 +438,38 @@ test_enterprise_managed_subject_token_expired() ->
         resource => <<"http://127.0.0.1:19494/mcp">>
     }}),
     ?assertEqual({error, subject_token_expired}, Result).
+
+%%====================================================================
+%% Dynamic Client Registration (RFC 7591)
+%%====================================================================
+
+test_register_client_public() ->
+    %% Public client (token_endpoint_auth_method=none): AS issues
+    %% just a client_id, no secret.
+    {ok, Resp} = barrel_mcp_client_auth_oauth:register_client(
+        <<?BASE/binary, "/oauth/register">>,
+        #{<<"client_name">> => <<"my-mcp-host">>,
+          <<"redirect_uris">> => [<<"http://localhost:5173/cb">>],
+          <<"grant_types">> => [<<"authorization_code">>],
+          <<"response_types">> => [<<"code">>],
+          <<"token_endpoint_auth_method">> => <<"none">>}),
+    ?assertEqual(<<"new-client-id">>, maps:get(<<"client_id">>, Resp)),
+    ?assertNot(maps:is_key(<<"client_secret">>, Resp)).
+
+test_register_client_confidential() ->
+    %% Confidential client: AS issues both client_id and
+    %% client_secret. Both flow back to the caller verbatim.
+    {ok, Resp} = barrel_mcp_client_auth_oauth:register_client(
+        <<?BASE/binary, "/oauth/register">>,
+        #{<<"client_name">> => <<"confidential">>,
+          <<"grant_types">> => [<<"client_credentials">>]}),
+    ?assertEqual(<<"new-client-id">>, maps:get(<<"client_id">>, Resp)),
+    ?assertEqual(<<"new-secret">>, maps:get(<<"client_secret">>, Resp)).
+
+test_register_client_error() ->
+    %% AS rejects the request with a 4xx; caller learns the
+    %% status + body so it can react.
+    Result = barrel_mcp_client_auth_oauth:register_client(
+        <<?BASE/binary, "/oauth/register">>,
+        #{<<"client_name">> => <<"bad">>}),
+    ?assertMatch({error, {http_error, 400, _}}, Result).
