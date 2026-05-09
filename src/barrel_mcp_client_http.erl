@@ -48,6 +48,14 @@
     retried = false :: boolean()
 }).
 
+%% Cap incoming response and SSE buffers so a malicious or
+%% misbehaving MCP server cannot drive unbounded memory growth on
+%% the host. A request that overflows is closed with a
+%% `{response_too_large, ...}' reason; the long-lived SSE stream is
+%% torn down and rescheduled.
+-define(MAX_RESP_BYTES, 16 * 1024 * 1024).
+-define(MAX_SSE_BUFFER_BYTES, 4 * 1024 * 1024).
+
 -record(state, {
     owner :: pid(),
     url :: binary(),
@@ -179,17 +187,37 @@ handle_info({hackney_response, Ref, {error, Reason}},
             {noreply, State}
     end;
 handle_info({hackney_response, Ref, Chunk},
-            #state{requests = Reqs, sse_ref = SseRef} = State)
+            #state{requests = Reqs, sse_ref = SseRef, owner = Owner} = State)
   when is_binary(Chunk) ->
     case maps:find(Ref, Reqs) of
         {ok, #req{format = sse, buffer = Buf} = R} ->
-            {Events, NewBuf} = parse_sse(<<Buf/binary, Chunk/binary>>),
-            State1 = forward_sse_events(Events, State),
-            R1 = R#req{buffer = NewBuf},
-            {noreply, State1#state{requests = Reqs#{Ref => R1}}};
+            Combined = <<Buf/binary, Chunk/binary>>,
+            case byte_size(Combined) > ?MAX_SSE_BUFFER_BYTES of
+                true ->
+                    %% Drop the request from tracking; further chunks
+                    %% for this Ref fall through the unknown-ref clause.
+                    Owner ! {mcp_closed, self(),
+                             {response_too_large, byte_size(Combined)}},
+                    {noreply, State#state{requests = maps:remove(Ref, Reqs)}};
+                false ->
+                    {Events, NewBuf} = parse_sse(Combined),
+                    State1 = forward_sse_events(Events, State),
+                    R1 = R#req{buffer = NewBuf},
+                    {noreply, State1#state{requests = Reqs#{Ref => R1}}}
+            end;
         {ok, #req{buffer = Buf} = R} ->
-            R1 = R#req{buffer = <<Buf/binary, Chunk/binary>>},
-            {noreply, State#state{requests = Reqs#{Ref => R1}}};
+            Combined = <<Buf/binary, Chunk/binary>>,
+            case byte_size(Combined) > ?MAX_RESP_BYTES of
+                true ->
+                    %% Drop the request from tracking; further chunks
+                    %% for this Ref fall through the unknown-ref clause.
+                    Owner ! {mcp_closed, self(),
+                             {response_too_large, byte_size(Combined)}},
+                    {noreply, State#state{requests = maps:remove(Ref, Reqs)}};
+                false ->
+                    R1 = R#req{buffer = Combined},
+                    {noreply, State#state{requests = Reqs#{Ref => R1}}}
+            end;
         error when Ref =:= SseRef ->
             handle_sse_chunk(Chunk, State);
         error ->
@@ -286,10 +314,23 @@ handle_sse_status(_Ref, _Status, State) ->
 handle_sse_headers(_Ref, _Headers, State) ->
     {noreply, State}.
 
-handle_sse_chunk(Chunk, #state{sse_buffer = Buf} = State) ->
-    {Events, NewBuf} = parse_sse(<<Buf/binary, Chunk/binary>>),
-    State1 = forward_sse_events(Events, State),
-    {noreply, State1#state{sse_buffer = NewBuf}}.
+handle_sse_chunk(Chunk, #state{sse_buffer = Buf, owner = Owner} = State) ->
+    Combined = <<Buf/binary, Chunk/binary>>,
+    case byte_size(Combined) > ?MAX_SSE_BUFFER_BYTES of
+        true ->
+            %% Drop the long-lived SSE channel; reopen on the next
+            %% timer tick so a transient overrun doesn't permanently
+            %% disable server-to-client traffic.
+            Owner ! {mcp_closed, self(),
+                     {response_too_large, byte_size(Combined)}},
+            erlang:send_after(1000, self(), reopen_sse),
+            {noreply, State#state{sse_ref = undefined,
+                                  sse_buffer = <<>>}};
+        false ->
+            {Events, NewBuf} = parse_sse(Combined),
+            State1 = forward_sse_events(Events, State),
+            {noreply, State1#state{sse_buffer = NewBuf}}
+    end.
 
 handle_sse_done(State) ->
     %% Server closed the long-lived stream; reopen in a moment.

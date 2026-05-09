@@ -543,10 +543,12 @@ deliver_tool_outcome(Req0, State, SessionId, RequestId,
                        #{<<"content">> =>
                             [#{<<"type">> => <<"text">>, <<"text">> => Msg}],
                          <<"isError">> => true});
-deliver_tool_outcome(Req0, State, SessionId, RequestId, {failed, Reason}) ->
+deliver_tool_outcome(Req0, State, SessionId, RequestId, {failed, _Reason}) ->
+    %% Crash details are logged server-side by the registry. Wire emits
+    %% only a generic message.
     send_jsonrpc_error_envelope(Req0, State, SessionId, RequestId,
                                 ?MCP_TOOL_ERROR,
-                                iolist_to_binary(io_lib:format("~p", [Reason])));
+                                <<"Internal tool error">>);
 deliver_tool_outcome(Req0, State, SessionId, RequestId, timeout) ->
     send_jsonrpc_error_envelope(Req0, State, SessionId, RequestId,
                                 ?MCP_TOOL_ERROR, <<"Tool timed out">>).

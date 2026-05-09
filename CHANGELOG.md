@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security follow-ups
+
+- **Scope checks now fail closed.** When `required_scopes` is configured but a custom auth provider returns an `AuthInfo` map without a `scopes` key (or with a non-list value), the request is rejected with `{error, insufficient_scope}`. Previously these requests were admitted because the catch-all `check_scopes/2` clause returned `{ok, AuthInfo}`. Behaviour is unchanged for `barrel_mcp_auth_bearer` (which always emits a list).
+- **Tool crash details no longer leak to clients.** When a tool handler raises, `barrel_mcp_registry` logs the class, reason, stack, request id, module and function via `logger:error`. The wire-level error is now a generic `<<"Internal tool error">>` from both `barrel_mcp_protocol` and `barrel_mcp_http_stream`; the previous `io_lib:format("~p", [Reason])` could disclose module/file/function names and exception terms.
+- **Streamable-HTTP client buffers are capped.** `barrel_mcp_client_http` now bounds in-flight response buffers (16 MiB) and SSE event buffers (4 MiB). On overrun the client emits `{mcp_closed, Pid, {response_too_large, Bytes}}` and drops the request from tracking; a malicious or compromised MCP server can no longer drive unbounded memory growth in the host.
+- **OAuth discovery no longer follows redirects.** `barrel_mcp_client_auth_oauth:discover_protected_resource/1` and `discover_authorization_server/1` previously passed `{follow_redirect, true}`, which let an untrusted MCP server redirect discovery into an SSRF-style probe. The flag is now `false`; non-2xx surfaces as `{error, {http_error, Status}}`.
+
 ### Enterprise-Managed Authorization grant
 
 - New connect-spec entry `auth => {oauth_enterprise, Config}` chains an IdP-issued ID Token (or SAML assertion) through RFC 8693 token-exchange (at the IdP) and RFC 7523 jwt-bearer (at the AS) into a short-lived MCP access token. Required Config keys: `idp_token_endpoint`, `as_token_endpoint`, `client_id`, `subject_token`, `subject_token_type`, `audience`, `resource`. Optional `client_secret` / `client_assertion`, `scopes`. Implements the second half of `modelcontextprotocol/ext-auth` for SSO-driven MCP hosts.

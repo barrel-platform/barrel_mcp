@@ -593,9 +593,12 @@ drive_async_plan(Plan, Timeout) ->
                 #{<<"content">> =>
                     [#{<<"type">> => <<"text">>, <<"text">> => Msg}],
                   <<"isError">> => true});
-        {tool_failed, RequestId, Reason} ->
+        {tool_failed, RequestId, _Reason} ->
+            %% Crash details are logged server-side by the registry; do
+            %% not echo `Reason' back to the wire (it can carry module
+            %% paths, file paths, or secret-bearing exception terms).
             error_response(RequestId, ?MCP_TOOL_ERROR,
-                iolist_to_binary(io_lib:format("~p", [Reason])))
+                           <<"Internal tool error">>)
     after Timeout ->
         error_response(RequestId, ?MCP_TOOL_ERROR, <<"Tool timed out">>)
     end.
