@@ -645,8 +645,12 @@ apply_token_response(H, _) -> H.
 %%====================================================================
 
 http_get_json(Url) ->
+    %% Discovery endpoints (RFC 9728 / RFC 8414) are typically served
+    %% directly under the same origin as the resource. Following
+    %% arbitrary cross-origin redirects from an untrusted server
+    %% turns these helpers into an SSRF primitive, so we don't.
     case hackney:request(get, Url, [{<<"accept">>, <<"application/json">>}],
-                         <<>>, [with_body, {follow_redirect, true}]) of
+                         <<>>, [with_body, {follow_redirect, false}]) of
         {ok, 200, _Hdrs, Body} ->
             try {ok, json:decode(Body)}
             catch _:_ -> {error, {invalid_json, Body}} end;

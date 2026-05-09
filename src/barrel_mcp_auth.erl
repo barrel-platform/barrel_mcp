@@ -365,11 +365,14 @@ decode_basic_auth(Encoded) ->
             {error, no_credentials}
     end.
 
-check_scopes(RequiredScopes, #{scopes := TokenScopes} = AuthInfo) ->
+check_scopes(RequiredScopes, #{scopes := TokenScopes} = AuthInfo)
+  when is_list(TokenScopes) ->
     case lists:all(fun(S) -> lists:member(S, TokenScopes) end, RequiredScopes) of
         true -> {ok, AuthInfo};
         false -> {error, insufficient_scope}
     end;
-check_scopes(_, AuthInfo) ->
-    %% No scopes in token, check if any required
-    {ok, AuthInfo}.
+check_scopes(_RequiredScopes, _AuthInfo) ->
+    %% required_scopes is configured but the provider did not surface a
+    %% scopes list (or surfaced a non-list). Fail closed: a missing
+    %% claim is not implicit consent.
+    {error, insufficient_scope}.

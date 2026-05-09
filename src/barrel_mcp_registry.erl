@@ -323,7 +323,14 @@ invoke_tool_handler(Args, Ctx, #{module := M, function := F} = Handler,
         deliver_tool_result(Result, Handler, ReplyTo, RequestId)
     catch
         Class:Reason:Stack ->
-            ReplyTo ! {tool_failed, RequestId, {Class, Reason, Stack}}
+            %% Log the full exception (with stack) server-side and
+            %% surface only an opaque request-scoped reference to the
+            %% client. The wire layer renders a generic "Internal tool
+            %% error" text; operators cross-reference using the id.
+            logger:error("Tool handler crashed: ~p:~p ~p (request_id=~p, "
+                         "module=~p, function=~p)",
+                         [Class, Reason, Stack, RequestId, M, F]),
+            ReplyTo ! {tool_failed, RequestId, internal_error}
     end.
 
 deliver_tool_result({tool_error, Content}, _Handler, ReplyTo, RequestId) ->

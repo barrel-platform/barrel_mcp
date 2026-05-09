@@ -50,6 +50,8 @@ auth_test_() ->
         %% Scope checking
         {"Scope check passes with required scopes", fun test_scope_check_pass/0},
         {"Scope check fails with missing scopes", fun test_scope_check_fail/0},
+        {"Scope check fails closed when provider omits scopes",
+         fun test_scope_check_fail_closed/0},
 
         %% Custom auth tests
         {"Custom auth init calls module init", fun test_custom_init/0},
@@ -336,6 +338,17 @@ test_scope_check_fail() ->
 
     Request = #{headers => #{<<"authorization">> => <<"Bearer ", Token/binary>>}},
     ?assertEqual({error, insufficient_scope}, barrel_mcp_auth:authenticate(Config, Request, Config)).
+
+test_scope_check_fail_closed() ->
+    %% Custom provider that returns no `scopes' key. With
+    %% required_scopes configured, the request must be rejected; a
+    %% missing claim is not implicit consent.
+    Config = #{provider => test_auth_no_scopes,
+               provider_state => #{},
+               required_scopes => [<<"read">>]},
+    Request = #{headers => #{<<"authorization">> => <<"Bearer anything">>}},
+    ?assertEqual({error, insufficient_scope},
+                 barrel_mcp_auth:authenticate(Config, Request, Config)).
 
 %%====================================================================
 %% Helper Functions
