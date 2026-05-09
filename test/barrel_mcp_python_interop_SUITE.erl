@@ -362,10 +362,12 @@ cancellable_loop(ReqId) ->
         cancellable_loop(ReqId)
     end.
 
-%% Resource template handler: serves whatever the template's
-%% `path' substitution resolved to (we just echo the URI).
-file_resource(_) ->
-    <<"template-served">>.
+%% Resource template handler: now that resources/read does
+%% RFC 6570 expansion, we receive the substituted `path' under
+%% Args and echo it so the interop test can assert on it.
+file_resource(Args) ->
+    Path = maps:get(<<"path">>, Args, <<"unset">>),
+    iolist_to_binary([<<"path=">>, Path]).
 
 %% Completion handler: returns a single canned suggestion derived
 %% from the partial value the user typed.

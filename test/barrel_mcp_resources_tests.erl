@@ -13,7 +13,8 @@
     binary_resource/1,
     json_resource/1,
     annotated_resource/1,
-    multi_block_resource/1
+    multi_block_resource/1,
+    file_template/1
 ]).
 
 %%====================================================================
@@ -38,7 +39,9 @@ resources_test_() ->
         {"Resource read carries annotations on the content block",
          fun test_resource_read_block_annotations/0},
         {"Resource read accepts a list of pre-built content blocks",
-         fun test_resource_read_multi_block/0}
+         fun test_resource_read_multi_block/0},
+        {"Resource read against a templated URI routes to the template handler",
+         fun test_resource_read_via_template/0}
      ]
     }.
 
@@ -76,6 +79,10 @@ multi_block_resource(_Args) ->
     [#{<<"text">> => <<"summary">>},
      #{<<"uri">> => <<"mem://multi/details">>,
        <<"text">> => <<"details">>}].
+
+file_template(Args) ->
+    Path = maps:get(<<"path">>, Args, <<"unset">>),
+    iolist_to_binary([<<"path=">>, Path]).
 
 %%====================================================================
 %% Tests
@@ -309,3 +316,26 @@ test_resource_read_multi_block() ->
     %% Pre-set URI on the second block is preserved.
     ?assertEqual(<<"mem://multi/details">>, maps:get(<<"uri">>, B2)),
     barrel_mcp_registry:unreg(resource, <<"multi">>).
+
+test_resource_read_via_template() ->
+    %% Register a template; resources/read against a concrete URI
+    %% matching the template should route to the handler with the
+    %% expanded variables in Args.
+    ok = barrel_mcp_registry:reg(resource_template, <<"file_tpl">>, ?MODULE,
+                                  file_template, #{
+        name => <<"File">>,
+        uri_template => <<"file:///{path}">>,
+        mime_type => <<"text/plain">>
+    }),
+    Request = #{<<"jsonrpc">> => <<"2.0">>,
+                <<"id">> => 1,
+                <<"method">> => <<"resources/read">>,
+                <<"params">> => #{<<"uri">> => <<"file:///etc/hosts">>}},
+    Response = barrel_mcp_protocol:handle(Request),
+    [Block | _] = maps:get(<<"contents">>,
+                            maps:get(<<"result">>, Response)),
+    %% The handler echoes the substituted path; the response URI
+    %% is the original URI, not the template.
+    ?assertEqual(<<"file:///etc/hosts">>, maps:get(<<"uri">>, Block)),
+    ?assertEqual(<<"path=etc/hosts">>, maps:get(<<"text">>, Block)),
+    barrel_mcp_registry:unreg(resource_template, <<"file_tpl">>).

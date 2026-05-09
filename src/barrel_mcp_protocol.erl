@@ -234,19 +234,22 @@ handle_request(<<"resources/list">>, Params, Id, _State) ->
 
 handle_request(<<"resources/read">>, Params, Id, _State) ->
     Uri = maps:get(<<"uri">>, Params, <<>>),
-    %% Find resource by URI
+    %% Exact-URI lookup first.
     Resources = barrel_mcp_registry:all(resource),
     case lists:keyfind(Uri, 1, [{maps:get(uri, H, <<>>), N, H} || {N, H} <- Resources]) of
         {Uri, Name, _Handler} ->
-            case barrel_mcp_registry:run(resource, Name, Params) of
-                {ok, Result} ->
-                    Content = format_resource_result(Uri, Result),
-                    success_response(Id, #{<<"contents">> => Content});
-                {error, Reason} ->
-                    error_response(Id, ?MCP_RESOURCE_ERROR, format_error(Reason))
-            end;
+            run_resource_read(resource, Name, Params, Uri, Id);
         false ->
-            error_response(Id, ?JSONRPC_METHOD_NOT_FOUND, <<"Resource not found">>)
+            %% Fall back to RFC 6570 template matching against
+            %% registered `resource_template' entries.
+            case match_resource_template(Uri) of
+                {ok, TplName, Vars} ->
+                    Args = maps:merge(Params, Vars),
+                    run_resource_read(resource_template, TplName, Args, Uri, Id);
+                nomatch ->
+                    error_response(Id, ?JSONRPC_METHOD_NOT_FOUND,
+                                   <<"Resource not found">>)
+            end
     end;
 
 handle_request(<<"resources/templates/list">>, Params, Id, _State) ->
@@ -568,6 +571,36 @@ format_tool_result(Result) when is_list(Result) ->
     Result;
 format_tool_result(Result) ->
     [#{<<"type">> => <<"text">>, <<"text">> => io_lib:format("~p", [Result])}].
+
+%% Run a resource handler (exact match or template) and shape
+%% the response.
+run_resource_read(Type, Name, Args, Uri, Id) ->
+    case barrel_mcp_registry:run(Type, Name, Args) of
+        {ok, Result} ->
+            Content = format_resource_result(Uri, Result),
+            success_response(Id, #{<<"contents">> => Content});
+        {error, Reason} ->
+            error_response(Id, ?MCP_RESOURCE_ERROR, format_error(Reason))
+    end.
+
+%% Walk the registered resource_template entries and return the
+%% first whose `uri_template' matches `Uri'.
+match_resource_template(Uri) ->
+    Templates = barrel_mcp_registry:all(resource_template),
+    do_match_template(Uri, Templates).
+
+do_match_template(_Uri, []) -> nomatch;
+do_match_template(Uri, [{Name, Handler} | Rest]) ->
+    Tpl = maps:get(uri_template, Handler, <<>>),
+    case Tpl of
+        <<>> ->
+            do_match_template(Uri, Rest);
+        _ ->
+            case barrel_mcp_uri_template:match(Uri, Tpl) of
+                {ok, Vars} -> {ok, Name, Vars};
+                nomatch -> do_match_template(Uri, Rest)
+            end
+    end.
 
 format_resource_result(Uri, Result) when is_list(Result) ->
     [add_resource_uri(Uri, B) || B <- Result];
