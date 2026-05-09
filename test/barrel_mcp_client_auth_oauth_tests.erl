@@ -98,7 +98,11 @@ refresh_round_trip_test_() ->
          {"register_client returns client_id + client_secret",
           fun test_register_client_confidential/0},
          {"register_client surfaces 4xx errors",
-          fun test_register_client_error/0}
+          fun test_register_client_error/0},
+         {"register_client/3 sends initial access token",
+          fun test_register_client_protected/0},
+         {"register_client/2 rejected without initial access token",
+          fun test_register_client_protected_unauth/0}
      ]}}.
 
 setup_mock() ->
@@ -233,9 +237,25 @@ init(Req0, register) ->
     {ok, Body, Req} = cowboy_req:read_body(Req0),
     Metadata = json:decode(Body),
     Name = maps:get(<<"client_name">>, Metadata, <<"unnamed">>),
-    %% Test marker: client_name="confidential" provokes a
-    %% client_secret in the response; "bad" provokes a 400.
+    %% Test marker: client_name="protected" requires the RFC 7591
+    %% initial access token; reject without it.
+    AuthHdr = cowboy_req:header(<<"authorization">>, Req0),
     case Name of
+        <<"protected">> when AuthHdr =/= <<"Bearer init-tok">> ->
+            R = cowboy_req:reply(401,
+                #{<<"content-type">> => <<"application/json">>},
+                json_encode(#{<<"error">> => <<"invalid_token">>}),
+                Req),
+            {ok, R, register};
+        <<"protected">> ->
+            R = cowboy_req:reply(201,
+                #{<<"content-type">> => <<"application/json">>},
+                json_encode(#{
+                    <<"client_id">> => <<"protected-client-id">>,
+                    <<"client_id_issued_at">> => 1700000000,
+                    <<"client_name">> => Name
+                }), Req),
+            {ok, R, register};
         <<"bad">> ->
             R = cowboy_req:reply(400,
                 #{<<"content-type">> => <<"application/json">>},
@@ -473,3 +493,22 @@ test_register_client_error() ->
         <<?BASE/binary, "/oauth/register">>,
         #{<<"client_name">> => <<"bad">>}),
     ?assertMatch({error, {http_error, 400, _}}, Result).
+
+test_register_client_protected() ->
+    %% Protected registration endpoint: caller passes the
+    %% RFC 7591 initial access token via the Opts map, library
+    %% sets `Authorization: Bearer ...'.
+    {ok, Resp} = barrel_mcp_client_auth_oauth:register_client(
+        <<?BASE/binary, "/oauth/register">>,
+        #{<<"client_name">> => <<"protected">>},
+        #{initial_access_token => <<"init-tok">>}),
+    ?assertEqual(<<"protected-client-id">>,
+                 maps:get(<<"client_id">>, Resp)).
+
+test_register_client_protected_unauth() ->
+    %% Same endpoint but no initial access token: AS rejects
+    %% with 401, surfaced as {error, {http_error, 401, _}}.
+    Result = barrel_mcp_client_auth_oauth:register_client(
+        <<?BASE/binary, "/oauth/register">>,
+        #{<<"client_name">> => <<"protected">>}),
+    ?assertMatch({error, {http_error, 401, _}}, Result).

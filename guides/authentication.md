@@ -543,6 +543,16 @@ ClientId     = maps:get(<<"client_id">>, Info),
 ClientSecret = maps:get(<<"client_secret">>, Info, undefined).
 ```
 
+For protected registration endpoints (RFC 7591 section 3) pass
+the AS-issued initial access token via `register_client/3`:
+
+```erlang
+{ok, Info} = barrel_mcp_client_auth_oauth:register_client(
+    <<"https://idp/oauth/register">>,
+    #{<<"client_name">> => <<"my-host">>, ...},
+    #{initial_access_token => <<"...">>}).
+```
+
 Feed the returned credentials into one of the grants above. The
 library does not persist them; that's a host concern.
 
