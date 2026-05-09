@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### `barrel_mcp_client:notify_roots_list_changed/1`
+
+- New client emitter for `notifications/roots/list_changed`. Hosts that mutate their roots after `initialize` (user opened a new workspace, granted access to a new directory, …) call this so the server picks up the change without polling. The server may follow up with `roots/list` against the host's handler.
+- The server-side dispatch hook (`application:set_env(barrel_mcp, roots_changed_handler, {Mod, Fun})`) was already in place; this PR closes the inverse direction.
+- New `test/barrel_mcp_client_roots_SUITE` integration test stands up a real Streamable HTTP server with a roots-changed handler that forwards to the test process; asserts the notification round-trips end-to-end.
+
 ### `resources/read` runtime template expansion
 
 - Registered `resource_template` entries are now matched against incoming `resources/read` URIs and routed to the template's handler. Previously templates only appeared in `resources/templates/list`; reading any URI matching one returned `Resource not found`.
