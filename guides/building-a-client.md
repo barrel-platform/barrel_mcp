@@ -354,6 +354,16 @@ The server can call into the client (`sampling/createMessage`,
 `roots/list`, `elicitation/create`). Implement
 `barrel_mcp_client_handler` and supply it as `handler => {Mod, Args}`.
 
+If the host's roots change after `initialize` (the user opened a
+new workspace, granted access to a new directory, etc.) inform
+the server so it can re-query:
+
+```erlang
+ok = barrel_mcp_client:notify_roots_list_changed(Pid).
+```
+
+The server may follow up with `roots/list` against your handler.
+
 Three return shapes from `handle_request/3`:
 
 - `{reply, Result, State}` — synchronous answer.

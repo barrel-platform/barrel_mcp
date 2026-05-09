@@ -69,6 +69,7 @@
     set_log_level/2,
     ping/1,
     cancel/2,
+    notify_roots_list_changed/1,
     reply_async/3,
     %% Introspection
     server_info/1,
@@ -347,6 +348,15 @@ ping(Pid) ->
 cancel(Pid, RequestId) ->
     gen_statem:cast(Pid, {cancel, RequestId}).
 
+%% @doc Inform the connected server that the host's roots list has
+%% changed. The server may follow up with `roots/list' to fetch
+%% the new set. Hosts that mutate their roots after `initialize'
+%% (e.g. user opened a new workspace) call this so the server
+%% picks up the change without polling.
+-spec notify_roots_list_changed(pid()) -> ok.
+notify_roots_list_changed(Pid) ->
+    gen_statem:cast(Pid, notify_roots_list_changed).
+
 %% @doc Deliver a deferred reply for a server-initiated request that
 %% the handler answered with `{async, Tag, _}'. `Result' is either a
 %% plain term (sent as the JSON-RPC `result') or
@@ -466,6 +476,11 @@ ready({call, From}, {request, Method, Params, Timeout}, Data) ->
     end;
 ready(cast, {cancel, Id}, Data) ->
     do_cancel(Id, Data);
+ready(cast, notify_roots_list_changed, Data) ->
+    send_envelope(Data,
+        barrel_mcp_protocol:encode_notification(
+            <<"notifications/roots/list_changed">>, #{})),
+    {keep_state, Data};
 ready(cast, {add_subscriber, Uri, Pid}, Data) ->
     {keep_state, add_sub(Uri, Pid, Data)};
 ready(cast, {remove_subscriber, Uri, Pid}, Data) ->
