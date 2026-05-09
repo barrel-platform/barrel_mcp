@@ -73,7 +73,8 @@
     client_credentials/2,
     token_exchange/2,
     jwt_bearer/2,
-    register_client/2
+    register_client/2,
+    register_client/3
 ]).
 
 -export_type([config/0, handle/0]).
@@ -511,9 +512,29 @@ jwt_bearer(TokenEndpoint, Params) ->
 -spec register_client(RegistrationEndpoint :: binary(),
                        Metadata :: map()) ->
     {ok, ClientInfo :: map()} | {error, term()}.
-register_client(RegistrationEndpoint, Metadata) when is_map(Metadata) ->
-    Headers = [{<<"content-type">>, <<"application/json">>},
-               {<<"accept">>, <<"application/json">>}],
+register_client(RegistrationEndpoint, Metadata) ->
+    register_client(RegistrationEndpoint, Metadata, #{}).
+
+%% @doc Variant of {@link register_client/2} that accepts an
+%% options map. Currently the only option is
+%% `initial_access_token' (RFC 7591 section 3): an opaque bearer
+%% token issued out of band by the AS to gate registration. When
+%% present, the call adds `Authorization: Bearer <token>'.
+-spec register_client(RegistrationEndpoint :: binary(),
+                       Metadata :: map(),
+                       Opts :: #{initial_access_token => binary(),
+                                 _ => _}) ->
+    {ok, ClientInfo :: map()} | {error, term()}.
+register_client(RegistrationEndpoint, Metadata, Opts)
+  when is_map(Metadata), is_map(Opts) ->
+    Base = [{<<"content-type">>, <<"application/json">>},
+            {<<"accept">>, <<"application/json">>}],
+    Headers = case maps:get(initial_access_token, Opts, undefined) of
+                  undefined -> Base;
+                  Token when is_binary(Token) ->
+                      [{<<"authorization">>, <<"Bearer ", Token/binary>>}
+                       | Base]
+              end,
     Body = iolist_to_binary(json:encode(Metadata)),
     case hackney:request(post, RegistrationEndpoint, Headers, Body,
                           [with_body]) of

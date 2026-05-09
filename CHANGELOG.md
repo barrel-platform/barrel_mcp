@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - New public `barrel_mcp_client_auth_oauth:register_client/2`. Posts the supplied client metadata to the AS's `registration_endpoint` and returns the response unchanged: `client_id`, optional `client_secret`, `client_id_issued_at`, `client_secret_expires_at`, plus any echoed metadata. Hosts feed the returned credentials into a subsequent `{oauth, ...}` / `{oauth_client_credentials, ...}` connect spec.
 - Stays a standalone exchanger: auto-wiring would need persistent storage of issued credentials, which is host policy. Documented in the OAuth section of the auth guide.
+- New `register_client/3` accepts an `Opts` map. `initial_access_token` (RFC 7591 section 3) attaches `Authorization: Bearer ...` so protected registration endpoints work.
 
 ### `_meta` end-to-end propagation
 
