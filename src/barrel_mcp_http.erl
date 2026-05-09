@@ -52,18 +52,28 @@ start(Opts) ->
         {error, _} = Err -> Err;
         {ok, AllowedOrigins} ->
             AllowMissing = maps:get(allow_missing_origin, Opts, Loopback),
-            AuthConfig = init_auth(maps:get(auth, Opts, #{})),
+            ResourceMetadata = barrel_mcp_http_stream:normalize_resource_metadata(
+                                  maps:get(resource_metadata, Opts, undefined)),
+            AuthConfig0 = init_auth(maps:get(auth, Opts, #{})),
+            AuthConfig =
+                barrel_mcp_http_stream:inject_resource_metadata_url(
+                  AuthConfig0, ResourceMetadata),
             HandlerState = #{
                 auth_config => AuthConfig,
                 allowed_origins => AllowedOrigins,
                 allow_missing_origin => AllowMissing
             },
-            Routes = [
-                {'_', [
-                    {"/mcp", ?MODULE, HandlerState},
-                    {"/", ?MODULE, HandlerState}
-                ]}
+            BaseRoutes = [
+                {"/mcp", ?MODULE, HandlerState},
+                {"/", ?MODULE, HandlerState}
             ],
+            PrmRoute = case ResourceMetadata of
+                undefined -> [];
+                #{document := Doc} ->
+                    [{"/.well-known/oauth-protected-resource",
+                        barrel_mcp_prm_handler, Doc}]
+            end,
+            Routes = [{'_', PrmRoute ++ BaseRoutes}],
             Dispatch = cowboy_router:compile(Routes),
             cowboy:start_clear(?HTTP_LISTENER, [
                 {port, Port},

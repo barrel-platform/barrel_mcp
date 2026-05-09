@@ -34,7 +34,9 @@
     resolve_allowed_origins/2,
     validate_origin/2,
     cors_response_headers/3,
-    extract_headers/2
+    extract_headers/2,
+    normalize_resource_metadata/1,
+    inject_resource_metadata_url/2
 ]).
 
 %% Cowboy loop handler callbacks
@@ -104,7 +106,11 @@ start(Opts) ->
                 false -> ok
             end,
 
-            AuthConfig = init_auth(maps:get(auth, Opts, #{})),
+            ResourceMetadata = normalize_resource_metadata(
+                                  maps:get(resource_metadata, Opts, undefined)),
+            AuthConfig0 = init_auth(maps:get(auth, Opts, #{})),
+            AuthConfig = inject_resource_metadata_url(AuthConfig0,
+                                                       ResourceMetadata),
 
             HandlerState = #{
                 auth_config => AuthConfig,
@@ -114,12 +120,17 @@ start(Opts) ->
                 sse_buffer_size => maps:get(sse_buffer_size, Opts, 256)
             },
 
-            Routes = [
-                {'_', [
-                    {"/mcp", ?MODULE, HandlerState},
-                    {"/", ?MODULE, HandlerState}
-                ]}
+            BaseRoutes = [
+                {"/mcp", ?MODULE, HandlerState},
+                {"/", ?MODULE, HandlerState}
             ],
+            PrmRoute = case ResourceMetadata of
+                undefined -> [];
+                #{document := Doc} ->
+                    [{"/.well-known/oauth-protected-resource",
+                        barrel_mcp_prm_handler, Doc}]
+            end,
+            Routes = [{'_', PrmRoute ++ BaseRoutes}],
             Dispatch = cowboy_router:compile(Routes),
 
             case maps:get(ssl, Opts, undefined) of
@@ -851,6 +862,50 @@ init_auth(#{provider := Provider} = AuthOpts) ->
     AuthOpts#{provider_state => ProviderState};
 init_auth(AuthOpts) ->
     init_auth(AuthOpts#{provider => barrel_mcp_auth_none}).
+
+%% Normalise the user-facing `resource_metadata' option into the
+%% pair we need internally:
+%%   #{document := Doc, url := MetaUrl}
+%% where `Doc' is the JSON map served at the well-known URL and
+%% `url' is the absolute URL to advertise in WWW-Authenticate.
+normalize_resource_metadata(undefined) ->
+    undefined;
+normalize_resource_metadata(#{resource := ResourceUrl} = M) ->
+    Doc = maps:without([metadata_url], M),
+    MetaUrl = case maps:get(metadata_url, M, undefined) of
+        undefined -> derive_prm_url(ResourceUrl);
+        Explicit when is_binary(Explicit) -> Explicit
+    end,
+    #{document => Doc, url => MetaUrl}.
+
+%% Derive the well-known URL from the resource URL: strip path,
+%% append `/.well-known/oauth-protected-resource'.
+derive_prm_url(Resource) when is_binary(Resource) ->
+    case uri_string:parse(Resource) of
+        #{scheme := Scheme, host := Host} = Parsed ->
+            PortPart = case maps:get(port, Parsed, undefined) of
+                undefined -> <<>>;
+                P -> iolist_to_binary([<<":">>, integer_to_binary(P)])
+            end,
+            iolist_to_binary([Scheme, <<"://">>, Host, PortPart,
+                              <<"/.well-known/oauth-protected-resource">>]);
+        _ ->
+            %% Couldn't parse — fall back to appending the path
+            %% directly (will likely 404, but better than crashing
+            %% startup).
+            <<Resource/binary, "/.well-known/oauth-protected-resource">>
+    end.
+
+%% Make the PRM URL available to the auth provider's challenge
+%% so 401 responses include `resource_metadata="<URL>"' per
+%% RFC 9728 / the MCP authorization sub-spec.
+inject_resource_metadata_url(AuthConfig, undefined) ->
+    AuthConfig;
+inject_resource_metadata_url(#{provider_state := State} = AuthConfig,
+                              #{url := Url}) when is_map(State) ->
+    AuthConfig#{provider_state => State#{resource_metadata_url => Url}};
+inject_resource_metadata_url(AuthConfig, _) ->
+    AuthConfig.
 
 authenticate(#{provider := barrel_mcp_auth_none}, _Request) ->
     barrel_mcp_auth_none:authenticate(#{}, undefined);

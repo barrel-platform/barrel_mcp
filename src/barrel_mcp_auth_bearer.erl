@@ -79,12 +79,18 @@ authenticate(Request, State) ->
     {integer(), map(), binary()}.
 challenge(Reason, State) ->
     Realm = maps:get(realm, State, <<"mcp">>),
-    Resource = maps:get(resource, State, undefined),
+    %% RFC 9728 / MCP auth: emit `resource_metadata="<URL>"' so
+    %% the client can discover the AS via PRM. We previously
+    %% emitted a non-conformant `resource="..."' parameter (the
+    %% audience-claim string from RFC 8707, conflated with the
+    %% RFC 9728 metadata URL). Drop it.
+    MetaUrl = maps:get(resource_metadata_url, State, undefined),
 
     {StatusCode, ErrorCode, ErrorDesc} = error_details(Reason),
 
-    %% Build WWW-Authenticate header per RFC 6750 and MCP spec
-    Challenge = build_challenge(Realm, ErrorCode, ErrorDesc, Resource),
+    %% Build WWW-Authenticate header per RFC 6750 + RFC 9728 /
+    %% MCP authorization sub-spec.
+    Challenge = build_challenge(Realm, ErrorCode, ErrorDesc, MetaUrl),
 
     Body = iolist_to_binary(json:encode(#{
         <<"error">> => ErrorCode,
@@ -306,7 +312,7 @@ error_details({error, _}) ->
 error_details(_) ->
     {401, <<"invalid_token">>, <<"Authentication failed">>}.
 
-build_challenge(Realm, ErrorCode, ErrorDesc, Resource) ->
+build_challenge(Realm, ErrorCode, ErrorDesc, ResourceMetadataUrl) ->
     Parts = [<<"Bearer realm=\"", Realm/binary, "\"">>],
     Parts1 = case ErrorCode of
         <<"invalid_request">> -> Parts;
@@ -316,9 +322,9 @@ build_challenge(Realm, ErrorCode, ErrorDesc, Resource) ->
         <<>> -> Parts1;
         _ -> Parts1 ++ [<<" error_description=\"", ErrorDesc/binary, "\"">>]
     end,
-    Parts3 = case Resource of
+    Parts3 = case ResourceMetadataUrl of
         undefined -> Parts2;
-        R -> Parts2 ++ [<<" resource=\"", R/binary, "\"">>]
+        Url -> Parts2 ++ [<<" resource_metadata=\"", Url/binary, "\"">>]
     end,
     iolist_to_binary(lists:join(<<",">>, Parts3)).
 
