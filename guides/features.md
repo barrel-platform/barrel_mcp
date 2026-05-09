@@ -42,7 +42,12 @@ Erlang MCP library. See `CHANGELOG.md` for release-by-release detail.
 
 - **Tools** — handlers may be arity 1 or arity 2. Arity-2
   handlers receive a `Ctx` map with `session_id`, `request_id`,
-  `progress_token`, and an `emit_progress` function.
+  `progress_token`, the inbound `meta` map (the spec's `_meta`
+  extension hook), and an `emit_progress` function.
+  Meta-bearing return shapes (`{result_meta, Result, Map}`,
+  `{structured_meta, Data, Content, Map}`,
+  `{tool_error, Content, Map}`) attach `_meta` to the response
+  envelope.
 - **Resources** — text/binary content, MIME types,
   `notifications/resources/updated` for live updates. Handlers
   may return a single block (`#{text := _}` /
@@ -50,7 +55,10 @@ Erlang MCP library. See `CHANGELOG.md` for release-by-release detail.
   `annotations`) or a list of pre-built content blocks for
   multi-part responses.
 - **Resource templates** — RFC 6570 URI templates, surfaced via
-  `resources/templates/list`.
+  `resources/templates/list`. `resources/read` against a URI
+  matching a registered template auto-expands the variables
+  (Level 1, simple `{var}` substitutions) and routes to the
+  template handler with the substituted values in `Args`.
 - **Prompts** — multi-message conversation templates with
   arguments.
 - **Completions** — keyed by `{prompt, Name, Arg}` or
@@ -101,6 +109,13 @@ Erlang MCP library. See `CHANGELOG.md` for release-by-release detail.
   `barrel_mcp_auth_apikey:hash_key/2` produces a peppered HMAC-SHA-256
   digest. Both verifiers accept legacy hex SHA-256 digests for one
   release. All comparisons are constant-time.
+- **OAuth 2.0 Protected Resource Metadata** (RFC 9728): pass
+  `resource_metadata => #{resource, authorization_servers}` to
+  `start_http_stream/1` / `start_http/1` to expose
+  `/.well-known/oauth-protected-resource' and have the bearer
+  challenge emit `WWW-Authenticate: Bearer ...
+  resource_metadata="<URL>"` so MCP clients auto-discover the
+  authorization server.
 
 ### Server-to-client primitives
 
@@ -149,6 +164,10 @@ by the spec.
   `barrel_mcp_pagination:walk/1`.
 - Cancellation: `barrel_mcp_client:cancel/2` sends
   `notifications/cancelled` and unblocks the caller.
+- Roots changes: `barrel_mcp_client:notify_roots_list_changed/1`
+  emits `notifications/roots/list_changed` to inform the server
+  the host's roots have changed. The server may re-issue
+  `roots/list`.
 - Progress: pass `progress_token` to `call_tool/4` and the caller
   receives `{mcp_progress, Token, Params}` for every matching
   `notifications/progress` until the request settles.
