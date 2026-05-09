@@ -207,6 +207,11 @@ by the spec.
     `client_credentials/2`, `token_exchange/2`, `jwt_bearer/2`.
     All attach the RFC 8707 `resource` parameter; confidential
     clients use HTTP Basic.
+  - Dynamic Client Registration (RFC 7591):
+    `register_client/2` posts client metadata to the AS's
+    `registration_endpoint` and returns the AS's response
+    (`client_id`, optional `client_secret`, ...). Hosts then feed
+    the credentials into one of the connect-spec auth entries.
   - Client Credentials grant (MCP `ext-auth` extension) for
     unattended agent hosts: pass
     `auth => {oauth_client_credentials, Config}` on the connect

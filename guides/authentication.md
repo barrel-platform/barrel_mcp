@@ -394,8 +394,8 @@ Authentication failures return proper HTTP status codes and WWW-Authenticate hea
 
 ## OAuth grant flows
 
-`barrel_mcp_client` ships three grants; pick by **who is in the
-loop and when**:
+`barrel_mcp_client` ships three grants plus a registration
+pre-step. Pick by **who is in the loop and when**:
 
 ### Authorization Code + PKCE — interactive
 
@@ -518,24 +518,53 @@ The library treats `subject_token` as opaque — both OIDC and
 SAML modes hit the same code path. The browser flow at the IdP
 stays a host concern.
 
+### Dynamic Client Registration — pre-step
+
+Not a grant. Used **before** any of the others when the host
+doesn't have a `client_id` yet (fresh deployment, distributed
+host, dev sandbox). RFC 7591.
+
+```
+Host                                    AS
+ │  POST /register                       │
+ │  { client_name, redirect_uris,        │
+ │    grant_types, ... }                 │
+ │──────────────────────────────────────►│
+ │  { client_id, client_secret?,         │
+ │    client_id_issued_at, ... }         │
+ │◄──────────────────────────────────────│
+```
+
+```erlang
+{ok, Info} = barrel_mcp_client_auth_oauth:register_client(
+    <<"https://idp/oauth/register">>,
+    #{<<"client_name">> => <<"my-host">>, ...}),
+ClientId     = maps:get(<<"client_id">>, Info),
+ClientSecret = maps:get(<<"client_secret">>, Info, undefined).
+```
+
+Feed the returned credentials into one of the grants above. The
+library does not persist them; that's a host concern.
+
 ### Where they overlap on the wire
 
-All three grants hit the same OAuth-server token endpoint with
+All grants hit the same OAuth-server token endpoint with
 `application/x-www-form-urlencoded` bodies. Confidential clients
 authenticate with HTTP Basic; `private_key_jwt` clients pass a
 `client_assertion` instead. RFC 8707 `resource` is attached on
 every grant. The MCP `2025-11-25` auth sub-spec layers
 [RFC 9728 PRM](#oauth-protected-resource-metadata-rfc-9728) on
-top so any of the three can be auto-discovered from a `401`
+top so any of the grants can be auto-discovered from a `401`
 response.
 
 ### When to pick which
 
-| Situation | Grant |
+| Situation | Use |
 |---|---|
 | Real user, browser available, host wants their identity | `auth_code` (`{oauth, ...}`) |
 | Background agent / cron / unattended host | `client_credentials` (`{oauth_client_credentials, ...}`) |
 | Enterprise SSO; user identity must flow to MCP | `enterprise_managed` (`{oauth_enterprise, ...}`) |
+| No `client_id` yet | `register_client/2` first, then one of the above |
 
 ## OAuth Protected Resource Metadata (RFC 9728)
 
@@ -585,6 +614,36 @@ The client side is implemented by
 `discover_protected_resource/1` — together with the server side
 above, the MCP authorization sub-spec discovery flow works
 end-to-end.
+
+## Dynamic Client Registration (RFC 7591)
+
+Hosts that don't have a pre-issued `client_id` for the target
+authorization server can register one programmatically. The AS
+metadata document advertises the endpoint via
+`registration_endpoint`.
+
+```erlang
+{ok, Info} = barrel_mcp_client_auth_oauth:register_client(
+    <<"https://idp.example.com/oauth/register">>,
+    #{<<"client_name">>   => <<"my-mcp-host">>,
+      <<"redirect_uris">> => [<<"http://localhost:5173/callback">>],
+      <<"grant_types">>   => [<<"authorization_code">>,
+                              <<"refresh_token">>],
+      <<"response_types">> => [<<"code">>],
+      <<"token_endpoint_auth_method">> => <<"none">>}).
+
+%% Info now contains:
+%%   #{<<"client_id">>           => <<"...">>,
+%%     <<"client_secret">>       => <<"...">>,   % if confidential
+%%     <<"client_id_issued_at">> => 1700000000,  % UNIX epoch
+%%     ...}
+```
+
+Feed the returned credentials into a subsequent
+`{oauth, ...}` / `{oauth_client_credentials, ...}` connect spec.
+This stays a standalone exchanger — the library doesn't persist
+the issued credentials. That's a host concern (file, DB, secret
+manager).
 
 ## Security Best Practices
 
