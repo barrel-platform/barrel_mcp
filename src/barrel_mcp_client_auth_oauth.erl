@@ -70,7 +70,9 @@
     build_authorization_url/2,
     exchange_code/2,
     refresh_token/2,
-    client_credentials/2
+    client_credentials/2,
+    token_exchange/2,
+    jwt_bearer/2
 ]).
 
 -export_type([config/0, handle/0]).
@@ -83,7 +85,8 @@
     client_secret => binary(),
     resource => binary(),
     scopes => [binary()]
-} | client_credentials_config().
+} | client_credentials_config()
+  | enterprise_managed_config().
 
 -type client_credentials_config() :: #{
     grant_type := client_credentials,
@@ -92,6 +95,27 @@
     client_secret => binary(),
     client_assertion => binary(),
     resource => binary(),
+    scopes => [binary()]
+}.
+
+-type enterprise_managed_config() :: #{
+    grant_type := enterprise_managed,
+    %% IdP token endpoint (RFC 8693 token-exchange).
+    idp_token_endpoint := binary(),
+    %% Authorization server token endpoint (RFC 7523 jwt-bearer).
+    as_token_endpoint := binary(),
+    client_id := binary(),
+    client_secret => binary(),
+    client_assertion => binary(),
+    %% IdP-issued ID Token or SAML assertion the host obtained
+    %% out of band (browser flow, SSO).
+    subject_token := binary(),
+    %% Spec URN: `id_token' or `saml2'.
+    subject_token_type := binary(),
+    %% AS issuer URL — the `aud' the IdP signs into the ID-JAG.
+    audience := binary(),
+    %% MCP server's RFC 9728 resource identifier.
+    resource := binary(),
     scopes => [binary()]
 }.
 
@@ -104,7 +128,12 @@
     client_assertion :: binary() | undefined,
     resource :: binary() | undefined,
     scopes :: [binary()] | undefined,
-    mode = auth_code :: auth_code | client_credentials
+    mode = auth_code :: auth_code | client_credentials | enterprise_managed,
+    %% Enterprise-managed-only state (RFC 8693 + RFC 7523 chain).
+    idp_token_endpoint :: binary() | undefined,
+    subject_token :: binary() | undefined,
+    subject_token_type :: binary() | undefined,
+    audience :: binary() | undefined
 }).
 
 -type handle() :: #h{}.
@@ -144,6 +173,43 @@ init(#{grant_type := client_credentials,
     end;
 init(#{grant_type := client_credentials}) ->
     {error, missing_token_endpoint_or_client_id};
+%% Enterprise-managed authorization (MCP `ext-auth' EMA):
+%% RFC 8693 token-exchange at the IdP -> ID-JAG, then RFC 7523
+%% jwt-bearer at the AS -> short-lived MCP access token.
+init(#{grant_type := enterprise_managed,
+       idp_token_endpoint := IDP,
+       as_token_endpoint := AS,
+       client_id := CI,
+       subject_token := ST,
+       subject_token_type := STT,
+       audience := Aud,
+       resource := Res} = Cfg)
+  when is_binary(IDP), IDP =/= <<>>,
+       is_binary(AS),  AS  =/= <<>>,
+       is_binary(CI),  CI  =/= <<>>,
+       is_binary(ST),  ST  =/= <<>>,
+       is_binary(STT), STT =/= <<>>,
+       is_binary(Aud), Aud =/= <<>>,
+       is_binary(Res), Res =/= <<>> ->
+    H0 = #h{
+        token_endpoint = AS,
+        client_id = CI,
+        client_secret = maps:get(client_secret, Cfg, undefined),
+        client_assertion = maps:get(client_assertion, Cfg, undefined),
+        resource = Res,
+        scopes = maps:get(scopes, Cfg, undefined),
+        mode = enterprise_managed,
+        idp_token_endpoint = IDP,
+        subject_token = ST,
+        subject_token_type = STT,
+        audience = Aud
+    },
+    case acquire_via_ema(H0) of
+        {ok, H1} -> {ok, H1};
+        {error, _} = Err -> Err
+    end;
+init(#{grant_type := enterprise_managed}) ->
+    {error, missing_endpoints_or_subject_token};
 init(_) ->
     {error, missing_access_token}.
 
@@ -156,6 +222,8 @@ header(#h{access_token = AT}) ->
 %% No refresh_token involved.
 refresh(#h{mode = client_credentials} = H, _Www) ->
     acquire_via_client_credentials(H);
+refresh(#h{mode = enterprise_managed} = H, _Www) ->
+    acquire_via_ema(H);
 refresh(#h{refresh_token = undefined}, _Www) ->
     {error, no_refresh_token};
 refresh(#h{token_endpoint = undefined}, _Www) ->
@@ -336,6 +404,95 @@ client_credentials(TokenEndpoint, Params) ->
     http_post_form(TokenEndpoint, Body2, Secret,
                    maps:get(client_id, Params, undefined)).
 
+%% @doc RFC 8693 OAuth 2.0 Token Exchange. Used by the MCP
+%% `ext-auth' Enterprise-Managed Authorization extension to
+%% exchange an IdP-issued ID Token (or SAML assertion) for an
+%% Identity Assertion JWT Authorization Grant (the "ID-JAG"),
+%% scoped to a specific MCP server resource.
+%%
+%% Returns `{ok, IdJag}' where `IdJag' is the binary token
+%% extracted from the response's `access_token' field, or an
+%% error describing the failure. A 4xx with `invalid_grant'
+%% surfaces the typed `{error, subject_token_expired}' (the
+%% RFC 8693 error semantic for an expired or revoked subject
+%% token).
+-spec token_exchange(binary(), map()) ->
+    {ok, binary()} | {error, term()}.
+token_exchange(TokenEndpoint, Params) ->
+    Body0 = #{
+        <<"grant_type">> =>
+            <<"urn:ietf:params:oauth:grant-type:token-exchange">>,
+        <<"client_id">> => required(client_id, Params),
+        <<"requested_token_type">> =>
+            <<"urn:ietf:params:oauth:token-type:id-jag">>,
+        <<"subject_token">> => required(subject_token, Params),
+        <<"subject_token_type">> =>
+            required(subject_token_type, Params),
+        <<"audience">> => required(audience, Params),
+        <<"resource">> => required(resource, Params)
+    },
+    Body1 = case maps:get(client_assertion, Params, undefined) of
+                undefined -> Body0;
+                JWT when is_binary(JWT) ->
+                    Body0#{
+                        <<"client_assertion_type">> =>
+                            <<"urn:ietf:params:oauth:client-assertion-type:jwt-bearer">>,
+                        <<"client_assertion">> => JWT
+                    }
+            end,
+    Secret = case maps:get(client_assertion, Params, undefined) of
+                 undefined ->
+                     maps:get(client_secret, Params, undefined);
+                 _ -> undefined
+             end,
+    case http_post_form(TokenEndpoint, Body1, Secret,
+                        maps:get(client_id, Params, undefined)) of
+        {ok, #{<<"access_token">> := IdJag}} ->
+            {ok, IdJag};
+        {ok, R} ->
+            {error, {missing_id_jag, R}};
+        {error, {http_error, Status, Body}} when Status >= 400, Status < 500 ->
+            case is_invalid_grant(Body) of
+                true -> {error, subject_token_expired};
+                false -> {error, {http_error, Status, Body}}
+            end;
+        {error, _} = Err -> Err
+    end.
+
+%% @doc RFC 7523 JWT Bearer access-token request. The second
+%% step of the EMA chain: present the ID-JAG to the MCP server's
+%% authorization-server token endpoint and receive a short-lived
+%% access token.
+-spec jwt_bearer(binary(), map()) ->
+    {ok, map()} | {error, term()}.
+jwt_bearer(TokenEndpoint, Params) ->
+    Body0 = #{
+        <<"grant_type">> =>
+            <<"urn:ietf:params:oauth:grant-type:jwt-bearer">>,
+        <<"client_id">> => required(client_id, Params),
+        <<"assertion">> => required(assertion, Params)
+    },
+    Body1 = case maps:get(client_assertion, Params, undefined) of
+                undefined -> Body0;
+                JWT when is_binary(JWT) ->
+                    Body0#{
+                        <<"client_assertion_type">> =>
+                            <<"urn:ietf:params:oauth:client-assertion-type:jwt-bearer">>,
+                        <<"client_assertion">> => JWT
+                    }
+            end,
+    Body2 = maps:fold(fun add_optional/3, Body1, #{
+        scope => maps:get(scopes, Params, undefined),
+        resource => maps:get(resource, Params, undefined)
+    }),
+    Secret = case maps:get(client_assertion, Params, undefined) of
+                 undefined ->
+                     maps:get(client_secret, Params, undefined);
+                 _ -> undefined
+             end,
+    http_post_form(TokenEndpoint, Body2, Secret,
+                   maps:get(client_id, Params, undefined)).
+
 %%====================================================================
 %% Internal — refresh wired through the behaviour
 %%====================================================================
@@ -371,6 +528,58 @@ acquire_via_client_credentials(#h{token_endpoint = TE,
         {ok, R} -> {ok, apply_token_response(H, R)};
         {error, _} = Err -> Err
     end.
+
+%% Walk the EMA chain: token-exchange at the IdP, then
+%% jwt-bearer at the AS, fold the resulting access token into
+%% the handle. Surfaces `subject_token_expired' on the typed
+%% RFC 6749 `invalid_grant' error so hosts can re-acquire from
+%% the IdP without parsing JSON themselves.
+acquire_via_ema(#h{idp_token_endpoint = IDP,
+                   token_endpoint = AS,
+                   client_id = CI,
+                   client_secret = CS,
+                   client_assertion = CA,
+                   subject_token = ST,
+                   subject_token_type = STT,
+                   audience = Aud,
+                   resource = Res,
+                   scopes = Scopes} = H) ->
+    Step1 = drop_undefined(#{
+        client_id => CI,
+        client_secret => CS,
+        client_assertion => CA,
+        subject_token => ST,
+        subject_token_type => STT,
+        audience => Aud,
+        resource => Res
+    }),
+    case token_exchange(IDP, Step1) of
+        {ok, IdJag} ->
+            Step2 = drop_undefined(#{
+                client_id => CI,
+                client_secret => CS,
+                client_assertion => CA,
+                assertion => IdJag,
+                resource => Res,
+                scopes => Scopes
+            }),
+            case jwt_bearer(AS, Step2) of
+                {ok, R} -> {ok, apply_token_response(H, R)};
+                {error, _} = Err -> Err
+            end;
+        {error, _} = Err -> Err
+    end.
+
+%% RFC 6749 token-error parsing: a 4xx body MAY be JSON with
+%% `{"error": "invalid_grant"}'. Used by `token_exchange/2' to
+%% surface the typed `subject_token_expired' value.
+is_invalid_grant(Body) when is_binary(Body) ->
+    try json:decode(Body) of
+        #{<<"error">> := <<"invalid_grant">>} -> true;
+        _ -> false
+    catch _:_ -> false
+    end;
+is_invalid_grant(_) -> false.
 
 apply_token_response(#h{} = H, #{<<"access_token">> := AT} = R) ->
     H#h{access_token = AT,

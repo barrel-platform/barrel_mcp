@@ -204,8 +204,9 @@ by the spec.
   - PKCE: `gen_code_verifier/0`, `code_challenge/1` (S256),
     `build_authorization_url/2`.
   - Token endpoint: `exchange_code/2`, `refresh_token/2`,
-    `client_credentials/2`. All three attach the RFC 8707 `resource`
-    parameter; confidential clients use HTTP Basic.
+    `client_credentials/2`, `token_exchange/2`, `jwt_bearer/2`.
+    All attach the RFC 8707 `resource` parameter; confidential
+    clients use HTTP Basic.
   - Client Credentials grant (MCP `ext-auth` extension) for
     unattended agent hosts: pass
     `auth => {oauth_client_credentials, Config}` on the connect
@@ -215,6 +216,17 @@ by the spec.
     The library fetches the token eagerly during `init/1` and
     re-acquires via the same grant on 401 — no refresh_token
     needed.
+  - Enterprise-Managed Authorization (MCP `ext-auth` EMA) for
+    SSO-driven hosts: pass `auth => {oauth_enterprise, Config}`.
+    Required keys: `idp_token_endpoint`, `as_token_endpoint`,
+    `client_id`, `subject_token` (an IdP ID Token / SAML
+    assertion the host obtained out of band),
+    `subject_token_type`, `audience`, `resource`. The handle
+    chains RFC 8693 token-exchange at the IdP through
+    RFC 7523 jwt-bearer at the AS and re-walks the same chain
+    on 401. An expired subject token surfaces as
+    `{error, subject_token_expired}` so the host can re-acquire
+    from the IdP.
   - As an auth handle: when used through `auth => {oauth, Config}` on
     the client spec, the library attaches `Authorization: Bearer ...`
     on every request and runs the refresh-token grant on 401 if a
