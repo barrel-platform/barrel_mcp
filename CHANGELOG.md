@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### `_meta` end-to-end propagation
+
+- The MCP spec defines `_meta` as the extensibility hook on every JSON-RPC envelope. Previously only `_meta.progressToken` was read on `tools/call`; everything else dropped on the floor. Now:
+  - **Inbound**: tool handler `Ctx` carries the full inbound `_meta` map under the `meta` key. `progress_token` stays for back-compat. The async plan emitted by `barrel_mcp_protocol:handle/1` for `tools/call` carries `meta` so transports without their own `_meta` extraction (stdio, legacy HTTP) get it via `barrel_mcp_protocol:drive_async_plan/2`.
+  - **Outbound**: new return shapes on tool handlers — `{result_meta, Result, MetaMap}`, `{structured_meta, Data, Content, MetaMap}`, `{tool_error, Content, MetaMap}` — surface `_meta` on the response. The existing tuple shapes are unchanged.
+  - **Envelope helpers**: new `barrel_mcp_protocol:success_response/3` and `error_response/4` accept an optional `_meta` map. Empty map omits the field. Used by every transport's tool-outcome path so the wire shape is consistent.
+- 8 new eunit cases cover the envelope helpers, `drive_async_plan` for the new result/structured/error meta variants, and an end-to-end `_meta` round-trip through a tool that echoes Ctx-supplied `_meta` back through the response.
+
 ### Server-side OAuth Protected Resource Metadata + spec-correct `WWW-Authenticate`
 
 - New `resource_metadata` start option on `barrel_mcp:start_http_stream/1` and `barrel_mcp:start_http/1`. When set, the server registers a cowboy route at `/.well-known/oauth-protected-resource` that returns the configured RFC 9728 PRM document as JSON, and threads the absolute PRM URL into the auth provider's challenge.

@@ -15,6 +15,9 @@
     handle/1,
     handle/2,
     error_response/3,
+    error_response/4,
+    success_response/2,
+    success_response/3,
     notification_response/0
 ]).
 
@@ -98,14 +101,24 @@ handle(_, _State) ->
 %% @doc Create an error response.
 -spec error_response(term(), integer(), binary()) -> map().
 error_response(Id, Code, Message) ->
-    #{
+    error_response(Id, Code, Message, #{}).
+
+%% Optional `_meta' map on the error envelope. Empty map is
+%% omitted from the wire; the spec's `_meta' is the
+%% extensibility hook that lets server / client extensions thread
+%% state without changing the JSON-RPC surface.
+-spec error_response(term(), integer(), binary(), map()) -> map().
+error_response(Id, Code, Message, Meta) ->
+    Err = #{
+        <<"code">> => Code,
+        <<"message">> => Message
+    },
+    Env = #{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => Id,
-        <<"error">> => #{
-            <<"code">> => Code,
-            <<"message">> => Message
-        }
-    }.
+        <<"error">> => Err
+    },
+    add_meta(Env, Meta).
 
 %% @doc Return a marker for no response (notifications).
 -spec notification_response() -> no_response.
@@ -192,8 +205,10 @@ handle_request(<<"tools/call">>, Params, Id, _State) ->
     %% `{tool_result, _, _}', `{tool_error, _, _}',
     %% `{tool_failed, _, _}', `{tool_validation_failed, _, _}', or
     %% `{cancelled, _}' (sent by `barrel_mcp_session:cancel_in_flight/2').
+    Meta = maps:get(<<"_meta">>, Params, #{}),
     Plan = #{
         request_id => Id,
+        meta => Meta,
         spawn => fun(Ctx) ->
             case barrel_mcp_registry:run_tool(Name, Args, Ctx) of
                 {ok, Pid} -> Pid;
@@ -501,11 +516,22 @@ handle_notification(_, _Params, _State) ->
 %%====================================================================
 
 success_response(Id, Result) ->
-    #{
+    success_response(Id, Result, #{}).
+
+success_response(Id, Result, Meta) ->
+    Env = #{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => Id,
         <<"result">> => Result
-    }.
+    },
+    add_meta(Env, Meta).
+
+%% Add `_meta' to a JSON-RPC envelope only when the supplied map
+%% is non-empty. Keeps wire payloads compact.
+add_meta(Env, Meta) when is_map(Meta), map_size(Meta) > 0 ->
+    Env#{<<"_meta">> => Meta};
+add_meta(Env, _) ->
+    Env.
 
 %% @doc Format a tool handler's plain return value into the MCP
 %% content-block list shape. Public so transports driving async
@@ -526,9 +552,11 @@ drive_async_plan(Plan, Timeout) ->
     Self = self(),
     RequestId = maps:get(request_id, Plan),
     Spawn = maps:get(spawn, Plan),
+    Meta = maps:get(meta, Plan, #{}),
     Ctx = #{request_id => RequestId,
             session_id => undefined,
             progress_token => undefined,
+            meta => Meta,
             emit_progress => fun(_, _, _) -> ok end,
             reply_to => Self},
     _Pid = Spawn(Ctx),
@@ -536,14 +564,28 @@ drive_async_plan(Plan, Timeout) ->
         {tool_result, RequestId, Result} ->
             success_response(RequestId,
                 #{<<"content">> => format_tool_result_external(Result)});
+        {tool_result_meta, RequestId, Result, RespMeta} ->
+            success_response(RequestId,
+                #{<<"content">> => format_tool_result_external(Result)},
+                RespMeta);
         {tool_structured, RequestId, Data, Content} ->
             success_response(RequestId,
                 #{<<"content">> => Content,
                   <<"structuredContent">> => Data});
+        {tool_structured_meta, RequestId, Data, Content, RespMeta} ->
+            success_response(RequestId,
+                #{<<"content">> => Content,
+                  <<"structuredContent">> => Data},
+                RespMeta);
         {tool_error, RequestId, Content} ->
             success_response(RequestId,
                 #{<<"content">> => Content,
                   <<"isError">> => true});
+        {tool_error_meta, RequestId, Content, RespMeta} ->
+            success_response(RequestId,
+                #{<<"content">> => Content,
+                  <<"isError">> => true},
+                RespMeta);
         {tool_validation_failed, RequestId, Errors} ->
             Msg = iolist_to_binary(io_lib:format(
                 "Invalid tool input: ~p", [Errors])),

@@ -12,7 +12,8 @@
     echo_tool/1,
     error_tool/1,
     map_result_tool/1,
-    list_result_tool/1
+    list_result_tool/1,
+    result_meta_tool/2
 ]).
 
 %%====================================================================
@@ -33,7 +34,9 @@ tools_test_() ->
         {"Call tool with error returns error response", fun test_call_tool_error/0},
         {"Tool with input schema is listed correctly", fun test_tool_input_schema/0},
         {"Tool annotations are surfaced in tools/list",
-         fun test_tool_annotations/0}
+         fun test_tool_annotations/0},
+        {"Tool returning {result_meta, _, _} surfaces _meta on the wire",
+         fun test_tool_result_meta/0}
      ]
     }.
 
@@ -67,6 +70,15 @@ list_result_tool(_Args) ->
         #{<<"type">> => <<"text">>, <<"text">> => <<"First">>},
         #{<<"type">> => <<"text">>, <<"text">> => <<"Second">>}
     ].
+
+%% Echoes the inbound `_meta' from Ctx so the test can verify
+%% the spec extension hook flows through end to end. Returns the
+%% `{result_meta, Result, MetaMap}' shape introduced for `_meta'
+%% propagation on responses.
+result_meta_tool(_Args, Ctx) ->
+    Inbound = maps:get(meta, Ctx, #{}),
+    {result_meta, <<"ok">>,
+     Inbound#{<<"echoedBy">> => <<"barrel_mcp">>}}.
 
 %%====================================================================
 %% Tests
@@ -236,3 +248,29 @@ test_tool_annotations() ->
     ?assertNot(maps:is_key(<<"annotations">>, PlainTool)),
     barrel_mcp_registry:unreg(tool, <<"reader">>),
     barrel_mcp_registry:unreg(tool, <<"plain">>).
+
+test_tool_result_meta() ->
+    %% The arity-2 result_meta_tool reads `_meta' from Ctx and
+    %% echoes it back via the `{result_meta, Result, MetaMap}'
+    %% return shape. Verifies _meta flows in (Ctx) and out
+    %% (response envelope).
+    ok = barrel_mcp_registry:reg(tool, <<"meta_echo">>, ?MODULE,
+                                  result_meta_tool, #{}),
+    Inbound = #{<<"requestId">> => <<"abc-123">>},
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"tools/call">>,
+        <<"params">> => #{<<"name">> => <<"meta_echo">>,
+                          <<"arguments">> => #{},
+                          <<"_meta">> => Inbound}
+    },
+    {async, Plan} = barrel_mcp_protocol:handle(Request),
+    Resp = barrel_mcp_protocol:drive_async_plan(Plan, 2000),
+    %% drive_async_plan threads `_meta' through Ctx, so the
+    %% echoed response should carry both the inbound key and the
+    %% one the handler added.
+    Meta = maps:get(<<"_meta">>, Resp),
+    ?assertEqual(<<"abc-123">>, maps:get(<<"requestId">>, Meta)),
+    ?assertEqual(<<"barrel_mcp">>, maps:get(<<"echoedBy">>, Meta)),
+    barrel_mcp_registry:unreg(tool, <<"meta_echo">>).
