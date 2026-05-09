@@ -197,6 +197,16 @@ async def run(url: str) -> None:
             if tmpl.name != "File":
                 fail(f"template name wrong: {tmpl.name!r}")
 
+            # resources/read against a URI that matches the template
+            # — the server expands the path variable and routes to the
+            # template handler.
+            tpl_read = await session.read_resource("file:///etc/hosts")
+            if not tpl_read.contents:
+                fail("templated read returned empty contents")
+            tpl_block = tpl_read.contents[0]
+            if getattr(tpl_block, "text", None) != "path=etc/hosts":
+                fail(f"templated read text mismatch: {tpl_block!r}")
+
             # completion/complete — registered for prompt
             # `hello_prompt` argument `who`. The Erlang fixture
             # returns ["world", "world!"].

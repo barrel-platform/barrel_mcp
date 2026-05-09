@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### `resources/read` runtime template expansion
+
+- Registered `resource_template` entries are now matched against incoming `resources/read` URIs and routed to the template's handler. Previously templates only appeared in `resources/templates/list`; reading any URI matching one returned `Resource not found`.
+- New `barrel_mcp_uri_template` module implementing RFC 6570 Level 1 (simple `{var}` expansion). `match/2` returns a binary-keyed map of substituted values; `expand/2` is the inverse. 13 eunit cases cover single / multi-variable, literal-only, malformed templates, and round-trip.
+- The substituted variables flow into the handler's `Args` map alongside the original request `params`, so a `file:///{path}` template matched against `file:///etc/hosts` lets the handler read `<<"path">>`.
+- Direction A of the Python interop suite reads `file:///etc/hosts` against the `file:///{path}` fixture template and asserts the handler's expanded `path` value round-trips.
+
+
 ## [1.2.0] - 2026-05-03
 
 A large release that consolidates everything since 1.1.0:
