@@ -8,15 +8,17 @@ client.
 
 ## Features
 
-- **Full MCP Protocol**: tools, resources, resource templates,
+- **Full MCP Protocol**: tools, resources, resource templates
+  (with runtime RFC 6570 expansion on `resources/read`),
   prompts, completions, sampling, **tasks** (long-running
-  operations), notifications (`*/list_changed`, `progress`,
-  `cancelled`, `resources/updated`, `tasks/changed`,
-  `replay_truncated`).
+  operations), `_meta` extension hook end-to-end, notifications
+  (`*/list_changed`, `progress`, `cancelled`,
+  `resources/updated`, `tasks/status`, `replay_truncated`).
 - **Tool handlers**: arity 1 or arity 2 (`(Args, Ctx)`) with
-  `Ctx`-driven progress and cancel hooks. Return shapes:
-  plain content, `{tool_error, ...}` (→ `isError: true`), or
-  `{structured, Data, ...}` (→ `structuredContent`).
+  `Ctx`-driven progress, cancel, and `_meta` hooks. Return
+  shapes: plain content, `{tool_error, ...}` (→ `isError: true`),
+  `{structured, Data, ...}` (→ `structuredContent`), or any of
+  the meta-bearing variants that attach `_meta` to the response.
 - **Schema validation**: opt-in `validate_input` /
   `validate_output` against registered JSON Schemas
   (`barrel_mcp_schema`).
@@ -27,7 +29,9 @@ client.
 - **Authentication**: bearer (JWT/opaque), API keys (peppered
   HMAC-SHA-256), basic (PBKDF2-SHA256), custom providers.
   Constant-time hash comparison; legacy SHA-256 hex digests still
-  verify for one release.
+  verify for one release. RFC 9728 Protected Resource Metadata
+  endpoint with spec-correct `WWW-Authenticate` for OAuth client
+  auto-discovery.
 - **Client library** (`barrel_mcp_client`): supervised
   `gen_statem` with stdio + Streamable HTTP transports, OAuth 2.1
   + PKCE, federation registry (one connection per server id),

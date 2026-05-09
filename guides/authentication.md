@@ -392,6 +392,55 @@ Authentication failures return proper HTTP status codes and WWW-Authenticate hea
 | `invalid_credentials` | 401 | Wrong username/password or API key |
 | `insufficient_scope` | 403 | Token lacks required scopes |
 
+## OAuth Protected Resource Metadata (RFC 9728)
+
+For OAuth-protected deployments, MCP clients auto-discover the
+authorization server by:
+
+1. Hitting any endpoint and receiving a 401 with
+   `WWW-Authenticate: Bearer ... resource_metadata="<URL>"`.
+2. Following the URL to fetch the
+   [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728)
+   Protected Resource Metadata document.
+3. Reading `authorization_servers` from the document and
+   completing the OAuth dance against one of them.
+
+The server side of this loop is opt-in via a `resource_metadata`
+option on `barrel_mcp:start_http_stream/1` (and
+`start_http/1`):
+
+```erlang
+{ok, _} = barrel_mcp:start_http_stream(#{
+    port => 8080,
+    auth => #{provider => barrel_mcp_auth_bearer,
+              provider_opts => #{secret => Secret}},
+    resource_metadata => #{
+        resource              => <<"http://localhost:8080/mcp">>,
+        authorization_servers => [<<"https://idp.example.com">>]
+    }
+}).
+```
+
+When set:
+
+- `/.well-known/oauth-protected-resource` is registered as a
+  cowboy route and serves the metadata document as JSON.
+- The bearer challenge on 401 emits
+  `resource_metadata="<absolute PRM URL>"`. The PRM URL is
+  derived from `resource` by default; pass
+  `metadata_url => <<"https://...">>` in the option map to
+  override.
+
+The audience-claim string in `state.resource` (used for token
+verification by `barrel_mcp_auth_bearer`) is unaffected; only
+the wire emission of `WWW-Authenticate` changed.
+
+The client side is implemented by
+`barrel_mcp_client_auth_oauth:parse_www_authenticate/1` and
+`discover_protected_resource/1` — together with the server side
+above, the MCP authorization sub-spec discovery flow works
+end-to-end.
+
 ## Security Best Practices
 
 1. **Always use TLS** in production

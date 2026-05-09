@@ -126,6 +126,7 @@ argument is a context map the runtime fills in:
 %%   session_id     :: binary() | undefined,
 %%   request_id     :: integer() | binary(),
 %%   progress_token :: binary() | undefined,
+%%   meta           :: map(),  %% inbound _meta from the request
 %%   emit_progress  :: fun((Done, Total, Message | undefined) -> ok)
 download(Args, Ctx) ->
     Url = maps:get(<<"url">>, Args),
@@ -141,9 +142,25 @@ Arity-2 handlers are needed for tools that:
 - emit `notifications/progress` updates,
 - cooperate with `notifications/cancelled` (the worker receives
   `{cancel, RequestId}` in its mailbox),
-- need the calling session id for server→client primitives.
+- need the calling session id for server→client primitives,
+- read or echo the request's `_meta` extension hook (available
+  as `maps:get(meta, Ctx, #{})`).
 
 Arity-1 handlers continue to work; pick whichever arity you need.
+
+#### Returning `_meta` on the response
+
+Tool handlers may attach a `_meta` map to the response envelope
+by returning one of the meta-bearing tuples:
+
+- `{result_meta, Result, MetaMap}` — plain result + `_meta`.
+- `{structured_meta, Data, Content, MetaMap}` —
+  `structuredContent` + `_meta`.
+- `{tool_error, Content, MetaMap}` — error result + `_meta`.
+
+Empty maps are omitted from the wire. The plain
+`{tool_error, Content}` and `{structured, Data, Content}`
+shapes still work; `_meta` is opt-in.
 
 ### Long-running tools (tasks)
 
@@ -449,11 +466,21 @@ barrel_mcp:reg_resource_template(<<"file">>, my_resources, read_file_uri, #{
 }).
 ```
 
+`resources/read` against a templated URI is matched and routed
+to the template handler automatically — RFC 6570 Level 1
+substitutions (simple `{var}` expansion) cover what the spec's
+reference examples use. The substituted variables are merged
+into the handler's `Args` map under their template names:
+
+```erlang
+%% file:///{path} matched against file:///etc/hosts
+read_file_uri(#{<<"path">> := Path} = _Args) ->
+    file:read_file(<<"/", Path/binary>>).
+```
+
 `barrel_mcp:list_resource_templates/0` lists registrations.
-Templates surface on the wire via `resources/templates/list`. The
-matching `resources/read` request still goes through your normal
-resource handler (or directly through the template handler if you
-implement URI parsing yourself).
+Templates also surface on the wire via
+`resources/templates/list`.
 
 ## Completions
 
