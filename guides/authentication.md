@@ -392,6 +392,151 @@ Authentication failures return proper HTTP status codes and WWW-Authenticate hea
 | `invalid_credentials` | 401 | Wrong username/password or API key |
 | `insufficient_scope` | 403 | Token lacks required scopes |
 
+## OAuth grant flows
+
+`barrel_mcp_client` ships three grants; pick by **who is in the
+loop and when**:
+
+### Authorization Code + PKCE — interactive
+
+For flows where a real user authorises the host. Browser
+redirect, PKCE prevents code interception, refresh on 401.
+
+```
+User    Host                   AS                  MCP server
+ │  click "connect"             │                       │
+ │──►│ redirect + PKCE          │                       │
+ │   │─────────────────────────►│                       │
+ │   │ login + consent          │                       │
+ │   │◄─────────────────────────│                       │
+ │   │ exchange_code +          │                       │
+ │   │ code_verifier            │                       │
+ │   │─────────────────────────►│                       │
+ │   │ access_token +           │                       │
+ │   │ refresh_token            │                       │
+ │   │◄─────────────────────────│                       │
+ │   │ Bearer access_token                              │
+ │   │──────────────────────────────────────────────────►│
+ │   │       (on 401: refresh_token grant)              │
+```
+
+```erlang
+auth => {oauth, #{
+    access_token   => <<"...">>,            % required
+    refresh_token  => <<"...">>,            % optional, enables refresh
+    token_endpoint => <<"https://idp/oauth/token">>,
+    client_id      => <<"...">>,
+    client_secret  => <<"...">>,            % optional confidential client
+    resource       => <<"https://mcp/...">>,
+    scopes         => [<<"mcp.read">>, <<"mcp.write">>]
+}}
+```
+
+The host drives the browser dance and feeds the resulting tokens
+in. The library handles the refresh.
+
+### Client Credentials — unattended (M2M)
+
+For agent hosts running without a human. The host already has
+its own credentials.
+
+```
+Host                              AS                  MCP server
+ │  POST /token                    │                       │
+ │  grant=client_credentials       │                       │
+ │  + Basic <client_id:secret>     │                       │
+ │────────────────────────────────►│                       │
+ │  access_token                   │                       │
+ │◄────────────────────────────────│                       │
+ │  Bearer access_token                                    │
+ │────────────────────────────────────────────────────────►│
+ │             (on 401: re-acquire via same grant)         │
+```
+
+```erlang
+auth => {oauth_client_credentials, #{
+    token_endpoint   => <<"https://idp/oauth/token">>,
+    client_id        => <<"my-agent-host">>,
+    client_secret    => <<"...">>,          % OR client_assertion (JWT)
+    resource         => <<"https://mcp/...">>,
+    scopes           => [<<"mcp.read">>]
+}}
+```
+
+Eager fetch on init — a misconfigured client fails up front.
+Re-acquires via the same grant on 401. No `refresh_token` is
+involved.
+
+### Enterprise-Managed Authorization — SSO chain
+
+For SSO-driven hosts. The user already has a session at the org
+IdP; their identity flows into a short-lived MCP access token
+without re-prompting. Two-step chain (RFC 8693 → RFC 7523).
+
+```
+User    Host        IdP             AS                MCP server
+ │  active SSO session              │                       │
+ │  ID Token                        │                       │
+ │ ─────────►│                      │                       │
+ │           │ POST /token          │                       │
+ │           │ grant=token-exchange │                       │
+ │           │ subject_token=<id_token>                     │
+ │           │ audience=<AS issuer> │                       │
+ │           │ resource=<MCP url>   │                       │
+ │           │─────────────────────►│                       │
+ │           │ ID-JAG (signed JWT)  │                       │
+ │           │◄─────────────────────│                       │
+ │           │ POST /token          │                       │
+ │           │ grant=jwt-bearer     │                       │
+ │           │ assertion=<ID-JAG>   │                       │
+ │           │─────────────────────►│                       │
+ │           │  access_token        │                       │
+ │           │◄─────────────────────│                       │
+ │           │  Bearer access_token                         │
+ │           │─────────────────────────────────────────────►│
+ │           │ (on 401: re-walk the chain)                 │
+ │           │ (id_token expires →                         │
+ │           │  {error, subject_token_expired})            │
+```
+
+```erlang
+auth => {oauth_enterprise, #{
+    idp_token_endpoint => <<"https://idp/oauth/token">>,
+    as_token_endpoint  => <<"https://as/oauth/token">>,
+    client_id          => <<"...">>,
+    client_secret      => <<"...">>,        % OR client_assertion
+    subject_token      => <IdToken>,        % from IdP, opaque
+    subject_token_type =>
+        <<"urn:ietf:params:oauth:token-type:id_token">>, % or saml2
+    audience           => <<"https://as">>,
+    resource           => <<"https://mcp/...">>,
+    scopes             => [<<"mcp.read">>]
+}}
+```
+
+The library treats `subject_token` as opaque — both OIDC and
+SAML modes hit the same code path. The browser flow at the IdP
+stays a host concern.
+
+### Where they overlap on the wire
+
+All three grants hit the same OAuth-server token endpoint with
+`application/x-www-form-urlencoded` bodies. Confidential clients
+authenticate with HTTP Basic; `private_key_jwt` clients pass a
+`client_assertion` instead. RFC 8707 `resource` is attached on
+every grant. The MCP `2025-11-25` auth sub-spec layers
+[RFC 9728 PRM](#oauth-protected-resource-metadata-rfc-9728) on
+top so any of the three can be auto-discovered from a `401`
+response.
+
+### When to pick which
+
+| Situation | Grant |
+|---|---|
+| Real user, browser available, host wants their identity | `auth_code` (`{oauth, ...}`) |
+| Background agent / cron / unattended host | `client_credentials` (`{oauth_client_credentials, ...}`) |
+| Enterprise SSO; user identity must flow to MCP | `enterprise_managed` (`{oauth_enterprise, ...}`) |
+
 ## OAuth Protected Resource Metadata (RFC 9728)
 
 For OAuth-protected deployments, MCP clients auto-discover the

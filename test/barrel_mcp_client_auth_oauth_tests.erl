@@ -82,7 +82,17 @@ refresh_round_trip_test_() ->
          {"client_credentials with private_key_jwt",
           fun test_client_credentials_jwt/0},
          {"client_credentials re-acquires on 401",
-          fun test_client_credentials_refresh/0}
+          fun test_client_credentials_refresh/0},
+         {"token_exchange grant returns the ID-JAG",
+          fun test_token_exchange/0},
+         {"jwt_bearer grant returns the access token",
+          fun test_jwt_bearer/0},
+         {"enterprise-managed chain via auth handle",
+          fun test_enterprise_managed_handle/0},
+         {"enterprise-managed re-acquires on 401",
+          fun test_enterprise_managed_refresh/0},
+         {"expired subject_token surfaces typed error",
+          fun test_enterprise_managed_subject_token_expired/0}
      ]}}.
 
 setup_mock() ->
@@ -91,7 +101,9 @@ setup_mock() ->
     Dispatch = cowboy_router:compile([{'_', [
         {"/.well-known/oauth-protected-resource", ?MODULE, prm},
         {"/.well-known/oauth-authorization-server", ?MODULE, as},
-        {"/oauth/token", ?MODULE, token}
+        {"/oauth/token", ?MODULE, token},
+        %% IdP token endpoint for the EMA token-exchange step.
+        {"/idp/token", ?MODULE, idp_token}
     ]}]),
     {ok, _} = cowboy:start_clear(?MODULE, [{port, ?PORT}],
                                  #{env => #{dispatch => Dispatch}}),
@@ -155,13 +167,60 @@ init(Req0, token) ->
             #{<<"access_token">> => <<"cc-access">>,
               <<"token_type">> => <<"Bearer">>,
               <<"expires_in">> => 3600};
+        <<"urn:ietf:params:oauth:grant-type:jwt-bearer">> ->
+            %% AS-side step of the EMA chain. The body must
+            %% carry the ID-JAG under `assertion'. With
+            %% client_secret, http_post_form strips client_id
+            %% and authenticates via HTTP Basic.
+            AuthHdr = cowboy_req:header(<<"authorization">>, Req0),
+            true = is_binary(AuthHdr),
+            <<"Basic ", _/binary>> = AuthHdr,
+            <<"id-jag.signed.jwt">> = maps:get(<<"assertion">>, Form),
+            #{<<"access_token">> => <<"ema-access">>,
+              <<"token_type">> => <<"Bearer">>,
+              <<"expires_in">> => 3600};
         _ ->
             #{<<"error">> => <<"unsupported_grant_type">>}
     end,
     R = cowboy_req:reply(200,
         #{<<"content-type">> => <<"application/json">>},
         json_encode(Resp), Req),
-    {ok, R, token}.
+    {ok, R, token};
+%% Mock IdP token-exchange endpoint for the EMA chain.
+init(Req0, idp_token) ->
+    {ok, Body, Req} = cowboy_req:read_urlencoded_body(Req0),
+    Form = maps:from_list(Body),
+    <<"urn:ietf:params:oauth:grant-type:token-exchange">> =
+        maps:get(<<"grant_type">>, Form),
+    <<"urn:ietf:params:oauth:token-type:id-jag">> =
+        maps:get(<<"requested_token_type">>, Form),
+    %% subject_token chooses the response shape so tests can
+    %% steer between happy path and `subject_token_expired'.
+    case maps:get(<<"subject_token">>, Form, undefined) of
+        <<"expired-id-token">> ->
+            R = cowboy_req:reply(400,
+                #{<<"content-type">> => <<"application/json">>},
+                json_encode(#{<<"error">> => <<"invalid_grant">>}), Req),
+            {ok, R, idp_token};
+        Subj when is_binary(Subj), Subj =/= <<>> ->
+            %% client_secret_basic strips client_id from the body
+            %% and authenticates via the Authorization header.
+            AuthHdr = cowboy_req:header(<<"authorization">>, Req0),
+            true = is_binary(AuthHdr),
+            <<"Basic ", _/binary>> = AuthHdr,
+            ?BASE = maps:get(<<"audience">>, Form),
+            <<"http://127.0.0.1:19494/mcp">> =
+                maps:get(<<"resource">>, Form),
+            <<"urn:ietf:params:oauth:token-type:id_token">> =
+                maps:get(<<"subject_token_type">>, Form),
+            R = cowboy_req:reply(200,
+                #{<<"content-type">> => <<"application/json">>},
+                json_encode(#{<<"access_token">> => <<"id-jag.signed.jwt">>,
+                              <<"issued_token_type">> =>
+                                  <<"urn:ietf:params:oauth:token-type:id-jag">>,
+                              <<"token_type">> => <<"Bearer">>}), Req),
+            {ok, R, idp_token}
+    end.
 
 json_encode(M) -> iolist_to_binary(json:encode(M)).
 
@@ -254,3 +313,86 @@ test_client_credentials_refresh() ->
                      Auth, <<"Bearer error=expired">>),
     ?assertEqual({ok, <<"Bearer cc-access">>},
                  barrel_mcp_client_auth:header(Auth1)).
+
+%%====================================================================
+%% Enterprise-Managed Authorization (RFC 8693 + RFC 7523)
+%%====================================================================
+
+test_token_exchange() ->
+    %% Direct exchanger: present the ID Token, get back an
+    %% ID-JAG (`access_token' field of the response).
+    {ok, IdJag} = barrel_mcp_client_auth_oauth:token_exchange(
+        <<?BASE/binary, "/idp/token">>,
+        #{client_id => <<"client-1">>,
+          client_secret => <<"top-secret">>,
+          subject_token => <<"oidc-id-token">>,
+          subject_token_type =>
+              <<"urn:ietf:params:oauth:token-type:id_token">>,
+          audience => ?BASE,
+          resource => <<"http://127.0.0.1:19494/mcp">>}),
+    ?assertEqual(<<"id-jag.signed.jwt">>, IdJag).
+
+test_jwt_bearer() ->
+    %% Direct exchanger: present the ID-JAG to the AS token
+    %% endpoint, get back the MCP access token.
+    {ok, Resp} = barrel_mcp_client_auth_oauth:jwt_bearer(
+        <<?BASE/binary, "/oauth/token">>,
+        #{client_id => <<"client-1">>,
+          client_secret => <<"top-secret">>,
+          assertion => <<"id-jag.signed.jwt">>,
+          resource => <<"http://127.0.0.1:19494/mcp">>}),
+    ?assertEqual(<<"ema-access">>, maps:get(<<"access_token">>, Resp)).
+
+test_enterprise_managed_handle() ->
+    %% End-to-end via the connect-spec entry the user passes to
+    %% barrel_mcp_client. init/1 walks the EMA chain (token-exchange
+    %% then jwt-bearer) and the Authorization header is ready.
+    Auth = barrel_mcp_client_auth:new({oauth_enterprise, #{
+        idp_token_endpoint => <<?BASE/binary, "/idp/token">>,
+        as_token_endpoint => <<?BASE/binary, "/oauth/token">>,
+        client_id => <<"client-1">>,
+        client_secret => <<"top-secret">>,
+        subject_token => <<"oidc-id-token">>,
+        subject_token_type =>
+            <<"urn:ietf:params:oauth:token-type:id_token">>,
+        audience => ?BASE,
+        resource => <<"http://127.0.0.1:19494/mcp">>
+    }}),
+    ?assertNotMatch({error, _}, Auth),
+    ?assertEqual({ok, <<"Bearer ema-access">>},
+                 barrel_mcp_client_auth:header(Auth)).
+
+test_enterprise_managed_refresh() ->
+    %% A 401 in enterprise_managed mode re-walks the chain.
+    Auth = barrel_mcp_client_auth:new({oauth_enterprise, #{
+        idp_token_endpoint => <<?BASE/binary, "/idp/token">>,
+        as_token_endpoint => <<?BASE/binary, "/oauth/token">>,
+        client_id => <<"client-1">>,
+        client_secret => <<"top-secret">>,
+        subject_token => <<"oidc-id-token">>,
+        subject_token_type =>
+            <<"urn:ietf:params:oauth:token-type:id_token">>,
+        audience => ?BASE,
+        resource => <<"http://127.0.0.1:19494/mcp">>
+    }}),
+    {ok, Auth1} = barrel_mcp_client_auth:refresh(
+                     Auth, <<"Bearer error=expired">>),
+    ?assertEqual({ok, <<"Bearer ema-access">>},
+                 barrel_mcp_client_auth:header(Auth1)).
+
+test_enterprise_managed_subject_token_expired() ->
+    %% IdP returns invalid_grant — caller learns the typed
+    %% subject_token_expired result so it can re-acquire the ID
+    %% Token from the IdP.
+    Result = barrel_mcp_client_auth:new({oauth_enterprise, #{
+        idp_token_endpoint => <<?BASE/binary, "/idp/token">>,
+        as_token_endpoint => <<?BASE/binary, "/oauth/token">>,
+        client_id => <<"client-1">>,
+        client_secret => <<"top-secret">>,
+        subject_token => <<"expired-id-token">>,
+        subject_token_type =>
+            <<"urn:ietf:params:oauth:token-type:id_token">>,
+        audience => ?BASE,
+        resource => <<"http://127.0.0.1:19494/mcp">>
+    }}),
+    ?assertEqual({error, subject_token_expired}, Result).

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Enterprise-Managed Authorization grant
+
+- New connect-spec entry `auth => {oauth_enterprise, Config}` chains an IdP-issued ID Token (or SAML assertion) through RFC 8693 token-exchange (at the IdP) and RFC 7523 jwt-bearer (at the AS) into a short-lived MCP access token. Required Config keys: `idp_token_endpoint`, `as_token_endpoint`, `client_id`, `subject_token`, `subject_token_type`, `audience`, `resource`. Optional `client_secret` / `client_assertion`, `scopes`. Implements the second half of `modelcontextprotocol/ext-auth` for SSO-driven MCP hosts.
+- New public exchangers `barrel_mcp_client_auth_oauth:token_exchange/2` and `jwt_bearer/2` for hosts that want to drive each step directly.
+- The handle re-walks the chain on every 401 (no `refresh_token` involved). When the IdP returns `invalid_grant` the library surfaces the typed `{error, subject_token_expired}` so the host can re-acquire from its IdP without parsing JSON.
+
 ### `_meta` end-to-end propagation
 
 - The MCP spec defines `_meta` as the extensibility hook on every JSON-RPC envelope. Previously only `_meta.progressToken` was read on `tools/call`; everything else dropped on the floor. Now:

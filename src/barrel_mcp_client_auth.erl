@@ -28,6 +28,13 @@
 %%       Credentials extension). For unattended agent hosts. Config
 %%       requires `token_endpoint' and `client_id'; supply either
 %%       `client_secret' or `client_assertion' (private_key_jwt).
+%%   `{oauth_enterprise, Config}' — Enterprise-Managed Authorization
+%%       (MCP `ext-auth' EMA). Chains an IdP-issued ID Token through
+%%       RFC 8693 token-exchange and RFC 7523 jwt-bearer to mint a
+%%       short-lived MCP access token. For SSO-driven hosts. Config
+%%       requires `idp_token_endpoint', `as_token_endpoint',
+%%       `client_id', `subject_token', `subject_token_type',
+%%       `audience', `resource'.
 -callback init(Config :: term()) -> {ok, handle()} | {error, term()}.
 
 %% Return the value to put in the `Authorization' header.
@@ -49,7 +56,8 @@
 -spec new(none
         | {bearer, binary()}
         | {oauth, map()}
-        | {oauth_client_credentials, map()}) ->
+        | {oauth_client_credentials, map()}
+        | {oauth_enterprise, map()}) ->
     t() | {error, term()}.
 new(none) ->
     none;
@@ -65,6 +73,12 @@ new({oauth, Config}) when is_map(Config) ->
     end;
 new({oauth_client_credentials, Config}) when is_map(Config) ->
     Cfg = Config#{grant_type => client_credentials},
+    case barrel_mcp_client_auth_oauth:init(Cfg) of
+        {ok, H} -> {barrel_mcp_client_auth_oauth, H};
+        Err -> Err
+    end;
+new({oauth_enterprise, Config}) when is_map(Config) ->
+    Cfg = Config#{grant_type => enterprise_managed},
     case barrel_mcp_client_auth_oauth:init(Cfg) of
         {ok, H} -> {barrel_mcp_client_auth_oauth, H};
         Err -> Err
