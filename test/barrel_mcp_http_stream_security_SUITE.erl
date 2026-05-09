@@ -33,7 +33,9 @@
     accept_only_json_rejected/1,
     accept_only_sse_rejected/1,
     accept_wildcard_ok/1,
-    initialize_with_unknown_session_returns_404/1
+    initialize_with_unknown_session_returns_404/1,
+    prm_endpoint_serves_metadata/1,
+    bearer_challenge_includes_resource_metadata/1
 ]).
 
 -define(BASE_PORT, 21100).
@@ -57,7 +59,9 @@ all() -> [
     accept_only_json_rejected,
     accept_only_sse_rejected,
     accept_wildcard_ok,
-    initialize_with_unknown_session_returns_404
+    initialize_with_unknown_session_returns_404,
+    prm_endpoint_serves_metadata,
+    bearer_challenge_includes_resource_metadata
 ].
 
 init_per_suite(Config) ->
@@ -368,6 +372,66 @@ ping_body() ->
     json:encode(#{<<"jsonrpc">> => <<"2.0">>,
                   <<"id">> => 99,
                   <<"method">> => <<"ping">>}).
+
+%%====================================================================
+%% OAuth Protected Resource Metadata (RFC 9728)
+%%====================================================================
+
+prm_endpoint_serves_metadata(Config) ->
+    Port = ?config(port, Config),
+    ResourceUrl = iolist_to_binary(io_lib:format(
+                                     "http://127.0.0.1:~B/mcp", [Port])),
+    {ok, _} = barrel_mcp:start_http_stream(#{
+        port => Port,
+        session_enabled => true,
+        resource_metadata => #{
+            resource => ResourceUrl,
+            authorization_servers => [<<"https://idp.example.com">>]
+        }
+    }),
+    PrmUrl = iolist_to_binary(io_lib:format(
+        "http://127.0.0.1:~B/.well-known/oauth-protected-resource",
+        [Port])),
+    {ok, 200, Headers, Body} = hackney:request(get, PrmUrl,
+                                                [], <<>>, [with_body]),
+    %% application/json content-type.
+    <<"application/json", _/binary>> =
+        proplists:get_value(<<"content-type">>, Headers,
+                            <<"application/json">>),
+    Doc = json:decode(Body),
+    ?assertEqual(ResourceUrl, maps:get(<<"resource">>, Doc)),
+    ?assertEqual([<<"https://idp.example.com">>],
+                 maps:get(<<"authorization_servers">>, Doc)),
+    ok.
+
+bearer_challenge_includes_resource_metadata(Config) ->
+    Port = ?config(port, Config),
+    ResourceUrl = iolist_to_binary(io_lib:format(
+                                     "http://127.0.0.1:~B/mcp", [Port])),
+    {ok, _} = barrel_mcp:start_http_stream(#{
+        port => Port,
+        session_enabled => true,
+        auth => #{provider => barrel_mcp_auth_bearer,
+                   provider_opts => #{secret => <<"top-secret">>}},
+        resource_metadata => #{
+            resource => ResourceUrl,
+            authorization_servers => [<<"https://idp.example.com">>]
+        }
+    }),
+    %% No Authorization header → 401 with the new challenge.
+    {ok, 401, Headers, _} = hackney:request(post, url(Port),
+        [{<<"content-type">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>}],
+        ping_body(), [with_body]),
+    Challenge = proplists:get_value(<<"www-authenticate">>, Headers),
+    ?assert(is_binary(Challenge)),
+    ExpectedSubstr = <<"resource_metadata=\"http://127.0.0.1:",
+                        (integer_to_binary(Port))/binary,
+                        "/.well-known/oauth-protected-resource\"">>,
+    ?assertNotEqual(nomatch, binary:match(Challenge, ExpectedSubstr)),
+    %% Make sure the legacy non-conformant `resource="..."' is gone.
+    ?assertEqual(nomatch, binary:match(Challenge, <<" resource=\"">>)),
+    ok.
 
 post_init(Port, ExtraHeaders) ->
     Headers = [{<<"content-type">>, <<"application/json">>},

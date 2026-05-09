@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Server-side OAuth Protected Resource Metadata + spec-correct `WWW-Authenticate`
+
+- New `resource_metadata` start option on `barrel_mcp:start_http_stream/1` and `barrel_mcp:start_http/1`. When set, the server registers a cowboy route at `/.well-known/oauth-protected-resource` that returns the configured RFC 9728 PRM document as JSON, and threads the absolute PRM URL into the auth provider's challenge.
+- **Wire change.** `barrel_mcp_auth_bearer`'s 401 challenge now emits `Bearer realm="...", resource_metadata="<URL>"` (RFC 9728 / MCP auth sub-spec) instead of the previous non-conformant `resource="..."` parameter (which conflated the RFC 8707 audience claim with the metadata URL). MCP clients can now auto-discover a barrel_mcp deployment's authorization server end-to-end by parsing `WWW-Authenticate` and following `resource_metadata`.
+- New `barrel_mcp_prm_handler` cowboy handler. Two new helpers exported from `barrel_mcp_http_stream`: `normalize_resource_metadata/1`, `inject_resource_metadata_url/2` (legacy `barrel_mcp_http` reuses them).
+- New CT cases `prm_endpoint_serves_metadata` and `bearel_challenge_includes_resource_metadata` in `barrel_mcp_http_stream_security_SUITE`.
+
 ### `barrel_mcp_client:notify_roots_list_changed/1`
 
 - New client emitter for `notifications/roots/list_changed`. Hosts that mutate their roots after `initialize` (user opened a new workspace, granted access to a new directory, …) call this so the server picks up the change without polling. The server may follow up with `roots/list` against the host's handler.
