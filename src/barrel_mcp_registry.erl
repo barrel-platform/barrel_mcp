@@ -328,17 +328,29 @@ invoke_tool_handler(Args, Ctx, #{module := M, function := F} = Handler,
 
 deliver_tool_result({tool_error, Content}, _Handler, ReplyTo, RequestId) ->
     ReplyTo ! {tool_error, RequestId, Content};
+deliver_tool_result({tool_error, Content, Meta}, _Handler, ReplyTo, RequestId)
+  when is_map(Meta) ->
+    ReplyTo ! {tool_error_meta, RequestId, Content, Meta};
 deliver_tool_result({structured, Data}, Handler, ReplyTo, RequestId) ->
-    deliver_structured(Data, default_content_for(Data), Handler, ReplyTo, RequestId);
+    deliver_structured(Data, default_content_for(Data), #{}, Handler,
+                       ReplyTo, RequestId);
 deliver_tool_result({structured, Data, Content}, Handler, ReplyTo, RequestId) ->
-    deliver_structured(Data, Content, Handler, ReplyTo, RequestId);
+    deliver_structured(Data, Content, #{}, Handler, ReplyTo, RequestId);
+deliver_tool_result({structured_meta, Data, Content, Meta}, Handler,
+                     ReplyTo, RequestId) when is_map(Meta) ->
+    deliver_structured(Data, Content, Meta, Handler, ReplyTo, RequestId);
+deliver_tool_result({result_meta, Result, Meta}, _Handler, ReplyTo, RequestId)
+  when is_map(Meta) ->
+    ReplyTo ! {tool_result_meta, RequestId, Result, Meta};
 deliver_tool_result(Result, _Handler, ReplyTo, RequestId) ->
     ReplyTo ! {tool_result, RequestId, Result}.
 
-deliver_structured(Data, Content, Handler, ReplyTo, RequestId) ->
+deliver_structured(Data, Content, Meta, Handler, ReplyTo, RequestId) ->
     case validate_tool_output(Data, Handler) of
-        ok ->
+        ok when map_size(Meta) =:= 0 ->
             ReplyTo ! {tool_structured, RequestId, Data, Content};
+        ok ->
+            ReplyTo ! {tool_structured_meta, RequestId, Data, Content, Meta};
         {error, Errors} ->
             ReplyTo ! {tool_validation_failed, RequestId,
                        {output, Errors}}

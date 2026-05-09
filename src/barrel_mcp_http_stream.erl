@@ -371,20 +371,19 @@ handle_async_tool_call(Req0, State, SessionId, _Method,
     Params = maps:get(<<"params">>, RequestWithAuth, #{}),
     ToolName = maps:get(<<"name">>, Params, <<>>),
     LongRunning = is_long_running_tool(ToolName),
-    ProgressToken = case Params of
-                        #{<<"_meta">> := #{<<"progressToken">> := T}} -> T;
-                        _ -> undefined
-                    end,
+    Meta = maps:get(<<"_meta">>, Params, #{}),
+    ProgressToken = maps:get(<<"progressToken">>, Meta, undefined),
     Self = self(),
     case LongRunning of
         true ->
             handle_long_running_call(Req0, State, SessionId, RequestId,
-                                      ToolName, ProgressToken, Spawn);
+                                      ToolName, ProgressToken, Meta, Spawn);
         false ->
             Ctx = #{
                 session_id => SessionId,
                 request_id => RequestId,
                 progress_token => ProgressToken,
+                meta => Meta,
                 emit_progress => emit_progress_fun(SessionId, ProgressToken),
                 reply_to => Self
             },
@@ -412,13 +411,14 @@ is_long_running_tool(Name) ->
 %% private collector that updates the task store, return the taskId
 %% to the caller right away.
 handle_long_running_call(Req0, State, SessionId, RequestId, ToolName,
-                          ProgressToken, Spawn) ->
+                          ProgressToken, Meta, Spawn) ->
     {ok, TaskId} = barrel_mcp_tasks:create(SessionId, ToolName, #{}),
     Collector = spawn_task_collector(SessionId, TaskId),
     Ctx = #{
         session_id => SessionId,
         request_id => RequestId,
         progress_token => ProgressToken,
+        meta => Meta,
         emit_progress => emit_progress_fun(SessionId, ProgressToken),
         reply_to => Collector
     },
@@ -477,10 +477,16 @@ emit_progress_fun(SessionId, Token) ->
 
 wait_for_tool(RequestId, Timeout) ->
     Outcome = receive
-        {tool_result, RequestId, Result} -> {result, Result};
+        {tool_result, RequestId, Result} -> {result, Result, #{}};
+        {tool_result_meta, RequestId, Result, Meta} ->
+            {result, Result, Meta};
         {tool_structured, RequestId, Data, Content} ->
-            {structured, Data, Content};
-        {tool_error, RequestId, Content} -> {tool_error, Content};
+            {structured, Data, Content, #{}};
+        {tool_structured_meta, RequestId, Data, Content, Meta} ->
+            {structured, Data, Content, Meta};
+        {tool_error, RequestId, Content} -> {tool_error, Content, #{}};
+        {tool_error_meta, RequestId, Content, Meta} ->
+            {tool_error, Content, Meta};
         {tool_failed, RequestId, Reason} -> {failed, Reason};
         {tool_validation_failed, RequestId, Errors} ->
             {validation_failed, Errors};
@@ -516,20 +522,20 @@ deliver_tool_outcome(Req0, State, SessionId, _RequestId, cancelled) ->
                 cors_response_headers(Req0, State, #{}), SessionId),
     Req = cowboy_req:reply(200, Headers, <<>>, Req0),
     {ok, Req, State};
-deliver_tool_outcome(Req0, State, SessionId, RequestId, {result, Result}) ->
+deliver_tool_outcome(Req0, State, SessionId, RequestId, {result, Result, Meta}) ->
     Content = barrel_mcp_protocol:format_tool_result_external(Result),
     send_tool_envelope(Req0, State, SessionId, RequestId,
-                       #{<<"content">> => Content});
+                       #{<<"content">> => Content}, Meta);
 deliver_tool_outcome(Req0, State, SessionId, RequestId,
-                      {structured, Data, Content}) ->
+                      {structured, Data, Content, Meta}) ->
     send_tool_envelope(Req0, State, SessionId, RequestId,
                        #{<<"content">> => Content,
-                         <<"structuredContent">> => Data});
+                         <<"structuredContent">> => Data}, Meta);
 deliver_tool_outcome(Req0, State, SessionId, RequestId,
-                      {tool_error, Content}) ->
+                      {tool_error, Content, Meta}) ->
     send_tool_envelope(Req0, State, SessionId, RequestId,
                        #{<<"content">> => Content,
-                         <<"isError">> => true});
+                         <<"isError">> => true}, Meta);
 deliver_tool_outcome(Req0, State, SessionId, RequestId,
                       {validation_failed, Errors}) ->
     Msg = iolist_to_binary(io_lib:format("Invalid tool input: ~p", [Errors])),
@@ -546,9 +552,10 @@ deliver_tool_outcome(Req0, State, SessionId, RequestId, timeout) ->
                                 ?MCP_TOOL_ERROR, <<"Tool timed out">>).
 
 send_tool_envelope(Req0, State, SessionId, RequestId, Result) ->
-    Resp = #{<<"jsonrpc">> => <<"2.0">>,
-             <<"id">> => RequestId,
-             <<"result">> => Result},
+    send_tool_envelope(Req0, State, SessionId, RequestId, Result, #{}).
+
+send_tool_envelope(Req0, State, SessionId, RequestId, Result, Meta) ->
+    Resp = barrel_mcp_protocol:success_response(RequestId, Result, Meta),
     Json = barrel_mcp_protocol:encode(Resp),
     Headers = add_session_header(
                 cors_response_headers(Req0, State, #{
