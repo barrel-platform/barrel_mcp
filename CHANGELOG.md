@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-05-10
+
+A feature release that completes the OAuth surface vs MCP `2025-11-25` and `modelcontextprotocol/ext-auth`: Enterprise-Managed Authorization (EMA) for SSO-driven hosts, Dynamic Client Registration (RFC 7591) including the section-3 protected variant, plus four security follow-ups from review (scope fail-closed, no exception leakage, capped client buffers, no redirect-following on discovery).
+
 ### Security follow-ups
 
 - **Scope checks now fail closed.** When `required_scopes` is configured but a custom auth provider returns an `AuthInfo` map without a `scopes` key (or with a non-list value), the request is rejected with `{error, insufficient_scope}`. Previously these requests were admitted because the catch-all `check_scopes/2` clause returned `{ok, AuthInfo}`. Behaviour is unchanged for `barrel_mcp_auth_bearer` (which always emits a list).
@@ -405,4 +409,6 @@ Initial release of barrel_mcp, an Erlang implementation of the Model Context Pro
 - MCP 2024-11-05 specification
 - Methods: initialize, ping, tools/list, tools/call, resources/list, resources/read, prompts/list, prompts/get
 
+[1.3.0]: https://github.com/barrel-platform/barrel_mcp/releases/tag/v1.3.0
+[1.2.0]: https://github.com/barrel-platform/barrel_mcp/releases/tag/v1.2.0
 [1.0.0]: https://github.com/barrel-db/barrel_mcp/releases/tag/v1.0.0
