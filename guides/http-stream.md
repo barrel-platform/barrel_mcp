@@ -20,6 +20,14 @@ This transport supports:
 - **Replay on reconnect** via `Last-Event-ID`.
 - **Origin validation** with operator-controlled allow-list.
 
+The built-in server is built on the `h1` and `h2` libraries, not
+Cowboy. A cleartext bind speaks HTTP/1.1; a TLS bind serves both
+HTTP/1.1 and HTTP/2 on the same port, chosen per connection by ALPN.
+The protocol logic lives in a transport-neutral engine
+(`barrel_mcp_http_engine`), so the same Streamable HTTP behaviour can
+be driven by another HTTP stack (see
+[Embedding in another HTTP server](#embedding-in-another-http-server)).
+
 ## Starting the Server
 
 ```erlang
@@ -233,7 +241,10 @@ barrel_mcp:start_http_stream(#{
 }).
 ```
 
-Then use HTTPS URL with Claude Code:
+A TLS bind advertises ALPN `h2` and `http/1.1`, so the one port
+serves HTTP/2 clients and HTTP/1.1 clients alike; `certfile`/`keyfile`
+(and optional `cacertfile`) are file paths. Then use the HTTPS URL
+with Claude Code:
 
 ```bash
 claude mcp add my-server --transport http https://my-server.example.com:9443/mcp
@@ -296,6 +307,66 @@ process cannot tamper with the table.
 - **Use `start_http_stream`** for Claude Code integration
 - **Use `start_http`** for simple JSON-RPC clients
 - **Use `start_stdio`** for Claude Desktop integration
+
+## Embedding in another HTTP server
+
+The built-in `h1`/`h2` server is one binding over a transport-neutral
+engine, `barrel_mcp_http_engine`. If you already run an HTTP server
+(for example the Livery web framework) you can serve MCP through it by
+calling the engine directly, with no second listener.
+
+For each request, read the method, path, headers and body, then call:
+
+```erlang
+barrel_mcp_http_engine:handle(Method, Path, Headers, Body, Responder, Config).
+```
+
+- `Method` is the request method binary (`<<"POST">>`, `<<"GET">>` …).
+- `Path` is the request target (a query string is allowed; the engine
+  strips it).
+- `Headers` is a `[{binary(), binary()}]` proplist; lookups are
+  case-insensitive.
+- `Body` is the full request body (`<<>>` when there is none).
+
+`Responder` is a map of closures the engine uses to send the response,
+so it never touches a socket:
+
+```erlang
+#{reply        => fun(Status, Headers, Body) -> ok end,
+  stream_start => fun(Status, Headers) -> ok end,
+  stream_chunk => fun(Data) -> ok | {error, term()} end,
+  stream_end   => fun() -> ok end}
+```
+
+`Headers` passed back to the closures is a `[{binary(), binary()}]`
+proplist. A normal response is a single `reply`; a Server-Sent-Events
+response is `stream_start`, then repeated `stream_chunk`, then
+`stream_end`. `handle/6` runs in the calling process; for a long-lived
+GET SSE stream it blocks until the session ends or the host signals a
+disconnect by sending the calling process the message `mcp_disconnect`.
+
+`Config` is the engine configuration. Build it the way the bindings do
+(`barrel_mcp_http_stream:start/1` for `mode => stream`,
+`barrel_mcp_http:start/1` for `mode => simple`) using the shared
+helpers:
+
+```erlang
+Config = #{
+    mode => stream,            %% or `simple'
+    auth_config =>
+        barrel_mcp_http_engine:init_auth(#{provider => barrel_mcp_auth_none}),
+    session_enabled => true,
+    allowed_origins => any,    %% or a resolved allow-list
+    allow_missing_origin => true,
+    sse_buffer_size => 256,
+    resource_metadata => undefined
+}.
+```
+
+The engine handles routing (`/mcp`, `/`, and
+`/.well-known/oauth-protected-resource`), sessions, CORS, Origin
+validation, authentication and async tool calls, identically to the
+built-in server.
 
 ## Example: Complete Server
 

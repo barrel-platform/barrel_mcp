@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-05-21
+
+A dependency-restructuring release. The HTTP server transport is rebuilt on the `h1` and `h2` libraries and Cowboy is removed from the library, so `barrel_mcp` can be embedded next to web frameworks (such as Livery) that bring their own HTTP stack without dragging Cowboy into the runtime. The protocol core and the public start/stop API are unchanged.
+
+### Changed (breaking)
+
+- **No Cowboy in the runtime.** The `barrel_mcp` application's `applications` list is now `[kernel, stdlib, crypto, h1, h2, hackney]` (was `[..., cowboy, hackney]`). The built-in HTTP server (`barrel_mcp:start_http/1`, `barrel_mcp:start_http_stream/1`) runs on `h1`/`h2`: a cleartext bind speaks HTTP/1.1, and a TLS bind serves HTTP/1.1 and HTTP/2 on the same port via ALPN. Start/stop options and the protocol-core entry points are unchanged. Hosts that relied on `barrel_mcp` transitively starting Cowboy must drop that assumption and add the apps they need to their own release.
+- **Dependencies.** Added `h1` (hex package `erlang_h1`) 0.2.2 and `h2` 0.6.0; removed `cowboy`. The MCP HTTP client still uses `hackney`, bumped to 4.0.0. Cowboy is now a test-only dependency (the OAuth DCR and EMA suites mock an authorization server with it).
+
+### Added
+
+- `barrel_mcp_http_engine`: a transport-neutral implementation of the Streamable HTTP and simple HTTP protocol logic (routing, sessions, CORS, Origin validation, authentication, the OAuth protected-resource-metadata endpoint, async tool calls). It drives response I/O through a small `Responder` map of closures, so the built-in `h1`/`h2` server and external adapters (for example a Livery handler) can both reuse it.
+- `barrel_mcp_http_listener`: the built-in single-port `h1`/`h2` server (cleartext h1, TLS h1+h2 via ALPN). A listener `stop` now tears down its in-flight connection processes.
+
+### Removed
+
+- `barrel_mcp_prm_handler`: the `/.well-known/oauth-protected-resource` route is now served directly by `barrel_mcp_http_engine`.
+
 ## [1.3.0] - 2026-05-10
 
 A feature release that completes the OAuth surface vs MCP `2025-11-25` and `modelcontextprotocol/ext-auth`: Enterprise-Managed Authorization (EMA) for SSO-driven hosts, Dynamic Client Registration (RFC 7591) including the section-3 protected variant, plus four security follow-ups from review (scope fail-closed, no exception leakage, capped client buffers, no redirect-following on discovery).

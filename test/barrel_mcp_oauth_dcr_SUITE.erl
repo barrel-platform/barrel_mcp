@@ -44,6 +44,9 @@ all() ->
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_mcp),
     {ok, _} = application:ensure_all_started(hackney),
+    %% cowboy is a test-only dependency now (mock authorization
+    %% server); barrel_mcp no longer starts it.
+    {ok, _} = application:ensure_all_started(cowboy),
     ok = barrel_mcp_registry:wait_for_ready(),
 
     Dispatch = cowboy_router:compile([{'_', [
