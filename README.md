@@ -22,10 +22,11 @@ client.
 - **Schema validation**: opt-in `validate_input` /
   `validate_output` against registered JSON Schemas
   (`barrel_mcp_schema`).
-- **Transports**: Streamable HTTP (Claude Code), legacy HTTP
-  (Cowboy), stdio (Claude Desktop). Streamable HTTP defaults to
-  `127.0.0.1`, validates `Origin`, and replays SSE events via
-  `Last-Event-ID`.
+- **Transports**: Streamable HTTP (Claude Code), legacy HTTP,
+  stdio (Claude Desktop). The HTTP server is built on `h1`/`h2`
+  (HTTP/1.1 + HTTP/2 on one port via ALPN) — no Cowboy. Streamable
+  HTTP defaults to `127.0.0.1`, validates `Origin`, and replays SSE
+  events via `Last-Event-ID`.
 - **Authentication**: bearer (JWT/opaque), API keys (peppered
   HMAC-SHA-256), basic (PBKDF2-SHA256), custom providers.
   Constant-time hash comparison; legacy SHA-256 hex digests still

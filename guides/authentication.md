@@ -607,8 +607,8 @@ option on `barrel_mcp:start_http_stream/1` (and
 
 When set:
 
-- `/.well-known/oauth-protected-resource` is registered as a
-  cowboy route and serves the metadata document as JSON.
+- `/.well-known/oauth-protected-resource` is served by the HTTP
+  transport as a JSON metadata document.
 - The bearer challenge on 401 emits
   `resource_metadata="<absolute PRM URL>"`. The PRM URL is
   derived from `resource` by default; pass
