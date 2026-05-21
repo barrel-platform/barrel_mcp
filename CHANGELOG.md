@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-05-21
+
+Follow-up hardening from a review of the 2.0.0 transport.
+
+### Fixed
+
+- **`_auth` no longer leaks into inbound responses.** The Streamable HTTP transport tagged the authenticated principal (`_auth`) on every decoded message before splitting requests from responses, so a client-posted JSON-RPC response (answering a server `sampling`/`elicitation` request) carried `_auth` into the delivered map. It is now attached only on the request dispatch path, matching 1.x behaviour. Server-internal only; no data was sent to clients.
+- **Accept loop no longer spins on persistent errors.** `barrel_mcp_http_listener` now backs off briefly on a non-`closed` accept error, so a system error such as file-descriptor exhaustion (`emfile`) throttles the acceptor instead of burning CPU.
+
 ## [2.0.0] - 2026-05-21
 
 A dependency-restructuring release. The HTTP server transport is rebuilt on the `h1` and `h2` libraries and Cowboy is removed from the library, so `barrel_mcp` can be embedded next to web frameworks (such as Livery) that bring their own HTTP stack without dragging Cowboy into the runtime. The protocol core and the public start/stop API are unchanged.

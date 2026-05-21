@@ -31,6 +31,10 @@
 -define(MAX_BODY_BYTES, 16 * 1024 * 1024).
 -define(BODY_TIMEOUT, 60000).
 -define(HANDSHAKE_TIMEOUT, 30000).
+%% Brief backoff after a non-`closed' accept error so a persistent
+%% system error (e.g. file-descriptor exhaustion, `emfile') throttles
+%% the accept loop instead of spinning the CPU.
+-define(ACCEPT_ERROR_BACKOFF, 50).
 
 %%====================================================================
 %% API
@@ -162,6 +166,7 @@ acceptor_loop(LSock, Transport, Handler, Listener) ->
         {error, closed} ->
             ok;
         {error, _Reason} ->
+            timer:sleep(?ACCEPT_ERROR_BACKOFF),
             acceptor_loop(LSock, Transport, Handler, Listener)
     end.
 
