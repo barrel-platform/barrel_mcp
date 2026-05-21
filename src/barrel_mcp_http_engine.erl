@@ -213,8 +213,11 @@ stream_post_authed(Headers, Body, Responder, Config, AuthInfo) ->
                                 ?JSONRPC_INVALID_REQUEST,
                                 <<"Batch requests are not supported">>);
         {ok, Request} when is_map(Request) ->
+            %% Pass the raw request through the response-vs-request
+            %% split; `_auth' is attached only on the request path
+            %% (handle_dispatch), never on inbound responses.
             stream_post_request(Headers, Responder, Config, SessionEnabled,
-                                with_auth(Request, AuthInfo), AuthInfo);
+                                Request, AuthInfo);
         {error, parse_error} ->
             reply_jsonrpc_error(Headers, Responder, Config, undefined, 400, null,
                                 ?JSONRPC_PARSE_ERROR, <<"Parse error">>)
@@ -271,7 +274,8 @@ handle_dispatch(Headers, Responder, Config, SessionId, Request, AuthInfo) ->
                                  _ -> #{session_id => SessionId}
                              end,
             ProtocolState = ProtocolState0#{auth_info => AuthInfo},
-            case barrel_mcp_protocol:handle(Request, ProtocolState) of
+            case barrel_mcp_protocol:handle(with_auth(Request, AuthInfo),
+                                            ProtocolState) of
                 no_response ->
                     Hdrs = add_session_header(
                              cors_headers(Headers, Config, #{}), SessionId),
