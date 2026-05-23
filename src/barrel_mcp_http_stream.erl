@@ -62,7 +62,8 @@
         session_enabled => boolean(),
         ssl => map(),
         allowed_origins => [binary()] | any,
-        allow_missing_origin => boolean()
+        allow_missing_origin => boolean(),
+        max_connections => pos_integer()
     }.
 start(Opts) ->
     Port = maps:get(port, Opts, 9090),
@@ -94,7 +95,9 @@ start(Opts) ->
                 sse_buffer_size => maps:get(sse_buffer_size, Opts, 256),
                 resource_metadata => ResourceMetadata
             },
-            ListenOpts = #{port => Port, ip => Ip, ssl => normalize_ssl(Opts)},
+            ListenOpts = maps:merge(
+                           #{port => Port, ip => Ip, ssl => normalize_ssl(Opts)},
+                           maps:with([max_connections, acceptors], Opts)),
             barrel_mcp_http_listener:start(?STREAM_LISTENER, ListenOpts, EngineConfig)
     end.
 

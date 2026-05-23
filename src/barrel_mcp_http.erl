@@ -53,7 +53,9 @@ start(Opts) ->
                 allow_missing_origin => AllowMissing,
                 resource_metadata => ResourceMetadata
             },
-            ListenOpts = #{port => Port, ip => Ip, ssl => normalize_ssl(Opts)},
+            ListenOpts = maps:merge(
+                           #{port => Port, ip => Ip, ssl => normalize_ssl(Opts)},
+                           maps:with([max_connections, acceptors], Opts)),
             barrel_mcp_http_listener:start(?HTTP_LISTENER, ListenOpts, EngineConfig)
     end.
 

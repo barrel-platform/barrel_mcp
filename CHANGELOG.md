@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-05-23
+
+A security release from a release-time review of the HTTP transport
+and the auth providers. No public API changes.
+
+### Security
+
+- **Authentication is enforced on every Streamable HTTP verb.**
+  Previously only POST ran the configured auth provider; GET (open
+  SSE stream) and DELETE (terminate session) were gated by the
+  `Mcp-Session-Id` alone. A caller holding a leaked session id could
+  read a session's server-to-client SSE traffic (including replayed
+  buffered events) or terminate sessions without presenting a
+  credential. Both verbs now run the same auth gate as POST, before
+  any session lookup. With `barrel_mcp_auth_none` (the default)
+  behaviour is unchanged.
+- **Resource, prompt and completion handler crashes no longer leak
+  exception terms to the client.** The 2.0.1 change that returns a
+  generic `Internal tool error` covered only `tools/call`. The
+  synchronous `resources/read`, `prompts/get` and
+  `completion/complete` paths still serialised the caught
+  `Class:Reason` (which can carry internal paths, argument values or
+  secret-bearing terms) into the JSON-RPC error. They now log the
+  class, reason, stack, request id and handler name via
+  `logger:error` and return a generic message.
+- **The built-in listener caps concurrent connections.** Because
+  `idle_timeout` is `infinity` (so long-lived SSE GETs are never
+  reaped), a connection lived until the peer closed it, so a flood of
+  connections or slow/idle keep-alive clients could exhaust file
+  descriptors and memory. Each listener now bounds established
+  connections (default 16384, override with the `max_connections`
+  start option) and drops connections past the cap. h1's default 60s
+  `request_timeout` already bounds slow request headers.
+- **Basic-auth unknown-user timing matches the configured mode.**
+  When `hash_passwords` was `false` the unknown-user path still ran
+  the slow PBKDF2 stand-in while the configured-user path ran a fast
+  SHA-256 compare, so response timing could reveal whether a username
+  existed. The stand-in now does the same work as the active
+  comparison mode.
+
+### Fixed
+
+- **Client reports its real version.** The default `client_info` sent
+  in `initialize` was pinned at `2.0.0`; it now matches the library
+  version. The README dependency example also pinned the stale
+  `v1.3.0` tag.
+
 ## [2.0.1] - 2026-05-21
 
 Follow-up hardening from a review of the 2.0.0 transport.

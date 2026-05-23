@@ -668,7 +668,7 @@ notify_progress(Params, Data) ->
 build_initialize_params(#data{spec = Spec}) ->
     ClientInfo0 = maps:get(client_info, Spec,
                            #{<<"name">> => <<"barrel_mcp_client">>,
-                             <<"version">> => <<"2.0.0">>}),
+                             <<"version">> => <<"2.0.2">>}),
     ClientInfo = normalize_keys(ClientInfo0),
     Caps = capabilities_to_wire(maps:get(capabilities, Spec, #{})),
     Version = maps:get(protocol_version, Spec, ?MCP_CLIENT_PROTOCOL_VERSION),

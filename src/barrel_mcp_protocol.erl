@@ -348,8 +348,9 @@ handle_request(<<"prompts/get">>, Params, Id, _State) ->
             });
         {error, {not_found, _, _}} ->
             error_response(Id, ?JSONRPC_METHOD_NOT_FOUND, <<"Prompt not found">>);
-        {error, Reason} ->
-            error_response(Id, ?MCP_PROMPT_ERROR, format_error(Reason))
+        {error, Crash} ->
+            log_handler_crash(prompt, Name, Id, Crash),
+            error_response(Id, ?MCP_PROMPT_ERROR, <<"Internal prompt error">>)
     end;
 
 %% Tasks
@@ -424,9 +425,10 @@ handle_request(<<"completion/complete">>, Params, Id, _State) ->
                                             completion_payload(Values, HasMore)});
                 {error, {not_found, _, _}} ->
                     success_response(Id, #{<<"completion">> => empty_completion()});
-                {error, Reason} ->
+                {error, Crash} ->
+                    log_handler_crash(completion, Key, Id, Crash),
                     error_response(Id, ?JSONRPC_INTERNAL_ERROR,
-                                   format_error(Reason))
+                                   <<"Internal completion error">>)
             end
     end;
 
@@ -624,8 +626,9 @@ run_resource_read(Type, Name, Args, Uri, Id) ->
         {ok, Result} ->
             Content = format_resource_result(Uri, Result),
             success_response(Id, #{<<"contents">> => Content});
-        {error, Reason} ->
-            error_response(Id, ?MCP_RESOURCE_ERROR, format_error(Reason))
+        {error, Crash} ->
+            log_handler_crash(resource, Name, Id, Crash),
+            error_response(Id, ?MCP_RESOURCE_ERROR, <<"Internal resource error">>)
     end.
 
 %% Walk the registered resource_template entries and return the
@@ -682,8 +685,14 @@ add_resource_uri(Uri, Block) when is_map(Block) ->
         false -> Block#{<<"uri">> => Uri}
     end.
 
-format_error({Class, Reason, _Stack}) ->
-    iolist_to_binary(io_lib:format("~p:~p", [Class, Reason])).
+%% Log a crashed resource/prompt/completion handler server-side and
+%% never surface the exception term to the client: a caught `Reason'
+%% can carry internal paths, argument values or secret-bearing terms.
+%% The wire layer returns a generic message; operators cross-reference
+%% via the request id. Mirrors the tool path in barrel_mcp_registry.
+log_handler_crash(Kind, Name, Id, Crash) ->
+    logger:error("~p handler crashed: ~p (request_id=~p, name=~p)",
+                 [Kind, Crash, Id, Name]).
 
 maybe_advertise_completions(Caps) ->
     case barrel_mcp_registry:all(completion) of
