@@ -114,7 +114,7 @@ verify_credentials(Username, Password, #{credentials := Creds, hash_passwords :=
     %% timing doesn't leak username existence.
     case maps:get(Username, Creds, undefined) of
         undefined ->
-            _ = verify_password(Password, dummy_hash()),
+            _ = dummy_verify(Password, HashPwd),
             {error, invalid_credentials};
         ExpectedPassword when is_binary(ExpectedPassword) ->
             verify_password(Username, Password, ExpectedPassword, HashPwd);
@@ -246,6 +246,19 @@ legacy_sha256_hex(Password) ->
 %% unknown-user path so the verify_password/2 work cost matches
 %% the configured-user path. Cached in `persistent_term' so we pay
 %% the (~tens of ms) construction cost at most once per node.
+%% Constant-work stand-in for the unknown-user path. Does the same
+%% comparison work as verify_password/4 for the active `hash_passwords'
+%% mode so request timing does not reveal whether a username exists.
+%% Previously this always ran PBKDF2, making unknown users markedly
+%% slower than known users when hash_passwords = false (still a
+%% username-existence oracle, just inverted).
+dummy_verify(Password, true) ->
+    verify_password(Password, dummy_hash());
+dummy_verify(Password, false) ->
+    HashedInput = legacy_sha256_hex(Password),
+    HashedExpected = legacy_sha256_hex(<<"unused-timing-stand-in">>),
+    crypto:hash_equals(HashedInput, HashedExpected).
+
 -define(DUMMY_HASH_KEY, {?MODULE, dummy_hash}).
 dummy_hash() ->
     case persistent_term:get(?DUMMY_HASH_KEY, undefined) of

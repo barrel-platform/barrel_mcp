@@ -35,7 +35,9 @@
     accept_wildcard_ok/1,
     initialize_with_unknown_session_returns_404/1,
     prm_endpoint_serves_metadata/1,
-    bearer_challenge_includes_resource_metadata/1
+    bearer_challenge_includes_resource_metadata/1,
+    get_sse_requires_auth/1,
+    delete_requires_auth/1
 ]).
 
 -define(BASE_PORT, 21100).
@@ -61,7 +63,9 @@ all() -> [
     accept_wildcard_ok,
     initialize_with_unknown_session_returns_404,
     prm_endpoint_serves_metadata,
-    bearer_challenge_includes_resource_metadata
+    bearer_challenge_includes_resource_metadata,
+    get_sse_requires_auth,
+    delete_requires_auth
 ].
 
 init_per_suite(Config) ->
@@ -431,6 +435,40 @@ bearer_challenge_includes_resource_metadata(Config) ->
     ?assertNotEqual(nomatch, binary:match(Challenge, ExpectedSubstr)),
     %% Make sure the legacy non-conformant `resource="..."' is gone.
     ?assertEqual(nomatch, binary:match(Challenge, <<" resource=\"">>)),
+    ok.
+
+%%====================================================================
+%% Auth is enforced on every verb, not just POST
+%%====================================================================
+
+%% A GET (open SSE) with no credentials must be rejected by the auth
+%% provider before any session is touched — the session id is not a
+%% credential. Regression for the GET/DELETE auth-bypass.
+get_sse_requires_auth(Config) ->
+    Port = ?config(port, Config),
+    {ok, _} = barrel_mcp:start_http_stream(#{
+        port => Port,
+        session_enabled => true,
+        auth => #{provider => barrel_mcp_auth_bearer,
+                  provider_opts => #{secret => <<"top-secret">>}}}),
+    {ok, 401, _, _} = hackney:request(get, url(Port),
+        [{<<"accept">>, <<"text/event-stream">>},
+         {<<"mcp-session-id">>, <<"mcp_does_not_matter">>}],
+        <<>>, [with_body]),
+    ok.
+
+%% A DELETE (terminate session) with no credentials must likewise be
+%% rejected before the session lookup.
+delete_requires_auth(Config) ->
+    Port = ?config(port, Config),
+    {ok, _} = barrel_mcp:start_http_stream(#{
+        port => Port,
+        session_enabled => true,
+        auth => #{provider => barrel_mcp_auth_bearer,
+                  provider_opts => #{secret => <<"top-secret">>}}}),
+    {ok, 401, _, _} = hackney:request(delete, url(Port),
+        [{<<"mcp-session-id">>, <<"mcp_does_not_matter">>}],
+        <<>>, [with_body]),
     ok.
 
 post_init(Port, ExtraHeaders) ->

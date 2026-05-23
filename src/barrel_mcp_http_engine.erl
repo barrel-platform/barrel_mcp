@@ -20,7 +20,7 @@
 %%%       Lookups are case-insensitive.</li>
 %%%   <li>`Body' — the full request body (`<<>>' when none).</li>
 %%%   <li>`Responder' — a map of I/O closures (see below).</li>
-%%%   <li>`Config' — the engine configuration (see {@link config/0}).</li>
+%%%   <li>`Config' — the engine configuration (see the `config()' type).</li>
 %%% </ul>
 %%%
 %%% The `Responder' abstracts response delivery so the engine never
@@ -555,6 +555,10 @@ maybe_capture_initialize_version(_, _, _) -> ok.
 %%====================================================================
 
 stream_get_sse(Headers, Responder, Config) ->
+    with_authenticated(Headers, Responder, Config,
+                       fun() -> stream_get_sse_authed(Headers, Responder, Config) end).
+
+stream_get_sse_authed(Headers, Responder, Config) ->
     case maps:get(session_enabled, Config, true) of
         false ->
             reply(Responder, 400, cors_headers(Headers, Config, #{}),
@@ -625,6 +629,10 @@ sse_cleanup(Responder, SessionId) ->
     ok.
 
 stream_delete(Headers, Responder, Config) ->
+    with_authenticated(Headers, Responder, Config,
+                       fun() -> stream_delete_authed(Headers, Responder, Config) end).
+
+stream_delete_authed(Headers, Responder, Config) ->
     case session_header(Headers) of
         undefined ->
             reply(Responder, 400, cors_headers(Headers, Config, #{}),
@@ -740,6 +748,21 @@ authenticate(#{provider := barrel_mcp_auth_none}, _Request) ->
     barrel_mcp_auth_none:authenticate(#{}, undefined);
 authenticate(AuthConfig, Request) ->
     barrel_mcp_auth:authenticate(AuthConfig, Request, AuthConfig).
+
+%% Run `Fun' only if the request passes the configured auth provider.
+%% Used by the GET (SSE) and DELETE verbs so they enforce the same
+%% credential as POST instead of trusting the session id alone. With
+%% `barrel_mcp_auth_none' this admits every request unchanged.
+with_authenticated(Headers, Responder, Config, Fun) ->
+    AuthConfig = maps:get(auth_config, Config,
+                          #{provider => barrel_mcp_auth_none}),
+    AuthRequest = #{headers => extract_headers(Headers, AuthConfig)},
+    case authenticate(AuthConfig, AuthRequest) of
+        {ok, _AuthInfo} ->
+            Fun();
+        {error, Reason} ->
+            auth_error(Headers, Responder, AuthConfig, Reason)
+    end.
 
 auth_error(Headers, Responder, AuthConfig, Reason) ->
     {StatusCode, AuthHeaders, Body} =

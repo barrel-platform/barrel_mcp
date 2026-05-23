@@ -112,7 +112,7 @@ Erlang MCP library. See `CHANGELOG.md` for release-by-release detail.
 - **OAuth 2.0 Protected Resource Metadata** (RFC 9728): pass
   `resource_metadata => #{resource, authorization_servers}` to
   `start_http_stream/1` / `start_http/1` to expose
-  `/.well-known/oauth-protected-resource' and have the bearer
+  `/.well-known/oauth-protected-resource` and have the bearer
   challenge emit `WWW-Authenticate: Bearer ...
   resource_metadata="<URL>"` so MCP clients auto-discover the
   authorization server.

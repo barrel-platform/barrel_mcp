@@ -35,6 +35,13 @@
 %% system error (e.g. file-descriptor exhaustion, `emfile') throttles
 %% the accept loop instead of spinning the CPU.
 -define(ACCEPT_ERROR_BACKOFF, 50).
+%% Default cap on concurrently-established connections per listener.
+%% `idle_timeout' is `infinity' (so long-lived SSE GETs are never
+%% reaped), which means a connection lives until the peer closes it.
+%% Without a cap a flood of connections — or slow/idle keep-alive
+%% clients — could exhaust file descriptors and memory. Override with
+%% the `max_connections' listen option.
+-define(DEFAULT_MAX_CONNECTIONS, 16384).
 
 %%====================================================================
 %% API
@@ -42,8 +49,9 @@
 
 %% @doc Start a listener registered as `Name'.
 %%
-%% `ListenOpts': `#{port, ip, ssl, acceptors}'. `ssl' is `undefined'
-%% (cleartext) or `#{certfile, keyfile, cacertfile => _}'.
+%% `ListenOpts': `#{port, ip, ssl, acceptors, max_connections}'.
+%% `ssl' is `undefined' (cleartext) or
+%% `#{certfile, keyfile, cacertfile => _}'.
 %% `EngineConfig' is passed verbatim to {@link barrel_mcp_http_engine:handle/6}.
 -spec start(atom(), map(), barrel_mcp_http_engine:config()) ->
     {ok, pid()} | {error, term()}.
@@ -94,13 +102,17 @@ listener_init(Parent, Name, ListenOpts, EngineConfig) ->
                     Handler = make_handler(EngineConfig),
                     N = maps:get(acceptors, ListenOpts,
                                  max(2, erlang:system_info(schedulers))),
+                    Max = maps:get(max_connections, ListenOpts,
+                                   ?DEFAULT_MAX_CONNECTIONS),
+                    Counter = atomics:new(1, [{signed, false}]),
                     Listener = self(),
                     _ = [spawn_link(fun() ->
-                                        acceptor_loop(LSock, Transport, Handler, Listener)
+                                        acceptor_loop(LSock, Transport, Handler,
+                                                      Listener, Counter, Max)
                                     end)
                          || _ <- lists:seq(1, N)],
                     Parent ! {self(), {ok, self()}},
-                    listener_loop(LSock, Transport);
+                    listener_loop(LSock, Transport, Counter);
                 _ ->
                     close_listen(Transport, LSock),
                     Parent ! {self(), {error, {already_started, Name}}}
@@ -109,7 +121,7 @@ listener_init(Parent, Name, ListenOpts, EngineConfig) ->
             Parent ! {self(), {error, Reason}}
     end.
 
-listener_loop(LSock, Transport) ->
+listener_loop(LSock, Transport, Counter) ->
     receive
         {stop, From, Ref} ->
             %% Close the listen socket (unblocks acceptors) and exit
@@ -118,11 +130,23 @@ listener_loop(LSock, Transport) ->
             close_listen(Transport, LSock),
             From ! {Ref, ok},
             exit(shutdown);
+        {track, Pid} ->
+            %% Monitor each accepted connection so its slot is released
+            %% on termination, however the process dies. The connection
+            %% owner does not trap exits (a linked `h1_connection'
+            %% stopping with `{shutdown, _}' would kill it), so it
+            %% cannot reliably release the slot itself.
+            _ = monitor(process, Pid),
+            listener_loop(LSock, Transport, Counter);
+        {'DOWN', _Ref, process, _Pid, _Reason} ->
+            atomics:sub(Counter, 1, 1),
+            listener_loop(LSock, Transport, Counter);
         {'EXIT', _Pid, _Reason} ->
-            %% A connection or acceptor process exited; ignore.
-            listener_loop(LSock, Transport);
+            %% A connection or acceptor process exited; ignore (the
+            %% slot is released by the matching `DOWN' above).
+            listener_loop(LSock, Transport, Counter);
         _Other ->
-            listener_loop(LSock, Transport)
+            listener_loop(LSock, Transport, Counter)
     end.
 
 listen(ListenOpts) ->
@@ -158,16 +182,29 @@ close_listen(ssl, LSock) -> _ = ssl:close(LSock), ok.
 %% Acceptor
 %%====================================================================
 
-acceptor_loop(LSock, Transport, Handler, Listener) ->
+acceptor_loop(LSock, Transport, Handler, Listener, Counter, Max) ->
     case do_accept(Transport, LSock) of
         {ok, Socket} ->
-            start_connection(Socket, Transport, Handler, Listener),
-            acceptor_loop(LSock, Transport, Handler, Listener);
+            _ = case atomics:add_get(Counter, 1, 1) > Max of
+                false ->
+                    Pid = start_connection(Socket, Transport, Handler, Listener),
+                    %% Hand the pid to the listener to monitor; it
+                    %% releases the slot on the connection's `DOWN'.
+                    Listener ! {track, Pid};
+                true ->
+                    %% At capacity: undo the reservation and drop the
+                    %% connection so a flood cannot exhaust resources.
+                    %% The brief backoff bounds the accept/close churn.
+                    atomics:sub(Counter, 1, 1),
+                    close(Transport, Socket),
+                    timer:sleep(?ACCEPT_ERROR_BACKOFF)
+            end,
+            acceptor_loop(LSock, Transport, Handler, Listener, Counter, Max);
         {error, closed} ->
             ok;
         {error, _Reason} ->
             timer:sleep(?ACCEPT_ERROR_BACKOFF),
-            acceptor_loop(LSock, Transport, Handler, Listener)
+            acceptor_loop(LSock, Transport, Handler, Listener, Counter, Max)
     end.
 
 do_accept(gen_tcp, LSock) -> gen_tcp:accept(LSock, infinity);
@@ -186,7 +223,7 @@ start_connection(Socket, Transport, Handler, Listener) ->
             Pid ! {socket_failed, Reason},
             close(Transport, Socket)
     end,
-    ok.
+    Pid.
 
 transfer(gen_tcp, Socket, Pid) -> gen_tcp:controlling_process(Socket, Pid);
 transfer(ssl, Socket, Pid) -> ssl:controlling_process(Socket, Pid).
@@ -202,6 +239,8 @@ connection_init(Transport, Handler, Listener) ->
     %% Link to the listener so a `stop' (listener exits `shutdown')
     %% terminates this connection too. The listener traps exits, so
     %% our own crash is absorbed there rather than killing the pool.
+    %% The listener also monitors us and releases our connection slot
+    %% on `DOWN' (see {@link listener_loop/3}).
     link(Listener),
     receive
         {socket_ready, Socket} ->
