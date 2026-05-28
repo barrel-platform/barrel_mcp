@@ -31,7 +31,7 @@ init_per_suite(Config) ->
     Config.
 
 end_per_suite(_Config) ->
-    catch barrel_mcp:stop_http_stream(),
+    try barrel_mcp:stop_http_stream() catch _:_ -> ok end,
     application:unset_env(barrel_mcp, roots_changed_handler),
     application:stop(barrel_mcp),
     ok.
@@ -41,7 +41,7 @@ init_per_testcase(TC, Config) ->
     [{port, Port} | Config].
 
 end_per_testcase(_TC, _Config) ->
-    catch barrel_mcp:stop_http_stream(),
+    try barrel_mcp:stop_http_stream() catch _:_ -> ok end,
     application:unset_env(barrel_mcp, roots_changed_handler),
     timer:sleep(50),
     ok.
@@ -100,7 +100,7 @@ register_observer(Pid) ->
     persistent_term:put({?MODULE, observer}, Pid).
 
 unregister_observer() ->
-    catch persistent_term:erase({?MODULE, observer}),
+    try persistent_term:erase({?MODULE, observer}) catch _:_ -> ok end,
     ok.
 
 observer() ->
@@ -110,7 +110,7 @@ observer() ->
 
 wait_ready(_Pid, 0) -> {error, not_ready};
 wait_ready(Pid, N) ->
-    case catch barrel_mcp_client:server_capabilities(Pid) of
+    case (try barrel_mcp_client:server_capabilities(Pid) catch _:_ -> error end) of
         {ok, _} -> ok;
         _ ->
             timer:sleep(100),

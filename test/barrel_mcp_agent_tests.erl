@@ -23,7 +23,7 @@ agent_test_() ->
     end}.
 
 setup() ->
-    catch application:stop(barrel_mcp),
+    try application:stop(barrel_mcp) catch _:_ -> ok end,
     {ok, _} = application:ensure_all_started(barrel_mcp),
     ok.
 

@@ -22,7 +22,7 @@ init_per_suite(Config) ->
     Config.
 
 end_per_suite(_Config) ->
-    catch barrel_mcp_http_stream:stop(),
+    try barrel_mcp_http_stream:stop() catch _:_ -> ok end,
     application:stop(barrel_mcp),
     ok.
 

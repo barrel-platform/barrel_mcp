@@ -517,7 +517,7 @@ common_handler(info, {'EXIT', _, _}, _Data) ->
     keep_state_and_data;
 common_handler(cast, close, Data) ->
     case Data#data.transport of
-        {Mod, Pid} -> catch Mod:close(Pid);
+        {Mod, Pid} -> try Mod:close(Pid) catch _:_ -> ok end;
         _ -> ok
     end,
     {stop, normal, Data};
@@ -668,7 +668,7 @@ notify_progress(Params, Data) ->
 build_initialize_params(#data{spec = Spec}) ->
     ClientInfo0 = maps:get(client_info, Spec,
                            #{<<"name">> => <<"barrel_mcp_client">>,
-                             <<"version">> => <<"2.0.2">>}),
+                             <<"version">> => <<"2.1.0">>}),
     ClientInfo = normalize_keys(ClientInfo0),
     Caps = capabilities_to_wire(maps:get(capabilities, Spec, #{})),
     Version = maps:get(protocol_version, Spec, ?MCP_CLIENT_PROTOCOL_VERSION),
@@ -865,7 +865,7 @@ maybe_close_on_ping_failures(Data, _Id) ->
     case Data#data.ping_failures >= ping_failure_threshold(Data) of
         true ->
             case Data#data.transport of
-                {Mod, TPid} -> catch Mod:close(TPid);
+                {Mod, TPid} -> try Mod:close(TPid) catch _:_ -> ok end;
                 _ -> ok
             end,
             {stop, ping_failed};
@@ -963,11 +963,11 @@ del_sub(Uri, Pid, Data) ->
 terminate(Reason, _State,
           #data{handler_mod = Mod, handler_state = HS, transport = T}) ->
     case T of
-        {Tmod, Pid} -> catch Tmod:close(Pid);
+        {Tmod, Pid} -> try Tmod:close(Pid) catch _:_ -> ok end;
         _ -> ok
     end,
     case erlang:function_exported(Mod, terminate, 2) of
-        true -> catch Mod:terminate(Reason, HS);
+        true -> try Mod:terminate(Reason, HS) catch _:_ -> ok end;
         false -> ok
     end,
     ok.

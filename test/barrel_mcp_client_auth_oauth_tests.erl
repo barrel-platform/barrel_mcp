@@ -122,7 +122,7 @@ setup_mock() ->
     ok.
 
 cleanup_mock(_) ->
-    catch cowboy:stop_listener(?MODULE),
+    try cowboy:stop_listener(?MODULE) catch _:_ -> ok end,
     ok.
 
 %% Cowboy handler used as a tiny mock authorization server.

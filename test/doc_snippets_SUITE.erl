@@ -45,7 +45,7 @@ collect(Port, Acc) ->
         {Port, {data, D}} -> collect(Port, <<Acc/binary, D/binary>>);
         {Port, {exit_status, S}} -> {S, binary_to_list(Acc)}
     after 60000 ->
-        catch port_close(Port),
+        try port_close(Port) catch _:_ -> ok end,
         {1, "snippet_check: timed out"}
     end.
 

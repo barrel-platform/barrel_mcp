@@ -106,7 +106,7 @@ handle_info(_Msg, State) ->
 terminate(_Reason, #state{port = Port, owner = Owner}) ->
     case Port of
         P when is_port(P) ->
-            catch port_close(P);
+            try port_close(P) catch _:_ -> ok end;
         _ ->
             ok
     end,

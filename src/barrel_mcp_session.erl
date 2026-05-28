@@ -662,8 +662,8 @@ handle_call({record_in_flight, SessionId, RequestId, Worker, Waiter},
 handle_call({cancel_in_flight, SessionId, RequestId}, _From, State) ->
     case ets:lookup(?INFLIGHT_TABLE, {SessionId, RequestId}) of
         [{_, #in_flight{worker_pid = W, waiter_pid = Wt}}] ->
-            (catch W ! {cancel, RequestId}),
-            (catch Wt ! {cancelled, RequestId}),
+            _ = (try W ! {cancel, RequestId} catch _:_ -> ok end),
+            _ = (try Wt ! {cancelled, RequestId} catch _:_ -> ok end),
             true = ets:delete(?INFLIGHT_TABLE, {SessionId, RequestId});
         [] -> ok
     end,

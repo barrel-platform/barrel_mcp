@@ -70,7 +70,7 @@ ensure_server(Port) ->
 
 wait_ready(_Pid, 0) -> {error, not_ready};
 wait_ready(Pid, N) ->
-    case catch barrel_mcp_client:server_capabilities(Pid) of
+    case (try barrel_mcp_client:server_capabilities(Pid) catch _:_ -> error end) of
         {ok, _} -> ok;
         _ ->
             timer:sleep(100),

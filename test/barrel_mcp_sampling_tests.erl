@@ -378,7 +378,7 @@ test_notify_log_invalid_dropped() ->
 
 setup() ->
     %% Restart application to get a clean ETS state.
-    catch application:stop(barrel_mcp),
+    try application:stop(barrel_mcp) catch _:_ -> ok end,
     {ok, _} = application:ensure_all_started(barrel_mcp),
     ok.
 

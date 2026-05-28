@@ -624,7 +624,7 @@ sse_loop(Responder, SessionId) ->
     end.
 
 sse_cleanup(Responder, SessionId) ->
-    catch barrel_mcp_session:set_sse_pid(SessionId, undefined),
+    _ = (try barrel_mcp_session:set_sse_pid(SessionId, undefined) catch _:_ -> ok end),
     _ = stream_end(Responder),
     ok.
 
