@@ -46,7 +46,7 @@ setup() ->
     ok.
 
 cleanup(_) ->
-    catch barrel_mcp:stop_http_stream(),
+    try barrel_mcp:stop_http_stream() catch _:_ -> ok end,
     barrel_mcp:unreg_tool(<<"test_tool">>),
     ok.
 

@@ -28,8 +28,9 @@ setup() ->
     ok.
 
 cleanup(_) ->
-    catch barrel_mcp_http_stream:stop(),
-    [catch barrel_mcp:stop_client(Id) || {Id, _} <- barrel_mcp:list_clients()],
+    try barrel_mcp_http_stream:stop() catch _:_ -> ok end,
+    [try barrel_mcp:stop_client(Id) catch _:_ -> ok end
+     || {Id, _} <- barrel_mcp:list_clients()],
     ok.
 
 test_start() ->

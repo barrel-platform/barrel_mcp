@@ -504,7 +504,7 @@ ready({call, From}, _, _Data) ->
 
 %% @private
 terminate(_Reason, _State, _Data) ->
-    catch persistent_term:erase(?REGISTRY_KEY),
+    try persistent_term:erase(?REGISTRY_KEY) catch _:_ -> ok end,
     ok.
 
 %%====================================================================

@@ -81,9 +81,9 @@ init_per_suite(Config) ->
     Config.
 
 end_per_suite(_Config) ->
-    catch barrel_mcp:stop_http_stream(),
-    catch cowboy:stop_listener(?AS_LISTENER),
-    catch barrel_mcp_registry:unreg(tool, <<"echo">>),
+    try barrel_mcp:stop_http_stream() catch _:_ -> ok end,
+    try cowboy:stop_listener(?AS_LISTENER) catch _:_ -> ok end,
+    try barrel_mcp_registry:unreg(tool, <<"echo">>) catch _:_ -> ok end,
     application:stop(barrel_mcp),
     ok.
 
@@ -213,7 +213,7 @@ json_encode(M) -> iolist_to_binary(json:encode(M)).
 
 wait_ready(_Pid, 0) -> {error, not_ready};
 wait_ready(Pid, N) ->
-    case catch barrel_mcp_client:server_capabilities(Pid) of
+    case (try barrel_mcp_client:server_capabilities(Pid) catch _:_ -> error end) of
         {ok, _} -> ok;
         _ ->
             timer:sleep(100),

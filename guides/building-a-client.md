@@ -75,7 +75,7 @@ Every key is documented below.
 | Key | Type | Default | Effect |
 | --- | --- | --- | --- |
 | `transport` | `{http, Url}` \| `{stdio, #{command, args}}` | required | Which transport to open. |
-| `client_info` | `#{name, version}` | `#{name => <<"barrel_mcp_client">>, version => <<"2.0.2">>}` | Sent in `initialize`. |
+| `client_info` | `#{name, version}` | `#{name => <<"barrel_mcp_client">>, version => <<"2.1.0">>}` | Sent in `initialize`. |
 | `capabilities` | map | `#{}` | Client capabilities to declare. Booleans become spec-shape objects on the wire (e.g. `#{sampling => true}` becomes `#{<<"sampling">> => #{}}`). |
 | `handler` | `{Mod, Args}` | `{barrel_mcp_client_handler_default, []}` | Module implementing `barrel_mcp_client_handler` to handle server-initiated requests and notifications. |
 | `auth` | `none` \| `{bearer, Token}` \| `{oauth, Config}` | `none` | Authentication. See section 14. |

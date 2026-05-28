@@ -32,7 +32,7 @@ setup_loopback() ->
     ok.
 
 cleanup_loopback(_) ->
-    catch barrel_mcp_http_stream:stop(),
+    try barrel_mcp_http_stream:stop() catch _:_ -> ok end,
     ok.
 
 test_ping_keeps_alive() ->
@@ -85,7 +85,7 @@ start_client(Extras) ->
 
 wait_ready(_Pid, 0) -> error(client_not_ready);
 wait_ready(Pid, N) ->
-    case catch barrel_mcp_client:server_capabilities(Pid) of
+    case (try barrel_mcp_client:server_capabilities(Pid) catch _:_ -> error end) of
         {ok, _} -> ok;
         _ ->
             timer:sleep(100),

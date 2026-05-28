@@ -48,7 +48,7 @@ init_per_suite(Config) ->
     Config.
 
 end_per_suite(_Config) ->
-    catch barrel_mcp:stop_http_stream(),
+    try barrel_mcp:stop_http_stream() catch _:_ -> ok end,
     application:stop(barrel_mcp),
     ok.
 
@@ -67,7 +67,7 @@ init_per_testcase(TC, Config) ->
     [{port, Port} | Config].
 
 end_per_testcase(_TC, _Config) ->
-    catch barrel_mcp:stop_http_stream(),
+    try barrel_mcp:stop_http_stream() catch _:_ -> ok end,
     timer:sleep(200),
     ok.
 
@@ -275,7 +275,7 @@ long_running_cancel_signals_worker(Config) ->
     %% instead, poll the task store until the status is
     %% `cancelled', proving the wire path completed.
     wait_until_cancelled(SessionId, TaskId, 50),
-    catch unregister(cancel_observer_for_test),
+    try unregister(cancel_observer_for_test) catch _:_ -> ok end,
     ok = barrel_mcp_registry:unreg(tool, <<"cancellable">>),
     ok.
 

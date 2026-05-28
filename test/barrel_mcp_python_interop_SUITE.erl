@@ -52,7 +52,7 @@ init_per_suite(Config) ->
     end.
 
 end_per_suite(_Config) ->
-    catch barrel_mcp:stop_http_stream(),
+    try barrel_mcp:stop_http_stream() catch _:_ -> ok end,
     application:stop(barrel_mcp),
     ok.
 
@@ -79,7 +79,7 @@ python_client_against_erlang_server(Config) ->
         _ ->
             ct:fail({python_client_failed, Status, Output})
     end,
-    catch barrel_mcp:stop_http_stream(),
+    try barrel_mcp:stop_http_stream() catch _:_ -> ok end,
     cleanup_fixture(),
     ok.
 
@@ -236,25 +236,27 @@ ensure_fixture() ->
     ok.
 
 cleanup_fixture() ->
-    catch barrel_mcp_registry:unreg(tool, <<"echo">>),
-    catch barrel_mcp_registry:unreg(tool, <<"slow_echo">>),
-    catch barrel_mcp_registry:unreg(tool, <<"trigger_update">>),
-    catch barrel_mcp_registry:unreg(tool, <<"ask_llm">>),
-    catch barrel_mcp_registry:unreg(tool, <<"ask_user">>),
-    catch barrel_mcp_registry:unreg(tool, <<"list_roots">>),
-    catch barrel_mcp_registry:unreg(tool, <<"progress_echo">>),
-    catch barrel_mcp_registry:unreg(tool, <<"structured">>),
-    catch barrel_mcp_registry:unreg(tool, <<"erroring">>),
-    catch barrel_mcp_registry:unreg(tool, <<"churn_registry">>),
-    catch barrel_mcp_registry:unreg(tool, <<"cancellable">>),
-    catch barrel_mcp_registry:unreg(tool, <<"churned">>),
-    catch barrel_mcp_registry:unreg(resource, <<"greeting">>),
-    catch barrel_mcp_registry:unreg(resource_template, <<"file_template">>),
-    catch barrel_mcp_registry:unreg(prompt, <<"hello_prompt">>),
-    catch barrel_mcp:unreg_completion({prompt, <<"hello_prompt">>,
-                                                <<"who">>}),
-    [catch barrel_mcp_registry:unreg(tool,
+    try barrel_mcp_registry:unreg(tool, <<"echo">>) catch _:_ -> ok end,
+    try barrel_mcp_registry:unreg(tool, <<"slow_echo">>) catch _:_ -> ok end,
+    try barrel_mcp_registry:unreg(tool, <<"trigger_update">>) catch _:_ -> ok end,
+    try barrel_mcp_registry:unreg(tool, <<"ask_llm">>) catch _:_ -> ok end,
+    try barrel_mcp_registry:unreg(tool, <<"ask_user">>) catch _:_ -> ok end,
+    try barrel_mcp_registry:unreg(tool, <<"list_roots">>) catch _:_ -> ok end,
+    try barrel_mcp_registry:unreg(tool, <<"progress_echo">>) catch _:_ -> ok end,
+    try barrel_mcp_registry:unreg(tool, <<"structured">>) catch _:_ -> ok end,
+    try barrel_mcp_registry:unreg(tool, <<"erroring">>) catch _:_ -> ok end,
+    try barrel_mcp_registry:unreg(tool, <<"churn_registry">>) catch _:_ -> ok end,
+    try barrel_mcp_registry:unreg(tool, <<"cancellable">>) catch _:_ -> ok end,
+    try barrel_mcp_registry:unreg(tool, <<"churned">>) catch _:_ -> ok end,
+    try barrel_mcp_registry:unreg(resource, <<"greeting">>) catch _:_ -> ok end,
+    try barrel_mcp_registry:unreg(resource_template, <<"file_template">>) catch _:_ -> ok end,
+    try barrel_mcp_registry:unreg(prompt, <<"hello_prompt">>) catch _:_ -> ok end,
+    try barrel_mcp:unreg_completion({prompt, <<"hello_prompt">>,
+                                     <<"who">>})
+    catch _:_ -> ok end,
+    [try barrel_mcp_registry:unreg(tool,
               iolist_to_binary(io_lib:format("dummy_~3..0B", [N])))
+      catch _:_ -> ok end
      || N <- lists:seq(1, 60)],
     ok.
 
@@ -344,7 +346,7 @@ registry_churn_tool(_) ->
         input_schema => #{<<"type">> => <<"object">>}
     }),
     timer:sleep(20),
-    catch barrel_mcp_registry:unreg(tool, <<"churned">>),
+    try barrel_mcp_registry:unreg(tool, <<"churned">>) catch _:_ -> ok end,
     <<"churned">>.
 
 %% Cooperative cancel: arity-2 worker watches its mailbox for
@@ -447,13 +449,13 @@ collect(Port, Acc) ->
         {Port, {exit_status, Status}} ->
             {Status, lists:flatten(lists:reverse(Acc))}
     after 60000 ->
-        catch port_close(Port),
+        try port_close(Port) catch _:_ -> ok end,
         {timeout, lists:flatten(lists:reverse(Acc))}
     end.
 
 wait_ready(_Pid, 0) -> {error, not_ready};
 wait_ready(Pid, N) ->
-    case catch barrel_mcp_client:server_capabilities(Pid) of
+    case (try barrel_mcp_client:server_capabilities(Pid) catch _:_ -> error end) of
         {ok, _} -> ok;
         _ ->
             timer:sleep(100),

@@ -133,12 +133,12 @@ handle_call({cancel, SessionId, TaskId}, _From, State) ->
     %% the stored status. Arity-1 handlers run to completion;
     %% their result is dropped because the task is already in a
     %% terminal state.
-    case ets:lookup(?TABLE, {SessionId, TaskId}) of
-        [{_, #task{worker_pid = Pid, request_id = ReqId}}]
-                when is_pid(Pid) ->
-            (catch Pid ! {cancel, ReqId});
-        _ -> ok
-    end,
+    _ = case ets:lookup(?TABLE, {SessionId, TaskId}) of
+            [{_, #task{worker_pid = Pid, request_id = ReqId}}]
+                    when is_pid(Pid) ->
+                try Pid ! {cancel, ReqId} catch _:_ -> ok end;
+            _ -> ok
+        end,
     Reply = transition(SessionId, TaskId, cancelled, undefined, undefined),
     {reply, Reply, State};
 

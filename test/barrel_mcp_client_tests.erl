@@ -45,8 +45,8 @@ setup() ->
     ok.
 
 cleanup(_) ->
-    catch barrel_mcp_http_stream:stop(),
-    catch barrel_mcp_registry:unreg(tool, <<"test_tool">>),
+    try barrel_mcp_http_stream:stop() catch _:_ -> ok end,
+    try barrel_mcp_registry:unreg(tool, <<"test_tool">>) catch _:_ -> ok end,
     ok.
 
 test_handler(_Args) ->
@@ -136,7 +136,7 @@ start_client() ->
 
 wait_ready(_Pid, 0) -> error(client_not_ready);
 wait_ready(Pid, N) ->
-    case catch barrel_mcp_client:server_capabilities(Pid) of
+    case (try barrel_mcp_client:server_capabilities(Pid) catch _:_ -> error end) of
         {ok, _} -> ok;
         _ ->
             timer:sleep(100),

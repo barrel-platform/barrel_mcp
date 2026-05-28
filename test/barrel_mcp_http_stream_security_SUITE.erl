@@ -74,7 +74,7 @@ init_per_suite(Config) ->
     Config.
 
 end_per_suite(_Config) ->
-    catch barrel_mcp:stop_http_stream(),
+    try barrel_mcp:stop_http_stream() catch _:_ -> ok end,
     application:stop(barrel_mcp),
     ok.
 
@@ -83,7 +83,7 @@ init_per_testcase(TC, Config) ->
     [{port, Port} | Config].
 
 end_per_testcase(_TC, _Config) ->
-    catch barrel_mcp:stop_http_stream(),
+    try barrel_mcp:stop_http_stream() catch _:_ -> ok end,
     timer:sleep(50),
     ok.
 

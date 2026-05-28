@@ -97,7 +97,7 @@ listener_init(Parent, Name, ListenOpts, EngineConfig) ->
     process_flag(trap_exit, true),
     case listen(ListenOpts) of
         {ok, Transport, LSock} ->
-            case catch register(Name, self()) of
+            case (try register(Name, self()) catch _:_ -> error end) of
                 true ->
                     Handler = make_handler(EngineConfig),
                     N = maps:get(acceptors, ListenOpts,
@@ -274,10 +274,11 @@ run_h1(Socket, Transport, Handler) ->
                 ok ->
                     case h1_connection:activate(Conn) of
                         ok -> h1_loop(Conn, Handler);
-                        {error, _} -> catch h1_connection:close(Conn)
+                        {error, _} ->
+                            try h1_connection:close(Conn) catch _:_ -> ok end
                     end;
                 {error, _} ->
-                    catch h1_connection:close(Conn),
+                    try h1_connection:close(Conn) catch _:_ -> ok end,
                     close(Transport, Socket)
             end;
         {error, _Reason} ->
@@ -292,7 +293,7 @@ run_h2(Socket, Handler) ->
                     _ = h2_connection:activate(Conn),
                     h2_loop(Conn, Handler, #{});
                 {error, _} ->
-                    catch h2_connection:close(Conn),
+                    try h2_connection:close(Conn) catch _:_ -> ok end,
                     _ = ssl:close(Socket)
             end;
         {error, _Reason} ->
@@ -401,11 +402,13 @@ spawn_handler(Proto, Conn, StreamId, Method, Path, Headers, Handler) ->
             Class:Reason:Stack ->
                 logger:error("mcp http handler crash: ~p:~p~n~p",
                              [Class, Reason, Stack]),
-                catch Proto:send_response(Conn, StreamId, 500,
-                                          [{<<"content-type">>, <<"text/plain">>},
-                                           {<<"content-length">>, <<"21">>}]),
-                catch Proto:send_data(Conn, StreamId,
-                                      <<"Internal Server Error">>, true)
+                try Proto:send_response(Conn, StreamId, 500,
+                                        [{<<"content-type">>, <<"text/plain">>},
+                                         {<<"content-length">>, <<"21">>}])
+                catch _:_ -> ok end,
+                try Proto:send_data(Conn, StreamId,
+                                    <<"Internal Server Error">>, true)
+                catch _:_ -> ok end
         end
     end).
 

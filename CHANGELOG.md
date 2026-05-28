@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-05-28
+
+Erlang/OTP 29 support. No public API changes.
+
+### Changed
+
+- Support OTP 29; CI now runs on OTP 28 and 29 (dropped 27) with rebar3 3.27.
+- Replaced the deprecated bare `catch` operator with `try ... catch` throughout,
+  as OTP 29 deprecates `catch ...`.
+- Updated dependencies: `erlang_h1` 0.2.3, `h2` 0.6.1, `hackney` 4.0.3; test
+  deps `meck` 1.2.0 and `cowboy` 2.15.0.
+
 ## [2.0.2] - 2026-05-23
 
 A security release from a release-time review of the HTTP transport
