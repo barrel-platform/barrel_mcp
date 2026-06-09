@@ -29,7 +29,8 @@
     encode_error/3,
     decode_envelope/1,
     format_tool_result_external/1,
-    drive_async_plan/2
+    drive_async_plan/2,
+    drive_async_plan/3
 ]).
 
 %%====================================================================
@@ -551,6 +552,15 @@ format_tool_result_external(Result) ->
 %% in-flight entries for cancellation routing.
 -spec drive_async_plan(map(), timeout()) -> map().
 drive_async_plan(Plan, Timeout) ->
+    drive_async_plan(Plan, Timeout, undefined).
+
+%% @doc As {@link drive_async_plan/2}, but threads the authenticated
+%% principal (`AuthInfo', the auth provider's `authenticate/2' map) into
+%% the tool `Ctx' under `auth_info'. Transports that authenticate before
+%% driving the plan (the simple HTTP transport) pass it here; callers
+%% with no auth provider use the `/2' form and `auth_info' is `undefined'.
+-spec drive_async_plan(map(), timeout(), term()) -> map().
+drive_async_plan(Plan, Timeout, AuthInfo) ->
     Self = self(),
     RequestId = maps:get(request_id, Plan),
     Spawn = maps:get(spawn, Plan),
@@ -560,7 +570,8 @@ drive_async_plan(Plan, Timeout) ->
             progress_token => undefined,
             meta => Meta,
             emit_progress => fun(_, _, _) -> ok end,
-            reply_to => Self},
+            reply_to => Self,
+            auth_info => AuthInfo},
     _Pid = Spawn(Ctx),
     receive
         {tool_result, RequestId, Result} ->

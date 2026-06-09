@@ -13,7 +13,8 @@
     error_tool/1,
     map_result_tool/1,
     list_result_tool/1,
-    result_meta_tool/2
+    result_meta_tool/2,
+    auth_capture_tool/2
 ]).
 
 %%====================================================================
@@ -36,7 +37,11 @@ tools_test_() ->
         {"Tool annotations are surfaced in tools/list",
          fun test_tool_annotations/0},
         {"Tool returning {result_meta, _, _} surfaces _meta on the wire",
-         fun test_tool_result_meta/0}
+         fun test_tool_result_meta/0},
+        {"Arity-2 tool receives auth_info in Ctx",
+         fun test_tool_receives_auth_info/0},
+        {"Arity-1 tool is unaffected by auth_info in Ctx",
+         fun test_arity1_tool_ignores_auth_info/0}
      ]
     }.
 
@@ -79,6 +84,12 @@ result_meta_tool(_Args, Ctx) ->
     Inbound = maps:get(meta, Ctx, #{}),
     {result_meta, <<"ok">>,
      Inbound#{<<"echoedBy">> => <<"barrel_mcp">>}}.
+
+%% Arity-2 handler that records the `auth_info' it received in Ctx so
+%% the test can assert the authenticated principal was threaded through.
+auth_capture_tool(_Args, Ctx) ->
+    true = ets:insert(mcp_auth_capture, {auth, maps:get(auth_info, Ctx)}),
+    <<"ok">>.
 
 %%====================================================================
 %% Tests
@@ -274,3 +285,54 @@ test_tool_result_meta() ->
     ?assertEqual(<<"abc-123">>, maps:get(<<"requestId">>, Meta)),
     ?assertEqual(<<"barrel_mcp">>, maps:get(<<"echoedBy">>, Meta)),
     barrel_mcp_registry:unreg(tool, <<"meta_echo">>).
+
+test_tool_receives_auth_info() ->
+    %% An arity-2 tool must receive a Ctx whose `auth_info' equals the
+    %% map returned by the auth provider's authenticate/2. The capture
+    %% tool records it in ETS; drive_async_plan/3 threads it through.
+    ensure_capture_table(),
+    ok = barrel_mcp_registry:reg(tool, <<"auth_capture">>, ?MODULE,
+                                  auth_capture_tool, #{}),
+    Expected = #{subject => <<"user:123">>, scopes => [<<"read">>]},
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"tools/call">>,
+        <<"params">> => #{<<"name">> => <<"auth_capture">>,
+                          <<"arguments">> => #{}}
+    },
+    {async, Plan} = barrel_mcp_protocol:handle(Request),
+    _Resp = barrel_mcp_protocol:drive_async_plan(Plan, 2000, Expected),
+    ?assertEqual(Expected, captured_auth_info()),
+    barrel_mcp_registry:unreg(tool, <<"auth_capture">>).
+
+test_arity1_tool_ignores_auth_info() ->
+    %% Adding auth_info to Ctx must not affect arity-1 handlers, which
+    %% are dispatched as Mod:Fun(Args) and never see Ctx.
+    ok = barrel_mcp_registry:reg(tool, <<"echo1">>, ?MODULE, echo_tool, #{}),
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"tools/call">>,
+        <<"params">> => #{<<"name">> => <<"echo1">>,
+                          <<"arguments">> => #{<<"input">> => <<"hi">>}}
+    },
+    {async, Plan} = barrel_mcp_protocol:handle(Request),
+    Resp = barrel_mcp_protocol:drive_async_plan(Plan, 2000,
+                                                #{subject => <<"user:123">>}),
+    [Block | _] = maps:get(<<"content">>, maps:get(<<"result">>, Resp)),
+    ?assertEqual(<<"Echo: hi">>, maps:get(<<"text">>, Block)),
+    barrel_mcp_registry:unreg(tool, <<"echo1">>).
+
+ensure_capture_table() ->
+    case ets:info(mcp_auth_capture) of
+        undefined -> ets:new(mcp_auth_capture, [named_table, public, set]);
+        _ -> ets:delete_all_objects(mcp_auth_capture)
+    end,
+    ok.
+
+captured_auth_info() ->
+    case ets:lookup(mcp_auth_capture, auth) of
+        [{auth, Info}] -> Info;
+        [] -> undefined
+    end.
