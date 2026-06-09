@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-06-09
+
+Threads the authenticated principal into tool handlers.
+
+### Added
+
+- Arity-2 tool handlers (`Mod:Fun(Args, Ctx)`) now receive the auth
+  provider's `authenticate/2` result in `Ctx` under `auth_info`, so
+  owner-scoped tools can identify the caller. Arity-1 handlers
+  (`Mod:Fun(Args)`) are unchanged. With `barrel_mcp_auth_none` the value
+  is the anonymous principal; on paths with no auth provider (stdio) it
+  is `undefined`.
+- `barrel_mcp_protocol:drive_async_plan/3`, which threads `auth_info`
+  into the synchronous tool-call path. `drive_async_plan/2` is retained
+  and delegates with `auth_info` set to `undefined`.
+
 ## [2.1.0] - 2026-05-28
 
 Erlang/OTP 29 support. No public API changes.
