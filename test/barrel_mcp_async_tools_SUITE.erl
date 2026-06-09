@@ -12,17 +12,19 @@
          init_per_testcase/2, end_per_testcase/2]).
 -export([cancel_returns_empty_body/1,
          progress_emits_events/1,
-         tool_error_returns_isError/1]).
+         tool_error_returns_isError/1,
+         auth_info_passed_to_tool/1]).
 
 %% Tool handlers used by the suite.
--export([slow_tool/2, progress_tool/2, error_tool/1]).
+-export([slow_tool/2, progress_tool/2, error_tool/1, whoami_tool/2]).
 
 -define(BASE_PORT, 22200).
 
 all() -> [
     cancel_returns_empty_body,
     progress_emits_events,
-    tool_error_returns_isError
+    tool_error_returns_isError,
+    auth_info_passed_to_tool
 ].
 
 init_per_suite(Config) ->
@@ -167,6 +169,40 @@ tool_error_returns_isError(Config) ->
     ok.
 
 %%====================================================================
+%% auth_info threading
+%%====================================================================
+
+%% A configured auth provider's authenticate/2 map must reach the
+%% arity-2 tool's Ctx under auth_info, end to end through the engine
+%% async path.
+auth_info_passed_to_tool(Config) ->
+    Port = ?config(port, Config),
+    {ok, _} = barrel_mcp:start_http_stream(#{
+        port => Port,
+        session_enabled => true,
+        auth => #{provider => barrel_mcp_auth_apikey,
+                  provider_opts => #{keys => #{<<"key-123">> =>
+                      #{subject => <<"user1">>, scopes => [<<"read">>]}}}}}),
+    ok = barrel_mcp_registry:reg(tool, <<"whoami">>, ?MODULE, whoami_tool, #{}),
+
+    {200, IH, _} = post_init_auth(Port, <<"key-123">>),
+    SessionId = proplists:get_value(<<"mcp-session-id">>, IH),
+
+    Body = tool_call_body(<<"whoami">>, 31),
+    {ok, 200, _, RB} = hackney:request(post, url(Port),
+        [{<<"content-type">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
+         {<<"mcp-session-id">>, SessionId},
+         {<<"x-api-key">>, <<"key-123">>}],
+        Body, [with_body]),
+    Resp = json:decode(RB),
+    Result = maps:get(<<"result">>, Resp),
+    [Block | _] = maps:get(<<"content">>, Result),
+    ?assertEqual(<<"user1">>, maps:get(<<"text">>, Block)),
+    ok = barrel_mcp_registry:unreg(tool, <<"whoami">>),
+    ok.
+
+%%====================================================================
 %% Tool implementations
 %%====================================================================
 
@@ -188,6 +224,12 @@ progress_tool(_Args, Ctx) ->
 
 error_tool(_Args) ->
     {tool_error, [#{<<"type">> => <<"text">>, <<"text">> => <<"boom">>}]}.
+
+%% Returns the authenticated subject from the Ctx auth_info so the
+%% test can assert the principal was threaded in.
+whoami_tool(_Args, Ctx) ->
+    AuthInfo = barrel_mcp_auth:get_auth_info(Ctx),
+    maps:get(subject, AuthInfo, <<"none">>).
 
 %%====================================================================
 %% Helpers
@@ -211,6 +253,27 @@ post_init(Port) ->
     {ok, S, H, B} = hackney:request(post, url(Port),
         [{<<"content-type">>, <<"application/json">>},
          {<<"accept">>, <<"application/json, text/event-stream">>}],
+        Body, [with_body]),
+    {S, H, B}.
+
+%% Like post_init/1 but presents an API key, for suites that configure
+%% an auth provider (initialize is authenticated like any other POST).
+post_init_auth(Port, ApiKey) ->
+    Body = json:encode(#{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"initialize">>,
+        <<"params">> => #{
+            <<"protocolVersion">> => <<"2025-11-25">>,
+            <<"capabilities">> => #{},
+            <<"clientInfo">> => #{<<"name">> => <<"async-suite">>,
+                                  <<"version">> => <<"1.0">>}
+        }
+    }),
+    {ok, S, H, B} = hackney:request(post, url(Port),
+        [{<<"content-type">>, <<"application/json">>},
+         {<<"accept">>, <<"application/json, text/event-stream">>},
+         {<<"x-api-key">>, ApiKey}],
         Body, [with_body]),
     {S, H, B}.
 

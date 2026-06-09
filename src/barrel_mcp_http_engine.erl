@@ -166,7 +166,8 @@ simple_post_authenticated(Headers, Body, Responder, Config, AuthInfo) ->
                 no_response ->
                     reply(Responder, 204, cors_headers(Headers, Config, #{}), <<>>);
                 {async, Plan} ->
-                    Result = barrel_mcp_protocol:drive_async_plan(Plan, 60000),
+                    Result = barrel_mcp_protocol:drive_async_plan(Plan, 60000,
+                                                                  AuthInfo),
                     reply_json(Headers, Responder, Config, 200, Result);
                 Result ->
                     reply_json(Headers, Responder, Config, 200, Result)
@@ -282,7 +283,7 @@ handle_dispatch(Headers, Responder, Config, SessionId, Request, AuthInfo) ->
                     reply(Responder, 202, Hdrs, <<>>);
                 {async, AsyncPlan} ->
                     handle_async_tool_call(Headers, Responder, Config, SessionId,
-                                           Request, AsyncPlan);
+                                           Request, AsyncPlan, AuthInfo);
                 Result ->
                     _ = maybe_capture_initialize_version(SessionId, Method, Result),
                     case wants_sse_response(Headers) of
@@ -305,7 +306,8 @@ handle_dispatch(Headers, Responder, Config, SessionId, Request, AuthInfo) ->
 %% Async tool calls
 %%====================================================================
 
-handle_async_tool_call(Headers, Responder, Config, SessionId, Request, AsyncPlan) ->
+handle_async_tool_call(Headers, Responder, Config, SessionId, Request, AsyncPlan,
+                       AuthInfo) ->
     RequestId = maps:get(request_id, AsyncPlan),
     Spawn = maps:get(spawn, AsyncPlan),
     Timeout = maps:get(timeout, AsyncPlan, 60000),
@@ -318,7 +320,8 @@ handle_async_tool_call(Headers, Responder, Config, SessionId, Request, AsyncPlan
     case LongRunning of
         true ->
             handle_long_running_call(Headers, Responder, Config, SessionId,
-                                     RequestId, ToolName, ProgressToken, Meta, Spawn);
+                                     RequestId, ToolName, ProgressToken, Meta,
+                                     Spawn, AuthInfo);
         false ->
             Ctx = #{
                 session_id => SessionId,
@@ -326,7 +329,8 @@ handle_async_tool_call(Headers, Responder, Config, SessionId, Request, AsyncPlan
                 progress_token => ProgressToken,
                 meta => Meta,
                 emit_progress => emit_progress_fun(SessionId, ProgressToken),
-                reply_to => Self
+                reply_to => Self,
+                auth_info => AuthInfo
             },
             WorkerPid = Spawn(Ctx),
             case SessionId of
@@ -350,7 +354,7 @@ is_long_running_tool(Name) ->
     end.
 
 handle_long_running_call(Headers, Responder, Config, SessionId, RequestId,
-                         ToolName, ProgressToken, Meta, Spawn) ->
+                         ToolName, ProgressToken, Meta, Spawn, AuthInfo) ->
     {ok, TaskId} = barrel_mcp_tasks:create(SessionId, ToolName, #{}),
     Collector = spawn_task_collector(SessionId, TaskId),
     Ctx = #{
@@ -359,7 +363,8 @@ handle_long_running_call(Headers, Responder, Config, SessionId, RequestId,
         progress_token => ProgressToken,
         meta => Meta,
         emit_progress => emit_progress_fun(SessionId, ProgressToken),
-        reply_to => Collector
+        reply_to => Collector,
+        auth_info => AuthInfo
     },
     Worker = Spawn(Ctx),
     _ = barrel_mcp_tasks:set_worker(SessionId, TaskId,
