@@ -15,7 +15,6 @@ test/interop/__pycache__/
 .claude/
 
 # Rebar3
-rebar.lock
 rebar3.crashdump
 
 # IDE/Editor
