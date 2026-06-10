@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.2] - 2026-06-10
+
+### Changed
+
+- Bump `h1` 0.6.0 -> 0.6.1.
+
 ## [2.2.1] - 2026-06-10
 
 Dependency refresh and tooling.
