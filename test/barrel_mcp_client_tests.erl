@@ -21,18 +21,16 @@
 %%====================================================================
 
 client_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     {timeout, 30, [
-         {"initialize handshake + capabilities", fun test_initialize/0},
-         {"list_tools includes registered tool", fun test_list_tools/0},
-         {"list_tools_all walks pagination", fun test_list_tools_all/0},
-         {"call_tool returns content", fun test_call_tool/0},
-         {"protocol version negotiates downward", fun test_version_downgrade/0},
-         {"tasks_list returns []", fun test_tasks_list/0},
-         {"close shuts down cleanly", fun test_close/0}
-     ]}}.
+    {setup, fun setup/0, fun cleanup/1,
+        {timeout, 30, [
+            {"initialize handshake + capabilities", fun test_initialize/0},
+            {"list_tools includes registered tool", fun test_list_tools/0},
+            {"list_tools_all walks pagination", fun test_list_tools_all/0},
+            {"call_tool returns content", fun test_call_tool/0},
+            {"protocol version negotiates downward", fun test_version_downgrade/0},
+            {"tasks_list returns []", fun test_tasks_list/0},
+            {"close shuts down cleanly", fun test_close/0}
+        ]}}.
 
 setup() ->
     {ok, _} = application:ensure_all_started(barrel_mcp),
@@ -45,8 +43,16 @@ setup() ->
     ok.
 
 cleanup(_) ->
-    try barrel_mcp_http_stream:stop() catch _:_ -> ok end,
-    try barrel_mcp_registry:unreg(tool, <<"test_tool">>) catch _:_ -> ok end,
+    try
+        barrel_mcp_http_stream:stop()
+    catch
+        _:_ -> ok
+    end,
+    try
+        barrel_mcp_registry:unreg(tool, <<"test_tool">>)
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 test_handler(_Args) ->
@@ -134,10 +140,18 @@ start_client() ->
     wait_ready(Pid, 30),
     {ok, Pid}.
 
-wait_ready(_Pid, 0) -> error(client_not_ready);
+wait_ready(_Pid, 0) ->
+    error(client_not_ready);
 wait_ready(Pid, N) ->
-    case (try barrel_mcp_client:server_capabilities(Pid) catch _:_ -> error end) of
-        {ok, _} -> ok;
+    case
+        (try
+            barrel_mcp_client:server_capabilities(Pid)
+        catch
+            _:_ -> error
+        end)
+    of
+        {ok, _} ->
+            ok;
         _ ->
             timer:sleep(100),
             wait_ready(Pid, N - 1)

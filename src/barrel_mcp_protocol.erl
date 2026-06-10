@@ -77,8 +77,11 @@ handle(Request) ->
 %% same error as the HTTP transport.
 -spec handle(map() | list(), map()) -> map() | no_response | {async, map()}.
 handle(L, _State) when is_list(L) ->
-    error_response(null, ?JSONRPC_INVALID_REQUEST,
-                   <<"Batch requests are not supported">>);
+    error_response(
+        null,
+        ?JSONRPC_INVALID_REQUEST,
+        <<"Batch requests are not supported">>
+    );
 handle(#{<<"jsonrpc">> := <<"2.0">>, <<"method">> := Method} = Request, State) ->
     Params = maps:get(<<"params">>, Request, #{}),
     case maps:find(<<"id">>, Request) of
@@ -91,8 +94,11 @@ handle(#{<<"jsonrpc">> := <<"2.0">>, <<"method">> := Method} = Request, State) -
         {ok, _BadId} ->
             %% MCP requires id to be a string or integer (and not
             %% null). Anything else is an Invalid Request.
-            error_response(null, ?JSONRPC_INVALID_REQUEST,
-                           <<"Invalid Request: id must be a string or integer">>)
+            error_response(
+                null,
+                ?JSONRPC_INVALID_REQUEST,
+                <<"Invalid Request: id must be a string or integer">>
+            )
     end;
 handle(#{<<"id">> := Id}, _State) when is_binary(Id); is_integer(Id) ->
     error_response(Id, ?JSONRPC_INVALID_REQUEST, <<"Invalid Request">>);
@@ -134,22 +140,27 @@ handle_request(<<"initialize">>, Params, Id, State) ->
     ServerName = application:get_env(barrel_mcp, server_name, <<"barrel">>),
     ServerVersion = application:get_env(barrel_mcp, server_version, <<"1.0.0">>),
     NegotiatedVersion = negotiate_protocol_version(
-                          maps:get(<<"protocolVersion">>, Params, undefined)),
+        maps:get(<<"protocolVersion">>, Params, undefined)
+    ),
     %% Persist client capabilities (notably `sampling') so the server can
     %% later issue server-to-client requests via barrel_mcp_session.
     %% Also persist the negotiated protocol_version on the session.
-    _ = case maps:find(session_id, State) of
-        {ok, SessionId} when is_binary(SessionId) ->
-            ClientCaps = maps:get(<<"capabilities">>, Params, #{}),
-            _ = barrel_mcp_session:set_client_capabilities(SessionId, ClientCaps),
-            _ = barrel_mcp_session:set_protocol_version(SessionId, NegotiatedVersion),
-            ok;
-        _ -> ok
-    end,
+    _ =
+        case maps:find(session_id, State) of
+            {ok, SessionId} when is_binary(SessionId) ->
+                ClientCaps = maps:get(<<"capabilities">>, Params, #{}),
+                _ = barrel_mcp_session:set_client_capabilities(SessionId, ClientCaps),
+                _ = barrel_mcp_session:set_protocol_version(SessionId, NegotiatedVersion),
+                ok;
+            _ ->
+                ok
+        end,
     BaseCaps = #{
         <<"tools">> => #{<<"listChanged">> => true},
-        <<"resources">> => #{<<"subscribe">> => true,
-                              <<"listChanged">> => true},
+        <<"resources">> => #{
+            <<"subscribe">> => true,
+            <<"listChanged">> => true
+        },
         <<"prompts">> => #{<<"listChanged">> => true},
         <<"logging">> => #{},
         %% Per the MCP tasks SEP (and as enforced by the
@@ -173,30 +184,33 @@ handle_request(<<"initialize">>, Params, Id, State) ->
             <<"version">> => ServerVersion
         }
     });
-
 handle_request(<<"ping">>, _Params, Id, _State) ->
     success_response(Id, #{});
-
 %% Tools
 handle_request(<<"tools/list">>, Params, Id, _State) ->
     Cursor = maps:get(<<"cursor">>, Params, undefined),
-    {Page, Next} = paginate(barrel_mcp_registry:all(tool), Cursor,
-                             fun({N, _}) -> N end),
-    Tools = lists:map(fun({Name, Handler}) ->
-        Base = #{
-            <<"name">> => Name,
-            <<"description">> => maps:get(description, Handler, <<>>),
-            <<"inputSchema">> => maps:get(input_schema, Handler, #{<<"type">> => <<"object">>})
-        },
-        with_optional_fields(Base, Handler, [
-            {<<"outputSchema">>, output_schema},
-            {<<"title">>, title},
-            {<<"icons">>, icons},
-            {<<"annotations">>, annotations}
-        ])
-    end, Page),
+    {Page, Next} = paginate(
+        barrel_mcp_registry:all(tool),
+        Cursor,
+        fun({N, _}) -> N end
+    ),
+    Tools = lists:map(
+        fun({Name, Handler}) ->
+            Base = #{
+                <<"name">> => Name,
+                <<"description">> => maps:get(description, Handler, <<>>),
+                <<"inputSchema">> => maps:get(input_schema, Handler, #{<<"type">> => <<"object">>})
+            },
+            with_optional_fields(Base, Handler, [
+                {<<"outputSchema">>, output_schema},
+                {<<"title">>, title},
+                {<<"icons">>, icons},
+                {<<"annotations">>, annotations}
+            ])
+        end,
+        Page
+    ),
     success_response(Id, with_next_cursor(#{<<"tools">> => Tools}, Next));
-
 handle_request(<<"tools/call">>, Params, Id, _State) ->
     Name = maps:get(<<"name">>, Params, <<>>),
     Args = maps:get(<<"arguments">>, Params, #{}),
@@ -212,7 +226,8 @@ handle_request(<<"tools/call">>, Params, Id, _State) ->
         meta => Meta,
         spawn => fun(Ctx) ->
             case barrel_mcp_registry:run_tool(Name, Args, Ctx) of
-                {ok, Pid} -> Pid;
+                {ok, Pid} ->
+                    Pid;
                 {error, _} = Err ->
                     %% Surface as if the worker reported it: the
                     %% transport then maps the error.
@@ -226,28 +241,37 @@ handle_request(<<"tools/call">>, Params, Id, _State) ->
         end
     },
     {async, Plan};
-
 %% Resources
 handle_request(<<"resources/list">>, Params, Id, _State) ->
     Cursor = maps:get(<<"cursor">>, Params, undefined),
-    {Page, Next} = paginate(barrel_mcp_registry:all(resource), Cursor,
-                             fun({N, _}) -> N end),
-    Resources = lists:map(fun({_Name, Handler}) ->
-        Base = #{
-            <<"uri">> => maps:get(uri, Handler, <<>>),
-            <<"name">> => maps:get(name, Handler, <<>>),
-            <<"description">> => maps:get(description, Handler, <<>>),
-            <<"mimeType">> => maps:get(mime_type, Handler, <<"text/plain">>)
-        },
-        with_optional_fields(Base, Handler, [
-            {<<"title">>, title},
-            {<<"icons">>, icons},
-            {<<"annotations">>, annotations}
-        ])
-    end, Page),
-    success_response(Id, with_next_cursor(#{<<"resources">> => Resources},
-                                            Next));
-
+    {Page, Next} = paginate(
+        barrel_mcp_registry:all(resource),
+        Cursor,
+        fun({N, _}) -> N end
+    ),
+    Resources = lists:map(
+        fun({_Name, Handler}) ->
+            Base = #{
+                <<"uri">> => maps:get(uri, Handler, <<>>),
+                <<"name">> => maps:get(name, Handler, <<>>),
+                <<"description">> => maps:get(description, Handler, <<>>),
+                <<"mimeType">> => maps:get(mime_type, Handler, <<"text/plain">>)
+            },
+            with_optional_fields(Base, Handler, [
+                {<<"title">>, title},
+                {<<"icons">>, icons},
+                {<<"annotations">>, annotations}
+            ])
+        end,
+        Page
+    ),
+    success_response(
+        Id,
+        with_next_cursor(
+            #{<<"resources">> => Resources},
+            Next
+        )
+    );
 handle_request(<<"resources/read">>, Params, Id, _State) ->
     Uri = maps:get(<<"uri">>, Params, <<>>),
     %% Exact-URI lookup first.
@@ -263,33 +287,44 @@ handle_request(<<"resources/read">>, Params, Id, _State) ->
                     Args = maps:merge(Params, Vars),
                     run_resource_read(resource_template, TplName, Args, Uri, Id);
                 nomatch ->
-                    error_response(Id, ?JSONRPC_METHOD_NOT_FOUND,
-                                   <<"Resource not found">>)
+                    error_response(
+                        Id,
+                        ?JSONRPC_METHOD_NOT_FOUND,
+                        <<"Resource not found">>
+                    )
             end
     end;
-
 handle_request(<<"resources/templates/list">>, Params, Id, _State) ->
     Cursor = maps:get(<<"cursor">>, Params, undefined),
-    {Page, Next} = paginate(barrel_mcp_registry:all(resource_template),
-                             Cursor, fun({N, _}) -> N end),
-    Templates = lists:map(fun({_Name, Handler}) ->
-        Base = #{
-            <<"uriTemplate">> => maps:get(uri_template, Handler, <<>>),
-            <<"name">> => maps:get(name, Handler, <<>>),
-            <<"description">> => maps:get(description, Handler, <<>>),
-            <<"mimeType">> => maps:get(mime_type, Handler, <<"text/plain">>)
-        },
-        Compact = maps:filter(fun(_K, V) -> V =/= <<>> end, Base),
-        with_optional_fields(Compact, Handler, [
-            {<<"title">>, title},
-            {<<"icons">>, icons},
-            {<<"annotations">>, annotations}
-        ])
-    end, Page),
-    success_response(Id, with_next_cursor(
-                           #{<<"resourceTemplates">> => Templates},
-                           Next));
-
+    {Page, Next} = paginate(
+        barrel_mcp_registry:all(resource_template),
+        Cursor,
+        fun({N, _}) -> N end
+    ),
+    Templates = lists:map(
+        fun({_Name, Handler}) ->
+            Base = #{
+                <<"uriTemplate">> => maps:get(uri_template, Handler, <<>>),
+                <<"name">> => maps:get(name, Handler, <<>>),
+                <<"description">> => maps:get(description, Handler, <<>>),
+                <<"mimeType">> => maps:get(mime_type, Handler, <<"text/plain">>)
+            },
+            Compact = maps:filter(fun(_K, V) -> V =/= <<>> end, Base),
+            with_optional_fields(Compact, Handler, [
+                {<<"title">>, title},
+                {<<"icons">>, icons},
+                {<<"annotations">>, annotations}
+            ])
+        end,
+        Page
+    ),
+    success_response(
+        Id,
+        with_next_cursor(
+            #{<<"resourceTemplates">> => Templates},
+            Next
+        )
+    );
 handle_request(<<"resources/subscribe">>, Params, Id, State) ->
     Uri = maps:get(<<"uri">>, Params, <<>>),
     case maps:find(session_id, State) of
@@ -297,10 +332,12 @@ handle_request(<<"resources/subscribe">>, Params, Id, State) ->
             barrel_mcp_session:subscribe_resource(SessionId, Uri),
             success_response(Id, #{});
         _ ->
-            error_response(Id, ?JSONRPC_INVALID_PARAMS,
-                           <<"Subscribe requires a session and a uri">>)
+            error_response(
+                Id,
+                ?JSONRPC_INVALID_PARAMS,
+                <<"Subscribe requires a session and a uri">>
+            )
     end;
-
 handle_request(<<"resources/unsubscribe">>, Params, Id, State) ->
     Uri = maps:get(<<"uri">>, Params, <<>>),
     case maps:find(session_id, State) of
@@ -308,36 +345,51 @@ handle_request(<<"resources/unsubscribe">>, Params, Id, State) ->
             barrel_mcp_session:unsubscribe_resource(SessionId, Uri),
             success_response(Id, #{});
         _ ->
-            error_response(Id, ?JSONRPC_INVALID_PARAMS,
-                           <<"Unsubscribe requires a session and a uri">>)
+            error_response(
+                Id,
+                ?JSONRPC_INVALID_PARAMS,
+                <<"Unsubscribe requires a session and a uri">>
+            )
     end;
-
 %% Prompts
 handle_request(<<"prompts/list">>, Params, Id, _State) ->
     Cursor = maps:get(<<"cursor">>, Params, undefined),
-    {Page, Next} = paginate(barrel_mcp_registry:all(prompt), Cursor,
-                             fun({N, _}) -> N end),
-    Prompts = lists:map(fun({Name, Handler}) ->
-        Base = #{
-            <<"name">> => Name,
-            <<"description">> => maps:get(description, Handler, <<>>),
-            <<"arguments">> => lists:map(fun(Arg) ->
-                #{
-                    <<"name">> => maps:get(name, Arg, <<>>),
-                    <<"description">> => maps:get(description, Arg, <<>>),
-                    <<"required">> => maps:get(required, Arg, false)
-                }
-            end, maps:get(arguments, Handler, []))
-        },
-        with_optional_fields(Base, Handler, [
-            {<<"title">>, title},
-            {<<"icons">>, icons},
-            {<<"annotations">>, annotations}
-        ])
-    end, Page),
-    success_response(Id, with_next_cursor(#{<<"prompts">> => Prompts},
-                                            Next));
-
+    {Page, Next} = paginate(
+        barrel_mcp_registry:all(prompt),
+        Cursor,
+        fun({N, _}) -> N end
+    ),
+    Prompts = lists:map(
+        fun({Name, Handler}) ->
+            Base = #{
+                <<"name">> => Name,
+                <<"description">> => maps:get(description, Handler, <<>>),
+                <<"arguments">> => lists:map(
+                    fun(Arg) ->
+                        #{
+                            <<"name">> => maps:get(name, Arg, <<>>),
+                            <<"description">> => maps:get(description, Arg, <<>>),
+                            <<"required">> => maps:get(required, Arg, false)
+                        }
+                    end,
+                    maps:get(arguments, Handler, [])
+                )
+            },
+            with_optional_fields(Base, Handler, [
+                {<<"title">>, title},
+                {<<"icons">>, icons},
+                {<<"annotations">>, annotations}
+            ])
+        end,
+        Page
+    ),
+    success_response(
+        Id,
+        with_next_cursor(
+            #{<<"prompts">> => Prompts},
+            Next
+        )
+    );
 handle_request(<<"prompts/get">>, Params, Id, _State) ->
     Name = maps:get(<<"name">>, Params, <<>>),
     Args = maps:get(<<"arguments">>, Params, #{}),
@@ -353,25 +405,24 @@ handle_request(<<"prompts/get">>, Params, Id, _State) ->
             log_handler_crash(prompt, Name, Id, Crash),
             error_response(Id, ?MCP_PROMPT_ERROR, <<"Internal prompt error">>)
     end;
-
 %% Tasks
 handle_request(<<"tasks/list">>, Params, Id, State) ->
     SessionId = maps:get(session_id, State, undefined),
     Cursor = maps:get(<<"cursor">>, Params, undefined),
     {ok, AllTasks} = barrel_mcp_tasks:list(SessionId, #{}),
-    {Page, Next} = paginate(AllTasks, Cursor,
-                             fun(T) -> maps:get(<<"taskId">>, T) end),
+    {Page, Next} = paginate(
+        AllTasks,
+        Cursor,
+        fun(T) -> maps:get(<<"taskId">>, T) end
+    ),
     success_response(Id, with_next_cursor(#{<<"tasks">> => Page}, Next));
-
 handle_request(<<"tasks/get">>, Params, Id, State) ->
     SessionId = maps:get(session_id, State, undefined),
     TaskId = maps:get(<<"taskId">>, Params, <<>>),
     case barrel_mcp_tasks:get(SessionId, TaskId) of
         {ok, Task} -> success_response(Id, Task);
-        {error, not_found} ->
-            error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
+        {error, not_found} -> error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
     end;
-
 handle_request(<<"tasks/cancel">>, Params, Id, State) ->
     SessionId = maps:get(session_id, State, undefined),
     TaskId = maps:get(<<"taskId">>, Params, <<>>),
@@ -386,7 +437,6 @@ handle_request(<<"tasks/cancel">>, Params, Id, State) ->
         {error, not_found} ->
             error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
     end;
-
 handle_request(<<"tasks/result">>, Params, Id, State) ->
     SessionId = maps:get(session_id, State, undefined),
     TaskId = maps:get(<<"taskId">>, Params, <<>>),
@@ -398,15 +448,20 @@ handle_request(<<"tasks/result">>, Params, Id, State) ->
             Err = maps:get(<<"error">>, T, <<"Task failed">>),
             error_response(Id, ?MCP_TOOL_ERROR, Err);
         {ok, #{<<"status">> := <<"cancelled">>}} ->
-            error_response(Id, ?JSONRPC_INVALID_PARAMS,
-                           <<"Task cancelled">>);
+            error_response(
+                Id,
+                ?JSONRPC_INVALID_PARAMS,
+                <<"Task cancelled">>
+            );
         {ok, #{<<"status">> := _}} ->
-            error_response(Id, ?JSONRPC_INVALID_PARAMS,
-                           <<"Task not yet complete">>);
+            error_response(
+                Id,
+                ?JSONRPC_INVALID_PARAMS,
+                <<"Task not yet complete">>
+            );
         {error, not_found} ->
             error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
     end;
-
 %% Completions
 handle_request(<<"completion/complete">>, Params, Id, _State) ->
     Ref = maps:get(<<"ref">>, Params, #{}),
@@ -419,41 +474,56 @@ handle_request(<<"completion/complete">>, Params, Id, _State) ->
         Key ->
             case barrel_mcp_registry:run_completion(Key, Value, #{}) of
                 {ok, {ok, Values}} ->
-                    success_response(Id, #{<<"completion">> =>
-                                            completion_payload(Values, false)});
+                    success_response(Id, #{
+                        <<"completion">> =>
+                            completion_payload(Values, false)
+                    });
                 {ok, {ok, Values, #{has_more := HasMore}}} ->
-                    success_response(Id, #{<<"completion">> =>
-                                            completion_payload(Values, HasMore)});
+                    success_response(Id, #{
+                        <<"completion">> =>
+                            completion_payload(Values, HasMore)
+                    });
                 {error, {not_found, _, _}} ->
                     success_response(Id, #{<<"completion">> => empty_completion()});
                 {error, Crash} ->
                     log_handler_crash(completion, Key, Id, Crash),
-                    error_response(Id, ?JSONRPC_INTERNAL_ERROR,
-                                   <<"Internal completion error">>)
+                    error_response(
+                        Id,
+                        ?JSONRPC_INTERNAL_ERROR,
+                        <<"Internal completion error">>
+                    )
             end
     end;
-
 %% Logging
 handle_request(<<"logging/setLevel">>, Params, Id, State) ->
     Level = maps:get(<<"level">>, Params, undefined),
     case {Level, maps:find(session_id, State)} of
         {undefined, _} ->
-            error_response(Id, ?JSONRPC_INVALID_PARAMS,
-                           <<"Missing required parameter: level">>);
+            error_response(
+                Id,
+                ?JSONRPC_INVALID_PARAMS,
+                <<"Missing required parameter: level">>
+            );
         {_, error} ->
             %% Stdio / no session — accept but no per-session storage.
             case barrel_mcp_session:log_level_priority(Level) of
                 error ->
-                    error_response(Id, ?JSONRPC_INVALID_PARAMS,
-                                   <<"Invalid log level">>);
+                    error_response(
+                        Id,
+                        ?JSONRPC_INVALID_PARAMS,
+                        <<"Invalid log level">>
+                    );
                 _ ->
                     success_response(Id, #{})
             end;
         {_, {ok, undefined}} ->
             case barrel_mcp_session:log_level_priority(Level) of
                 error ->
-                    error_response(Id, ?JSONRPC_INVALID_PARAMS,
-                                   <<"Invalid log level">>);
+                    error_response(
+                        Id,
+                        ?JSONRPC_INVALID_PARAMS,
+                        <<"Invalid log level">>
+                    );
                 _ ->
                     success_response(Id, #{})
             end;
@@ -462,17 +532,22 @@ handle_request(<<"logging/setLevel">>, Params, Id, State) ->
                 ok ->
                     success_response(Id, #{});
                 {error, invalid_level} ->
-                    error_response(Id, ?JSONRPC_INVALID_PARAMS,
-                                   <<"Invalid log level">>);
+                    error_response(
+                        Id,
+                        ?JSONRPC_INVALID_PARAMS,
+                        <<"Invalid log level">>
+                    );
                 {error, not_found} ->
                     success_response(Id, #{})
             end
     end;
-
 %% Unknown method
 handle_request(Method, _Params, Id, _State) ->
-    error_response(Id, ?JSONRPC_METHOD_NOT_FOUND,
-        <<"Method not found: ", Method/binary>>).
+    error_response(
+        Id,
+        ?JSONRPC_METHOD_NOT_FOUND,
+        <<"Method not found: ", Method/binary>>
+    ).
 
 %%====================================================================
 %% Notification Handlers
@@ -484,33 +559,34 @@ handle_notification(<<"notifications/initialized">>, _Params, _State) ->
 %% Legacy bare name kept for one release; older clients still send this.
 handle_notification(<<"initialized">>, _Params, _State) ->
     ok;
-
 handle_notification(<<"notifications/cancelled">>, Params, State) ->
     case maps:find(session_id, State) of
         {ok, SessionId} when is_binary(SessionId) ->
             case maps:find(<<"requestId">>, Params) of
                 {ok, RequestId} ->
                     barrel_mcp_session:cancel_in_flight(SessionId, RequestId);
-                error -> ok
+                error ->
+                    ok
             end;
-        _ -> ok
+        _ ->
+            ok
     end;
-
 handle_notification(<<"notifications/progress">>, _Params, _State) ->
     %% The server doesn't currently emit anything special on inbound
     %% client-side progress notifications (used for client→server
     %% requests, which we don't have). Acknowledge silently.
     ok;
-
 handle_notification(<<"notifications/roots/list_changed">>, Params, State) ->
     case application:get_env(barrel_mcp, roots_changed_handler) of
         {ok, {Mod, Fun}} ->
-            try Mod:Fun(Params, State)
-            catch _:_ -> ok
+            try
+                Mod:Fun(Params, State)
+            catch
+                _:_ -> ok
             end;
-        _ -> ok
+        _ ->
+            ok
     end;
-
 handle_notification(_, _Params, _State) ->
     ok.
 
@@ -565,53 +641,85 @@ drive_async_plan(Plan, Timeout, AuthInfo) ->
     RequestId = maps:get(request_id, Plan),
     Spawn = maps:get(spawn, Plan),
     Meta = maps:get(meta, Plan, #{}),
-    Ctx = #{request_id => RequestId,
-            session_id => undefined,
-            progress_token => undefined,
-            meta => Meta,
-            emit_progress => fun(_, _, _) -> ok end,
-            reply_to => Self,
-            auth_info => AuthInfo},
+    Ctx = #{
+        request_id => RequestId,
+        session_id => undefined,
+        progress_token => undefined,
+        meta => Meta,
+        emit_progress => fun(_, _, _) -> ok end,
+        reply_to => Self,
+        auth_info => AuthInfo
+    },
     _Pid = Spawn(Ctx),
     receive
         {tool_result, RequestId, Result} ->
-            success_response(RequestId,
-                #{<<"content">> => format_tool_result_external(Result)});
+            success_response(
+                RequestId,
+                #{<<"content">> => format_tool_result_external(Result)}
+            );
         {tool_result_meta, RequestId, Result, RespMeta} ->
-            success_response(RequestId,
+            success_response(
+                RequestId,
                 #{<<"content">> => format_tool_result_external(Result)},
-                RespMeta);
+                RespMeta
+            );
         {tool_structured, RequestId, Data, Content} ->
-            success_response(RequestId,
-                #{<<"content">> => Content,
-                  <<"structuredContent">> => Data});
+            success_response(
+                RequestId,
+                #{
+                    <<"content">> => Content,
+                    <<"structuredContent">> => Data
+                }
+            );
         {tool_structured_meta, RequestId, Data, Content, RespMeta} ->
-            success_response(RequestId,
-                #{<<"content">> => Content,
-                  <<"structuredContent">> => Data},
-                RespMeta);
+            success_response(
+                RequestId,
+                #{
+                    <<"content">> => Content,
+                    <<"structuredContent">> => Data
+                },
+                RespMeta
+            );
         {tool_error, RequestId, Content} ->
-            success_response(RequestId,
-                #{<<"content">> => Content,
-                  <<"isError">> => true});
+            success_response(
+                RequestId,
+                #{
+                    <<"content">> => Content,
+                    <<"isError">> => true
+                }
+            );
         {tool_error_meta, RequestId, Content, RespMeta} ->
-            success_response(RequestId,
-                #{<<"content">> => Content,
-                  <<"isError">> => true},
-                RespMeta);
+            success_response(
+                RequestId,
+                #{
+                    <<"content">> => Content,
+                    <<"isError">> => true
+                },
+                RespMeta
+            );
         {tool_validation_failed, RequestId, Errors} ->
-            Msg = iolist_to_binary(io_lib:format(
-                "Invalid tool input: ~p", [Errors])),
-            success_response(RequestId,
-                #{<<"content">> =>
-                    [#{<<"type">> => <<"text">>, <<"text">> => Msg}],
-                  <<"isError">> => true});
+            Msg = iolist_to_binary(
+                io_lib:format(
+                    "Invalid tool input: ~p", [Errors]
+                )
+            ),
+            success_response(
+                RequestId,
+                #{
+                    <<"content">> =>
+                        [#{<<"type">> => <<"text">>, <<"text">> => Msg}],
+                    <<"isError">> => true
+                }
+            );
         {tool_failed, RequestId, _Reason} ->
             %% Crash details are logged server-side by the registry; do
             %% not echo `Reason' back to the wire (it can carry module
             %% paths, file paths, or secret-bearing exception terms).
-            error_response(RequestId, ?MCP_TOOL_ERROR,
-                           <<"Internal tool error">>)
+            error_response(
+                RequestId,
+                ?MCP_TOOL_ERROR,
+                <<"Internal tool error">>
+            )
     after Timeout ->
         error_response(RequestId, ?MCP_TOOL_ERROR, <<"Tool timed out">>)
     end.
@@ -648,7 +756,8 @@ match_resource_template(Uri) ->
     Templates = barrel_mcp_registry:all(resource_template),
     do_match_template(Uri, Templates).
 
-do_match_template(_Uri, []) -> nomatch;
+do_match_template(_Uri, []) ->
+    nomatch;
 do_match_template(Uri, [{Name, Handler} | Rest]) ->
     Tpl = maps:get(uri_template, Handler, <<>>),
     case Tpl of
@@ -669,9 +778,11 @@ format_resource_result(Uri, #{text := Text} = M) ->
     Block = #{<<"uri">> => Uri, <<"text">> => Text},
     [decorate_block(Block, M)];
 format_resource_result(Uri, #{blob := Blob, mimeType := MimeType} = M) ->
-    Block = #{<<"uri">> => Uri,
-              <<"blob">> => base64:encode(Blob),
-              <<"mimeType">> => MimeType},
+    Block = #{
+        <<"uri">> => Uri,
+        <<"blob">> => base64:encode(Blob),
+        <<"mimeType">> => MimeType
+    },
     [decorate_block(Block, M)];
 format_resource_result(Uri, Result) when is_map(Result) ->
     [#{<<"uri">> => Uri, <<"text">> => iolist_to_binary(json:encode(Result))}];
@@ -680,10 +791,11 @@ format_resource_result(Uri, Result) ->
 
 %% Pass `annotations' / `mimeType' through onto an already-built block.
 decorate_block(Block, M) ->
-    Block1 = case maps:find(mimeType, M) of
-                 {ok, Mime} -> Block#{<<"mimeType">> => Mime};
-                 error -> Block
-             end,
+    Block1 =
+        case maps:find(mimeType, M) of
+            {ok, Mime} -> Block#{<<"mimeType">> => Mime};
+            error -> Block
+        end,
     case maps:find(annotations, M) of
         {ok, Ann} -> Block1#{<<"annotations">> => Ann};
         error -> Block1
@@ -702,8 +814,10 @@ add_resource_uri(Uri, Block) when is_map(Block) ->
 %% The wire layer returns a generic message; operators cross-reference
 %% via the request id. Mirrors the tool path in barrel_mcp_registry.
 log_handler_crash(Kind, Name, Id, Crash) ->
-    logger:error("~p handler crashed: ~p (request_id=~p, name=~p)",
-                 [Kind, Crash, Id, Name]).
+    logger:error(
+        "~p handler crashed: ~p (request_id=~p, name=~p)",
+        [Kind, Crash, Id, Name]
+    ).
 
 maybe_advertise_completions(Caps) ->
     case barrel_mcp_registry:all(completion) of
@@ -711,34 +825,45 @@ maybe_advertise_completions(Caps) ->
         _ -> Caps#{<<"completions">> => #{}}
     end.
 
-completion_lookup_key(#{<<"type">> := <<"ref/prompt">>, <<"name">> := Name},
-                       ArgName) when is_binary(Name) ->
+completion_lookup_key(
+    #{<<"type">> := <<"ref/prompt">>, <<"name">> := Name},
+    ArgName
+) when is_binary(Name) ->
     <<"prompt:", Name/binary, ":", ArgName/binary>>;
-completion_lookup_key(#{<<"type">> := <<"ref/resource">>, <<"uri">> := Uri},
-                       ArgName) when is_binary(Uri) ->
+completion_lookup_key(
+    #{<<"type">> := <<"ref/resource">>, <<"uri">> := Uri},
+    ArgName
+) when is_binary(Uri) ->
     <<"resource_template:", Uri/binary, ":", ArgName/binary>>;
-completion_lookup_key(_, _) -> undefined.
+completion_lookup_key(_, _) ->
+    undefined.
 
 empty_completion() ->
     #{<<"values">> => [], <<"hasMore">> => false}.
 
 completion_payload(Values, HasMore) when is_list(Values) ->
-    #{<<"values">> => Values,
-      <<"hasMore">> => HasMore =:= true,
-      <<"total">> => length(Values)}.
+    #{
+        <<"values">> => Values,
+        <<"hasMore">> => HasMore =:= true,
+        <<"total">> => length(Values)
+    }.
 
 %% Add optional fields from a Handler map to a wire envelope. Each
 %% pair `{WireKey, HandlerKey}' becomes `WireKey => Value' in the
 %% envelope only when the value is present and not the empty
 %% binary; this keeps wire payloads compact and back-compat.
 with_optional_fields(Envelope, Handler, Fields) ->
-    lists:foldl(fun({WireKey, HandlerKey}, Acc) ->
-        case maps:get(HandlerKey, Handler, undefined) of
-            undefined -> Acc;
-            <<>> -> Acc;
-            V -> Acc#{WireKey => V}
-        end
-    end, Envelope, Fields).
+    lists:foldl(
+        fun({WireKey, HandlerKey}, Acc) ->
+            case maps:get(HandlerKey, Handler, undefined) of
+                undefined -> Acc;
+                <<>> -> Acc;
+                V -> Acc#{WireKey => V}
+            end
+        end,
+        Envelope,
+        Fields
+    ).
 
 %%====================================================================
 %% Cursor pagination for `*/list' handlers
@@ -754,8 +879,12 @@ with_optional_fields(Envelope, Handler, Fields) ->
 paginate(Items, Cursor, KeyFn) ->
     Sorted = lists:sort(fun(A, B) -> KeyFn(A) =< KeyFn(B) end, Items),
     AfterCursor = drop_until_after(Sorted, Cursor, KeyFn),
-    case lists:split(min(?PAGE_SIZE, length(AfterCursor)),
-                     AfterCursor) of
+    case
+        lists:split(
+            min(?PAGE_SIZE, length(AfterCursor)),
+            AfterCursor
+        )
+    of
         {Page, []} ->
             {Page, undefined};
         {Page, _Rest} ->
@@ -775,7 +904,8 @@ with_next_cursor(Resp, Cursor) -> Resp#{<<"nextCursor">> => Cursor}.
 %% response. If the client's requested version is one we speak, echo
 %% it; otherwise return our preferred version and let the client
 %% decide.
-negotiate_protocol_version(undefined) -> ?MCP_PROTOCOL_VERSION;
+negotiate_protocol_version(undefined) ->
+    ?MCP_PROTOCOL_VERSION;
 negotiate_protocol_version(Requested) when is_binary(Requested) ->
     case lists:member(Requested, ?MCP_SUPPORTED_VERSIONS) of
         true -> Requested;
@@ -824,32 +954,39 @@ encode_error(Id, Code, Message) ->
 %% Returns the kind so client and server agree on routing without each
 %% having to peek at the same keys.
 -spec decode_envelope(map()) ->
-    {request, Id :: term(), Method :: binary(), Params :: map()} |
-    {notification, Method :: binary(), Params :: map()} |
-    {response, Id :: term(), Result :: term()} |
-    {error, Id :: term(), Code :: integer(), Message :: binary(), Data :: term()} |
-    {invalid, term()}.
+    {request, Id :: term(), Method :: binary(), Params :: map()}
+    | {notification, Method :: binary(), Params :: map()}
+    | {response, Id :: term(), Result :: term()}
+    | {error, Id :: term(), Code :: integer(), Message :: binary(), Data :: term()}
+    | {invalid, term()}.
 decode_envelope(L) when is_list(L) ->
     {invalid, batch_unsupported};
 decode_envelope(#{<<"jsonrpc">> := <<"2.0">>} = Msg) ->
-    case {maps:find(<<"method">>, Msg),
-          maps:find(<<"id">>, Msg),
-          maps:find(<<"result">>, Msg),
-          maps:find(<<"error">>, Msg)} of
-        {{ok, Method}, {ok, Id}, error, error}
-                when is_binary(Id) orelse is_integer(Id) ->
+    case
+        {
+            maps:find(<<"method">>, Msg),
+            maps:find(<<"id">>, Msg),
+            maps:find(<<"result">>, Msg),
+            maps:find(<<"error">>, Msg)
+        }
+    of
+        {{ok, Method}, {ok, Id}, error, error} when
+            is_binary(Id) orelse is_integer(Id)
+        ->
             {request, Id, Method, maps:get(<<"params">>, Msg, #{})};
         {{ok, _Method}, {ok, _BadId}, error, error} ->
             {invalid, bad_id};
         {{ok, Method}, error, error, error} ->
             {notification, Method, maps:get(<<"params">>, Msg, #{})};
-        {error, {ok, Id}, {ok, Result}, error}
-                when is_binary(Id) orelse is_integer(Id) ->
+        {error, {ok, Id}, {ok, Result}, error} when
+            is_binary(Id) orelse is_integer(Id)
+        ->
             {response, Id, Result};
         {error, {ok, _BadId}, {ok, _Result}, error} ->
             {invalid, bad_id};
-        {error, {ok, Id}, error, {ok, Err}}
-                when is_binary(Id) orelse is_integer(Id) ->
+        {error, {ok, Id}, error, {ok, Err}} when
+            is_binary(Id) orelse is_integer(Id)
+        ->
             Code = maps:get(<<"code">>, Err, ?JSONRPC_INTERNAL_ERROR),
             Message = maps:get(<<"message">>, Err, <<>>),
             Data = maps:get(<<"data">>, Err, undefined),

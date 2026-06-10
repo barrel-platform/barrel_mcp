@@ -11,10 +11,7 @@
 %%====================================================================
 
 auth_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     [
+    {setup, fun setup/0, fun cleanup/1, [
         %% Header extraction tests
         {"Extract Bearer token from headers", fun test_extract_bearer_token/0},
         {"Extract Bearer token case insensitive", fun test_extract_bearer_case/0},
@@ -50,8 +47,7 @@ auth_test_() ->
         %% Scope checking
         {"Scope check passes with required scopes", fun test_scope_check_pass/0},
         {"Scope check fails with missing scopes", fun test_scope_check_fail/0},
-        {"Scope check fails closed when provider omits scopes",
-         fun test_scope_check_fail_closed/0},
+        {"Scope check fails closed when provider omits scopes", fun test_scope_check_fail_closed/0},
 
         %% Custom auth tests
         {"Custom auth init calls module init", fun test_custom_init/0},
@@ -59,8 +55,7 @@ auth_test_() ->
         {"Custom auth with valid X-API-Key", fun test_custom_apikey_valid/0},
         {"Custom auth with invalid token", fun test_custom_invalid/0},
         {"Custom auth missing module fails init", fun test_custom_missing_module/0}
-     ]
-    }.
+    ]}.
 
 setup() ->
     ok.
@@ -119,10 +114,13 @@ test_auth_none() ->
 
 test_bearer_hs256_valid() ->
     Secret = <<"test-secret-key-12345">>,
-    Token = create_hs256_jwt(#{
-        <<"sub">> => <<"user123">>,
-        <<"exp">> => erlang:system_time(second) + 3600
-    }, Secret),
+    Token = create_hs256_jwt(
+        #{
+            <<"sub">> => <<"user123">>,
+            <<"exp">> => erlang:system_time(second) + 3600
+        },
+        Secret
+    ),
 
     {ok, State} = barrel_mcp_auth_bearer:init(#{secret => Secret}),
     Request = #{headers => #{<<"authorization">> => <<"Bearer ", Token/binary>>}},
@@ -131,10 +129,14 @@ test_bearer_hs256_valid() ->
 
 test_bearer_expired() ->
     Secret = <<"test-secret-key-12345">>,
-    Token = create_hs256_jwt(#{
-        <<"sub">> => <<"user123">>,
-        <<"exp">> => erlang:system_time(second) - 3600  % Expired 1 hour ago
-    }, Secret),
+    Token = create_hs256_jwt(
+        #{
+            <<"sub">> => <<"user123">>,
+            % Expired 1 hour ago
+            <<"exp">> => erlang:system_time(second) - 3600
+        },
+        Secret
+    ),
 
     {ok, State} = barrel_mcp_auth_bearer:init(#{secret => Secret}),
     Request = #{headers => #{<<"authorization">> => <<"Bearer ", Token/binary>>}},
@@ -168,10 +170,13 @@ test_bearer_custom_verifier() ->
 
 test_bearer_issuer() ->
     Secret = <<"test-secret">>,
-    Token = create_hs256_jwt(#{
-        <<"sub">> => <<"user123">>,
-        <<"iss">> => <<"https://auth.example.com">>
-    }, Secret),
+    Token = create_hs256_jwt(
+        #{
+            <<"sub">> => <<"user123">>,
+            <<"iss">> => <<"https://auth.example.com">>
+        },
+        Secret
+    ),
 
     %% Correct issuer
     {ok, State1} = barrel_mcp_auth_bearer:init(#{
@@ -190,10 +195,13 @@ test_bearer_issuer() ->
 
 test_bearer_audience() ->
     Secret = <<"test-secret">>,
-    Token = create_hs256_jwt(#{
-        <<"sub">> => <<"user123">>,
-        <<"aud">> => <<"https://api.example.com">>
-    }, Secret),
+    Token = create_hs256_jwt(
+        #{
+            <<"sub">> => <<"user123">>,
+            <<"aud">> => <<"https://api.example.com">>
+        },
+        Secret
+    ),
 
     %% Correct audience
     {ok, State1} = barrel_mcp_auth_bearer:init(#{
@@ -212,10 +220,13 @@ test_bearer_audience() ->
 
 test_bearer_scopes() ->
     Secret = <<"test-secret">>,
-    Token = create_hs256_jwt(#{
-        <<"sub">> => <<"user123">>,
-        <<"scope">> => <<"read write admin">>
-    }, Secret),
+    Token = create_hs256_jwt(
+        #{
+            <<"sub">> => <<"user123">>,
+            <<"scope">> => <<"read write admin">>
+        },
+        Secret
+    ),
 
     {ok, State} = barrel_mcp_auth_bearer:init(#{secret => Secret}),
     Request = #{headers => #{<<"authorization">> => <<"Bearer ", Token/binary>>}},
@@ -307,10 +318,13 @@ test_basic_hashed() ->
 
 test_scope_check_pass() ->
     Secret = <<"test-secret">>,
-    Token = create_hs256_jwt(#{
-        <<"sub">> => <<"user123">>,
-        <<"scope">> => <<"read write">>
-    }, Secret),
+    Token = create_hs256_jwt(
+        #{
+            <<"sub">> => <<"user123">>,
+            <<"scope">> => <<"read write">>
+        },
+        Secret
+    ),
 
     {ok, ProviderState} = barrel_mcp_auth_bearer:init(#{secret => Secret}),
     Config = #{
@@ -324,31 +338,41 @@ test_scope_check_pass() ->
 
 test_scope_check_fail() ->
     Secret = <<"test-secret">>,
-    Token = create_hs256_jwt(#{
-        <<"sub">> => <<"user123">>,
-        <<"scope">> => <<"read">>
-    }, Secret),
+    Token = create_hs256_jwt(
+        #{
+            <<"sub">> => <<"user123">>,
+            <<"scope">> => <<"read">>
+        },
+        Secret
+    ),
 
     {ok, ProviderState} = barrel_mcp_auth_bearer:init(#{secret => Secret}),
     Config = #{
         provider => barrel_mcp_auth_bearer,
         provider_state => ProviderState,
-        required_scopes => [<<"write">>]  % User doesn't have write scope
+        % User doesn't have write scope
+        required_scopes => [<<"write">>]
     },
 
     Request = #{headers => #{<<"authorization">> => <<"Bearer ", Token/binary>>}},
-    ?assertEqual({error, insufficient_scope}, barrel_mcp_auth:authenticate(Config, Request, Config)).
+    ?assertEqual(
+        {error, insufficient_scope}, barrel_mcp_auth:authenticate(Config, Request, Config)
+    ).
 
 test_scope_check_fail_closed() ->
     %% Custom provider that returns no `scopes' key. With
     %% required_scopes configured, the request must be rejected; a
     %% missing claim is not implicit consent.
-    Config = #{provider => test_auth_no_scopes,
-               provider_state => #{},
-               required_scopes => [<<"read">>]},
+    Config = #{
+        provider => test_auth_no_scopes,
+        provider_state => #{},
+        required_scopes => [<<"read">>]
+    },
     Request = #{headers => #{<<"authorization">> => <<"Bearer anything">>}},
-    ?assertEqual({error, insufficient_scope},
-                 barrel_mcp_auth:authenticate(Config, Request, Config)).
+    ?assertEqual(
+        {error, insufficient_scope},
+        barrel_mcp_auth:authenticate(Config, Request, Config)
+    ).
 
 %%====================================================================
 %% Helper Functions

@@ -15,9 +15,11 @@ single_page_with_undefined_cursor_test() ->
     ?assertEqual({ok, [a, b]}, barrel_mcp_pagination:walk(Fetch)).
 
 multi_page_test() ->
-    Pages = #{undefined => {[a, b], <<"c1">>},
-              <<"c1">>  => {[c, d], <<"c2">>},
-              <<"c2">>  => {[e],    undefined}},
+    Pages = #{
+        undefined => {[a, b], <<"c1">>},
+        <<"c1">> => {[c, d], <<"c2">>},
+        <<"c2">> => {[e], undefined}
+    },
     Fetch = fun(C) ->
         {Items, Next} = maps:get(C, Pages),
         {ok, Items, Next}

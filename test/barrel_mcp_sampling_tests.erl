@@ -14,8 +14,7 @@ capability_tracking_test_() ->
     {setup, fun setup/0, fun teardown/1, fun(_) ->
         [
             {"set + has_sampling", fun test_has_sampling/0},
-            {"list sampling-capable sessions",
-             fun test_list_sampling_capable/0}
+            {"list sampling-capable sessions", fun test_list_sampling_capable/0}
         ]
     end}.
 
@@ -31,7 +30,8 @@ test_list_sampling_capable() ->
     {ok, S1} = barrel_mcp_session:create(#{}),
     {ok, S2} = barrel_mcp_session:create(#{}),
     ok = barrel_mcp_session:set_client_capabilities(
-        S2, #{<<"sampling">> => #{}}),
+        S2, #{<<"sampling">> => #{}}
+    ),
     Capable = barrel_mcp_session:list_sampling_capable(),
     ?assertNot(lists:member(S1, Capable)),
     ?assert(lists:member(S2, Capable)).
@@ -43,10 +43,8 @@ test_list_sampling_capable() ->
 resource_subscriptions_test_() ->
     {setup, fun setup/0, fun teardown/1, fun(_) ->
         [
-            {"subscribe + subscribers_for",
-             fun test_subscribe/0},
-            {"notify_resource_updated reaches subscriber",
-             fun test_notify_resource_updated/0}
+            {"subscribe + subscribers_for", fun test_subscribe/0},
+            {"notify_resource_updated reaches subscriber", fun test_notify_resource_updated/0}
         ]
     end}.
 
@@ -57,8 +55,12 @@ test_subscribe() ->
     Subs = barrel_mcp_session:subscribers_for(Uri),
     ?assert(lists:member(S1, Subs)),
     ok = barrel_mcp_session:unsubscribe_resource(S1, Uri),
-    ?assertNot(lists:member(S1,
-                            barrel_mcp_session:subscribers_for(Uri))).
+    ?assertNot(
+        lists:member(
+            S1,
+            barrel_mcp_session:subscribers_for(Uri)
+        )
+    ).
 
 test_notify_resource_updated() ->
     {ok, S1} = barrel_mcp_session:create(#{}),
@@ -70,11 +72,17 @@ test_notify_resource_updated() ->
     ok = barrel_mcp:notify_resource_updated(Uri),
     receive
         {captured, {sse_send_message, Msg}} ->
-            ?assertEqual(<<"notifications/resources/updated">>,
-                         maps:get(<<"method">>, Msg)),
-            ?assertEqual(Uri,
-                         maps:get(<<"uri">>,
-                                  maps:get(<<"params">>, Msg)))
+            ?assertEqual(
+                <<"notifications/resources/updated">>,
+                maps:get(<<"method">>, Msg)
+            ),
+            ?assertEqual(
+                Uri,
+                maps:get(
+                    <<"uri">>,
+                    maps:get(<<"params">>, Msg)
+                )
+            )
     after 1000 -> ?assert(false)
     end,
     exit(Pid, kill).
@@ -86,51 +94,61 @@ test_notify_resource_updated() ->
 sampling_round_trip_test_() ->
     {setup, fun setup/0, fun teardown/1, fun(_) ->
         [
-            {"declines without sampling capability",
-             fun test_sampling_not_supported/0},
-            {"declines without an SSE pid",
-             fun test_sampling_no_sse/0},
-            {"happy path: response routed to caller",
-             fun test_sampling_round_trip/0},
-            {"timeout when no response arrives",
-             fun test_sampling_timeout/0}
+            {"declines without sampling capability", fun test_sampling_not_supported/0},
+            {"declines without an SSE pid", fun test_sampling_no_sse/0},
+            {"happy path: response routed to caller", fun test_sampling_round_trip/0},
+            {"timeout when no response arrives", fun test_sampling_timeout/0}
         ]
     end}.
 
 test_sampling_not_supported() ->
     {ok, S1} = barrel_mcp_session:create(#{}),
     %% capability not set
-    ?assertEqual({error, not_supported},
-                 barrel_mcp:sampling_create_message(S1, #{}, #{})).
+    ?assertEqual(
+        {error, not_supported},
+        barrel_mcp:sampling_create_message(S1, #{}, #{})
+    ).
 
 test_sampling_no_sse() ->
     {ok, S1} = barrel_mcp_session:create(#{}),
     ok = barrel_mcp_session:set_client_capabilities(
-        S1, #{<<"sampling">> => #{}}),
+        S1, #{<<"sampling">> => #{}}
+    ),
     %% no sse_pid
-    ?assertEqual({error, no_sse},
-                 barrel_mcp:sampling_create_message(S1, #{}, #{})).
+    ?assertEqual(
+        {error, no_sse},
+        barrel_mcp:sampling_create_message(S1, #{}, #{})
+    ).
 
 test_sampling_round_trip() ->
     {ok, S1} = barrel_mcp_session:create(#{}),
     ok = barrel_mcp_session:set_client_capabilities(
-        S1, #{<<"sampling">> => #{}}),
+        S1, #{<<"sampling">> => #{}}
+    ),
     Self = self(),
     Pid = spawn(fun() -> sampling_responder(Self) end),
     ok = barrel_mcp_session:set_sse_pid(S1, Pid),
     spawn(fun() ->
         %% Forward the inbound message back as a response, then deliver.
-        Self ! {result, barrel_mcp:sampling_create_message(
-            S1, #{<<"messages">> => []}, #{timeout_ms => 2000})}
+        Self !
+            {result,
+                barrel_mcp:sampling_create_message(
+                    S1, #{<<"messages">> => []}, #{timeout_ms => 2000}
+                )}
     end),
     %% The fake responder forwards the request to us.
-    Request = receive
-        {got_message, Msg} -> Msg
-    after 1000 -> ?assert(false), undefined
-    end,
+    Request =
+        receive
+            {got_message, Msg} -> Msg
+        after 1000 ->
+            ?assert(false),
+            undefined
+        end,
     Id = maps:get(<<"id">>, Request),
-    ?assertEqual(<<"sampling/createMessage">>,
-                 maps:get(<<"method">>, Request)),
+    ?assertEqual(
+        <<"sampling/createMessage">>,
+        maps:get(<<"method">>, Request)
+    ),
     %% Deliver a fake response
     ok = barrel_mcp_session:deliver_response(Id, #{
         <<"jsonrpc">> => <<"2.0">>,
@@ -142,9 +160,13 @@ test_sampling_round_trip() ->
     }),
     receive
         {result, {ok, Result, Usage}} ->
-            ?assertEqual(<<"hi">>,
-                         maps:get(<<"text">>,
-                                  maps:get(<<"content">>, Result))),
+            ?assertEqual(
+                <<"hi">>,
+                maps:get(
+                    <<"text">>,
+                    maps:get(<<"content">>, Result)
+                )
+            ),
             ?assertEqual(10, maps:get(<<"input_tokens">>, Usage))
     after 2000 ->
         ?assert(false)
@@ -154,12 +176,16 @@ test_sampling_round_trip() ->
 test_sampling_timeout() ->
     {ok, S1} = barrel_mcp_session:create(#{}),
     ok = barrel_mcp_session:set_client_capabilities(
-        S1, #{<<"sampling">> => #{}}),
+        S1, #{<<"sampling">> => #{}}
+    ),
     Pid = spawn(fun() -> idle_loop() end),
     ok = barrel_mcp_session:set_sse_pid(S1, Pid),
-    ?assertEqual({error, timeout},
-                 barrel_mcp:sampling_create_message(
-                     S1, #{}, #{timeout_ms => 100})),
+    ?assertEqual(
+        {error, timeout},
+        barrel_mcp:sampling_create_message(
+            S1, #{}, #{timeout_ms => 100}
+        )
+    ),
     exit(Pid, kill).
 
 %% ============================================================================
@@ -169,53 +195,69 @@ test_sampling_timeout() ->
 elicit_round_trip_test_() ->
     {setup, fun setup/0, fun teardown/1, fun(_) ->
         [
-            {"declines without elicitation capability",
-             fun test_elicit_not_supported/0},
-            {"happy path: response routed to caller",
-             fun test_elicit_round_trip/0},
-            {"timeout when no response arrives",
-             fun test_elicit_timeout/0}
+            {"declines without elicitation capability", fun test_elicit_not_supported/0},
+            {"happy path: response routed to caller", fun test_elicit_round_trip/0},
+            {"timeout when no response arrives", fun test_elicit_timeout/0}
         ]
     end}.
 
 test_elicit_not_supported() ->
     {ok, S1} = barrel_mcp_session:create(#{}),
-    ?assertEqual({error, not_supported},
-                 barrel_mcp:elicit_create(S1, #{}, #{})).
+    ?assertEqual(
+        {error, not_supported},
+        barrel_mcp:elicit_create(S1, #{}, #{})
+    ).
 
 test_elicit_round_trip() ->
     {ok, S1} = barrel_mcp_session:create(#{}),
     ok = barrel_mcp_session:set_client_capabilities(
-        S1, #{<<"elicitation">> => #{}}),
+        S1, #{<<"elicitation">> => #{}}
+    ),
     Self = self(),
     Pid = spawn(fun() -> sampling_responder(Self) end),
     ok = barrel_mcp_session:set_sse_pid(S1, Pid),
     spawn(fun() ->
-        Self ! {result, barrel_mcp:elicit_create(
-            S1,
-            #{<<"message">> => <<"Pick a colour">>,
-              <<"requestedSchema">> => #{<<"type">> => <<"object">>}},
-            #{timeout_ms => 2000})}
+        Self !
+            {result,
+                barrel_mcp:elicit_create(
+                    S1,
+                    #{
+                        <<"message">> => <<"Pick a colour">>,
+                        <<"requestedSchema">> => #{<<"type">> => <<"object">>}
+                    },
+                    #{timeout_ms => 2000}
+                )}
     end),
-    Request = receive
-        {got_message, Msg} -> Msg
-    after 1000 -> ?assert(false), undefined
-    end,
+    Request =
+        receive
+            {got_message, Msg} -> Msg
+        after 1000 ->
+            ?assert(false),
+            undefined
+        end,
     Id = maps:get(<<"id">>, Request),
-    ?assertEqual(<<"elicitation/create">>,
-                 maps:get(<<"method">>, Request)),
+    ?assertEqual(
+        <<"elicitation/create">>,
+        maps:get(<<"method">>, Request)
+    ),
     ok = barrel_mcp_session:deliver_response(Id, #{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => Id,
-        <<"result">> => #{<<"action">> => <<"accept">>,
-                          <<"content">> => #{<<"colour">> => <<"blue">>}}
+        <<"result">> => #{
+            <<"action">> => <<"accept">>,
+            <<"content">> => #{<<"colour">> => <<"blue">>}
+        }
     }),
     receive
         {result, {ok, Result}} ->
             ?assertEqual(<<"accept">>, maps:get(<<"action">>, Result)),
-            ?assertEqual(<<"blue">>,
-                         maps:get(<<"colour">>,
-                                  maps:get(<<"content">>, Result)))
+            ?assertEqual(
+                <<"blue">>,
+                maps:get(
+                    <<"colour">>,
+                    maps:get(<<"content">>, Result)
+                )
+            )
     after 2000 ->
         ?assert(false)
     end,
@@ -224,12 +266,16 @@ test_elicit_round_trip() ->
 test_elicit_timeout() ->
     {ok, S1} = barrel_mcp_session:create(#{}),
     ok = barrel_mcp_session:set_client_capabilities(
-        S1, #{<<"elicitation">> => #{}}),
+        S1, #{<<"elicitation">> => #{}}
+    ),
     Pid = spawn(fun() -> idle_loop() end),
     ok = barrel_mcp_session:set_sse_pid(S1, Pid),
-    ?assertEqual({error, timeout},
-                 barrel_mcp:elicit_create(
-                     S1, #{}, #{timeout_ms => 100})),
+    ?assertEqual(
+        {error, timeout},
+        barrel_mcp:elicit_create(
+            S1, #{}, #{timeout_ms => 100}
+        )
+    ),
     exit(Pid, kill).
 
 %% ============================================================================
@@ -239,43 +285,51 @@ test_elicit_timeout() ->
 roots_list_test_() ->
     {setup, fun setup/0, fun teardown/1, fun(_) ->
         [
-            {"declines without roots capability",
-             fun test_roots_not_supported/0},
-            {"happy path: response routed to caller",
-             fun test_roots_round_trip/0},
-            {"timeout when no response arrives",
-             fun test_roots_timeout/0}
+            {"declines without roots capability", fun test_roots_not_supported/0},
+            {"happy path: response routed to caller", fun test_roots_round_trip/0},
+            {"timeout when no response arrives", fun test_roots_timeout/0}
         ]
     end}.
 
 test_roots_not_supported() ->
     {ok, S1} = barrel_mcp_session:create(#{}),
-    ?assertEqual({error, not_supported},
-                 barrel_mcp:roots_list(S1)).
+    ?assertEqual(
+        {error, not_supported},
+        barrel_mcp:roots_list(S1)
+    ).
 
 test_roots_round_trip() ->
     {ok, S1} = barrel_mcp_session:create(#{}),
     ok = barrel_mcp_session:set_client_capabilities(
-        S1, #{<<"roots">> => #{}}),
+        S1, #{<<"roots">> => #{}}
+    ),
     Self = self(),
     Pid = spawn(fun() -> sampling_responder(Self) end),
     ok = barrel_mcp_session:set_sse_pid(S1, Pid),
     spawn(fun() ->
-        Self ! {result,
-                barrel_mcp:roots_list(S1, #{timeout_ms => 2000})}
+        Self ! {result, barrel_mcp:roots_list(S1, #{timeout_ms => 2000})}
     end),
-    Request = receive
-        {got_message, Msg} -> Msg
-    after 1000 -> ?assert(false), undefined
-    end,
+    Request =
+        receive
+            {got_message, Msg} -> Msg
+        after 1000 ->
+            ?assert(false),
+            undefined
+        end,
     Id = maps:get(<<"id">>, Request),
     ?assertEqual(<<"roots/list">>, maps:get(<<"method">>, Request)),
     ok = barrel_mcp_session:deliver_response(Id, #{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => Id,
-        <<"result">> => #{<<"roots">> =>
-            [#{<<"uri">> => <<"file:///workspace">>,
-               <<"name">> => <<"Workspace">>}]}
+        <<"result">> => #{
+            <<"roots">> =>
+                [
+                    #{
+                        <<"uri">> => <<"file:///workspace">>,
+                        <<"name">> => <<"Workspace">>
+                    }
+                ]
+        }
     }),
     receive
         {result, {ok, Roots}} ->
@@ -288,11 +342,14 @@ test_roots_round_trip() ->
 test_roots_timeout() ->
     {ok, S1} = barrel_mcp_session:create(#{}),
     ok = barrel_mcp_session:set_client_capabilities(
-        S1, #{<<"roots">> => #{}}),
+        S1, #{<<"roots">> => #{}}
+    ),
     Pid = spawn(fun() -> idle_loop() end),
     ok = barrel_mcp_session:set_sse_pid(S1, Pid),
-    ?assertEqual({error, timeout},
-                 barrel_mcp:roots_list(S1, #{timeout_ms => 100})),
+    ?assertEqual(
+        {error, timeout},
+        barrel_mcp:roots_list(S1, #{timeout_ms => 100})
+    ),
     exit(Pid, kill).
 
 %% ============================================================================
@@ -302,16 +359,11 @@ test_roots_timeout() ->
 logging_test_() ->
     {setup, fun setup/0, fun teardown/1, fun(_) ->
         [
-            {"default level is info",
-             fun test_default_log_level/0},
-            {"set_log_level rejects invalid level",
-             fun test_set_log_level_invalid/0},
-            {"notify_log delivers >= configured level",
-             fun test_notify_log_at_or_above/0},
-            {"notify_log drops below configured level",
-             fun test_notify_log_below/0},
-            {"unknown level passed to notify_log is dropped",
-             fun test_notify_log_invalid_dropped/0}
+            {"default level is info", fun test_default_log_level/0},
+            {"set_log_level rejects invalid level", fun test_set_log_level_invalid/0},
+            {"notify_log delivers >= configured level", fun test_notify_log_at_or_above/0},
+            {"notify_log drops below configured level", fun test_notify_log_below/0},
+            {"unknown level passed to notify_log is dropped", fun test_notify_log_invalid_dropped/0}
         ]
     end}.
 
@@ -321,12 +373,16 @@ test_default_log_level() ->
 
 test_set_log_level_invalid() ->
     {ok, S1} = barrel_mcp_session:create(#{}),
-    ?assertEqual({error, invalid_level},
-                 barrel_mcp_session:set_log_level(S1, <<"verbose">>)),
+    ?assertEqual(
+        {error, invalid_level},
+        barrel_mcp_session:set_log_level(S1, <<"verbose">>)
+    ),
     ?assertEqual({ok, info}, barrel_mcp_session:get_log_level(S1)),
     ok = barrel_mcp_session:set_log_level(S1, <<"warning">>),
-    ?assertEqual({ok, warning},
-                 barrel_mcp_session:get_log_level(S1)).
+    ?assertEqual(
+        {ok, warning},
+        barrel_mcp_session:get_log_level(S1)
+    ).
 
 test_notify_log_at_or_above() ->
     {ok, S1} = barrel_mcp_session:create(#{}),
@@ -337,8 +393,10 @@ test_notify_log_at_or_above() ->
     ok = barrel_mcp:notify_log(S1, error, <<"boom">>),
     receive
         {captured, {sse_send_message, Msg}} ->
-            ?assertEqual(<<"notifications/message">>,
-                         maps:get(<<"method">>, Msg)),
+            ?assertEqual(
+                <<"notifications/message">>,
+                maps:get(<<"method">>, Msg)
+            ),
             Params = maps:get(<<"params">>, Msg),
             ?assertEqual(<<"error">>, maps:get(<<"level">>, Params)),
             ?assertEqual(<<"boom">>, maps:get(<<"data">>, Params))
@@ -364,8 +422,10 @@ test_notify_log_invalid_dropped() ->
     Self = self(),
     Pid = spawn(fun() -> capture_loop(Self) end),
     ok = barrel_mcp_session:set_sse_pid(S1, Pid),
-    ?assertEqual(ok,
-                 barrel_mcp:notify_log(S1, <<"verbose">>, <<"x">>)),
+    ?assertEqual(
+        ok,
+        barrel_mcp:notify_log(S1, <<"verbose">>, <<"x">>)
+    ),
     receive
         {captured, _} -> ?assert(false)
     after 200 -> ok
@@ -378,7 +438,11 @@ test_notify_log_invalid_dropped() ->
 
 setup() ->
     %% Restart application to get a clean ETS state.
-    try application:stop(barrel_mcp) catch _:_ -> ok end,
+    try
+        application:stop(barrel_mcp)
+    catch
+        _:_ -> ok
+    end,
     {ok, _} = application:ensure_all_started(barrel_mcp),
     ok.
 
@@ -397,8 +461,11 @@ sampling_responder(Reporter) ->
         {sse_send_message, Msg} ->
             Reporter ! {got_message, Msg},
             sampling_responder(Reporter);
-        _ -> sampling_responder(Reporter)
+        _ ->
+            sampling_responder(Reporter)
     end.
 
 idle_loop() ->
-    receive _ -> idle_loop() end.
+    receive
+        _ -> idle_loop()
+    end.

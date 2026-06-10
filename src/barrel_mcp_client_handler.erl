@@ -73,16 +73,20 @@
 
 -callback init(Args :: term()) -> {ok, state()} | {error, term()}.
 
--callback handle_request(Method :: binary(),
-                         Params :: map(),
-                         State :: state()) ->
-    {reply, Result :: term(), state()} |
-    {error, Code :: integer(), Message :: binary(), state()} |
-    {async, async_tag(), state()}.
+-callback handle_request(
+    Method :: binary(),
+    Params :: map(),
+    State :: state()
+) ->
+    {reply, Result :: term(), state()}
+    | {error, Code :: integer(), Message :: binary(), state()}
+    | {async, async_tag(), state()}.
 
--callback handle_notification(Method :: binary(),
-                              Params :: map(),
-                              State :: state()) -> {ok, state()}.
+-callback handle_notification(
+    Method :: binary(),
+    Params :: map(),
+    State :: state()
+) -> {ok, state()}.
 
 -callback terminate(Reason :: term(), State :: state()) -> any().
 

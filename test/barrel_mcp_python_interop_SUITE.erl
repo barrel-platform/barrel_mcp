@@ -20,30 +20,50 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
--export([all/0, init_per_suite/1, end_per_suite/1,
-         init_per_testcase/2, end_per_testcase/2]).
+-export([
+    all/0,
+    init_per_suite/1,
+    end_per_suite/1,
+    init_per_testcase/2,
+    end_per_testcase/2
+]).
 
--export([python_client_against_erlang_server/1,
-         erlang_client_against_python_server/1]).
+-export([
+    python_client_against_erlang_server/1,
+    erlang_client_against_python_server/1
+]).
 
 %% Tool / resource / prompt handlers exported for the registry.
--export([echo_tool/1, slow_tool/2, trigger_update_tool/1,
-         ask_llm_tool/1, ask_user_tool/1, list_roots_tool/1,
-         progress_tool/2, structured_tool/1, error_tool/1,
-         registry_churn_tool/1, cancellable_tool/2,
-         file_resource/1,
-         greeting_resource/1, hello_prompt/1,
-         echo_completion/2]).
+-export([
+    echo_tool/1,
+    slow_tool/2,
+    trigger_update_tool/1,
+    ask_llm_tool/1,
+    ask_user_tool/1,
+    list_roots_tool/1,
+    progress_tool/2,
+    structured_tool/1,
+    error_tool/1,
+    registry_churn_tool/1,
+    cancellable_tool/2,
+    file_resource/1,
+    greeting_resource/1,
+    hello_prompt/1,
+    echo_completion/2
+]).
 
 -define(PORT, 22451).
 
 all() ->
-    [python_client_against_erlang_server,
-     erlang_client_against_python_server].
+    [
+        python_client_against_erlang_server,
+        erlang_client_against_python_server
+    ].
 
 init_per_suite(Config) ->
     case python_or_skip() of
-        {skip, _} = Skip -> Skip;
+        {skip, _} = Skip ->
+            Skip;
         Python ->
             {ok, _} = application:ensure_all_started(barrel_mcp),
             {ok, _} = application:ensure_all_started(hackney),
@@ -52,7 +72,11 @@ init_per_suite(Config) ->
     end.
 
 end_per_suite(_Config) ->
-    try barrel_mcp:stop_http_stream() catch _:_ -> ok end,
+    try
+        barrel_mcp:stop_http_stream()
+    catch
+        _:_ -> ok
+    end,
     application:stop(barrel_mcp),
     ok.
 
@@ -66,8 +90,10 @@ end_per_testcase(_TC, _Config) -> ok.
 python_client_against_erlang_server(Config) ->
     Python = ?config(python, Config),
     ok = ensure_fixture(),
-    {ok, _} = barrel_mcp:start_http_stream(#{port => ?PORT,
-                                              session_enabled => true}),
+    {ok, _} = barrel_mcp:start_http_stream(#{
+        port => ?PORT,
+        session_enabled => true
+    }),
     Url = io_lib:format("http://127.0.0.1:~B/mcp", [?PORT]),
     Script = filename:join(["test", "interop", "client.py"]),
     Cwd = root_dir(),
@@ -79,7 +105,11 @@ python_client_against_erlang_server(Config) ->
         _ ->
             ct:fail({python_client_failed, Status, Output})
     end,
-    try barrel_mcp:stop_http_stream() catch _:_ -> ok end,
+    try
+        barrel_mcp:stop_http_stream()
+    catch
+        _:_ -> ok
+    end,
     cleanup_fixture(),
     ok.
 
@@ -93,8 +123,11 @@ erlang_client_against_python_server(Config) ->
     Cwd = root_dir(),
     AbsScript = filename:join(Cwd, Script),
     {ok, Pid} = barrel_mcp_client:start(#{
-        transport => {stdio, #{command => Python,
-                                args => [AbsScript]}}
+        transport =>
+            {stdio, #{
+                command => Python,
+                args => [AbsScript]
+            }}
     }),
     ok = wait_ready(Pid, 50),
 
@@ -103,8 +136,11 @@ erlang_client_against_python_server(Config) ->
     Names = [maps:get(<<"name">>, T) || T <- Tools],
     ?assert(lists:member(<<"echo">>, Names)),
     {ok, Result} = barrel_mcp_client:call_tool(
-                     Pid, <<"echo">>, #{<<"text">> => <<"hello">>},
-                     #{timeout => 10000}),
+        Pid,
+        <<"echo">>,
+        #{<<"text">> => <<"hello">>},
+        #{timeout => 10000}
+    ),
     [#{<<"text">> := <<"hello">>} | _] = maps:get(<<"content">>, Result),
 
     %% resources/list + resources/read
@@ -112,7 +148,8 @@ erlang_client_against_python_server(Config) ->
     ResUris = [maps:get(<<"uri">>, R) || R <- Resources],
     ?assert(lists:member(<<"mem://greeting">>, ResUris)),
     {ok, ReadRes} = barrel_mcp_client:read_resource(
-                       Pid, <<"mem://greeting">>),
+        Pid, <<"mem://greeting">>
+    ),
     [Block | _] = maps:get(<<"contents">>, ReadRes),
     ?assertEqual(<<"hello, world">>, maps:get(<<"text">>, Block)),
 
@@ -121,8 +158,10 @@ erlang_client_against_python_server(Config) ->
     PromptNames = [maps:get(<<"name">>, P) || P <- Prompts],
     ?assert(lists:member(<<"hello_prompt">>, PromptNames)),
     {ok, PromptResult} = barrel_mcp_client:get_prompt(
-                            Pid, <<"hello_prompt">>,
-                            #{<<"who">> => <<"interop">>}),
+        Pid,
+        <<"hello_prompt">>,
+        #{<<"who">> => <<"interop">>}
+    ),
     [PromptMsg | _] = maps:get(<<"messages">>, PromptResult),
     ?assertEqual(<<"user">>, maps:get(<<"role">>, PromptMsg)),
     %% Python FastMCP wraps the message text under content.text.
@@ -142,122 +181,275 @@ erlang_client_against_python_server(Config) ->
 ensure_fixture() ->
     ok = barrel_mcp_registry:reg(tool, <<"echo">>, ?MODULE, echo_tool, #{
         description => <<"Echo a string">>,
-        input_schema => #{<<"type">> => <<"object">>,
-                           <<"required">> => [<<"text">>],
-                           <<"properties">> =>
-                               #{<<"text">> => #{<<"type">> => <<"string">>}}}
+        input_schema => #{
+            <<"type">> => <<"object">>,
+            <<"required">> => [<<"text">>],
+            <<"properties">> =>
+                #{<<"text">> => #{<<"type">> => <<"string">>}}
+        }
     }),
-    ok = barrel_mcp_registry:reg(tool, <<"slow_echo">>, ?MODULE,
-                                  slow_tool, #{
-        description => <<"Long-running echo (returns a taskId)">>,
-        long_running => true,
-        input_schema => #{<<"type">> => <<"object">>,
-                           <<"properties">> =>
-                               #{<<"text">> => #{<<"type">> => <<"string">>}}}
-    }),
-    ok = barrel_mcp_registry:reg(tool, <<"trigger_update">>, ?MODULE,
-                                  trigger_update_tool, #{
-        description => <<"Push notifications/resources/updated for the greeting URI">>,
-        input_schema => #{<<"type">> => <<"object">>}
-    }),
-    ok = barrel_mcp_registry:reg(tool, <<"ask_llm">>, ?MODULE,
-                                  ask_llm_tool, #{
-        description => <<"Ask the connected client to sample a message">>,
-        input_schema => #{<<"type">> => <<"object">>}
-    }),
-    ok = barrel_mcp_registry:reg(tool, <<"ask_user">>, ?MODULE,
-                                  ask_user_tool, #{
-        description => <<"Ask the connected client to elicit user input">>,
-        input_schema => #{<<"type">> => <<"object">>}
-    }),
-    ok = barrel_mcp_registry:reg(tool, <<"list_roots">>, ?MODULE,
-                                  list_roots_tool, #{
-        description => <<"Ask the connected client for its roots">>,
-        input_schema => #{<<"type">> => <<"object">>}
-    }),
-    ok = barrel_mcp_registry:reg(tool, <<"progress_echo">>, ?MODULE,
-                                  progress_tool, #{
-        description => <<"Emit a few progress events then return">>,
-        input_schema => #{<<"type">> => <<"object">>}
-    }),
-    ok = barrel_mcp_registry:reg(tool, <<"structured">>, ?MODULE,
-                                  structured_tool, #{
-        description => <<"Return structuredContent">>,
-        input_schema => #{<<"type">> => <<"object">>}
-    }),
-    ok = barrel_mcp_registry:reg(tool, <<"erroring">>, ?MODULE,
-                                  error_tool, #{
-        description => <<"Return isError: true">>,
-        input_schema => #{<<"type">> => <<"object">>}
-    }),
-    ok = barrel_mcp_registry:reg(tool, <<"churn_registry">>, ?MODULE,
-                                  registry_churn_tool, #{
-        description => <<"Register and unregister a tool, "
-                          "emitting list_changed">>,
-        input_schema => #{<<"type">> => <<"object">>}
-    }),
-    ok = barrel_mcp_registry:reg(tool, <<"cancellable">>, ?MODULE,
-                                  cancellable_tool, #{
-        description => <<"Long-running tool that observes cancel">>,
-        long_running => true,
-        input_schema => #{<<"type">> => <<"object">>}
-    }),
-    ok = barrel_mcp_registry:reg(resource_template, <<"file_template">>,
-                                  ?MODULE, file_resource, #{
-        name => <<"File">>,
-        uri_template => <<"file:///{path}">>,
-        description => <<"File resource template">>,
-        mime_type => <<"text/plain">>
-    }),
-    ok = barrel_mcp:reg_completion({prompt, <<"hello_prompt">>, <<"who">>},
-                                    ?MODULE, echo_completion, #{}),
+    ok = barrel_mcp_registry:reg(
+        tool,
+        <<"slow_echo">>,
+        ?MODULE,
+        slow_tool,
+        #{
+            description => <<"Long-running echo (returns a taskId)">>,
+            long_running => true,
+            input_schema => #{
+                <<"type">> => <<"object">>,
+                <<"properties">> =>
+                    #{<<"text">> => #{<<"type">> => <<"string">>}}
+            }
+        }
+    ),
+    ok = barrel_mcp_registry:reg(
+        tool,
+        <<"trigger_update">>,
+        ?MODULE,
+        trigger_update_tool,
+        #{
+            description => <<"Push notifications/resources/updated for the greeting URI">>,
+            input_schema => #{<<"type">> => <<"object">>}
+        }
+    ),
+    ok = barrel_mcp_registry:reg(
+        tool,
+        <<"ask_llm">>,
+        ?MODULE,
+        ask_llm_tool,
+        #{
+            description => <<"Ask the connected client to sample a message">>,
+            input_schema => #{<<"type">> => <<"object">>}
+        }
+    ),
+    ok = barrel_mcp_registry:reg(
+        tool,
+        <<"ask_user">>,
+        ?MODULE,
+        ask_user_tool,
+        #{
+            description => <<"Ask the connected client to elicit user input">>,
+            input_schema => #{<<"type">> => <<"object">>}
+        }
+    ),
+    ok = barrel_mcp_registry:reg(
+        tool,
+        <<"list_roots">>,
+        ?MODULE,
+        list_roots_tool,
+        #{
+            description => <<"Ask the connected client for its roots">>,
+            input_schema => #{<<"type">> => <<"object">>}
+        }
+    ),
+    ok = barrel_mcp_registry:reg(
+        tool,
+        <<"progress_echo">>,
+        ?MODULE,
+        progress_tool,
+        #{
+            description => <<"Emit a few progress events then return">>,
+            input_schema => #{<<"type">> => <<"object">>}
+        }
+    ),
+    ok = barrel_mcp_registry:reg(
+        tool,
+        <<"structured">>,
+        ?MODULE,
+        structured_tool,
+        #{
+            description => <<"Return structuredContent">>,
+            input_schema => #{<<"type">> => <<"object">>}
+        }
+    ),
+    ok = barrel_mcp_registry:reg(
+        tool,
+        <<"erroring">>,
+        ?MODULE,
+        error_tool,
+        #{
+            description => <<"Return isError: true">>,
+            input_schema => #{<<"type">> => <<"object">>}
+        }
+    ),
+    ok = barrel_mcp_registry:reg(
+        tool,
+        <<"churn_registry">>,
+        ?MODULE,
+        registry_churn_tool,
+        #{
+            description => <<
+                "Register and unregister a tool, "
+                "emitting list_changed"
+            >>,
+            input_schema => #{<<"type">> => <<"object">>}
+        }
+    ),
+    ok = barrel_mcp_registry:reg(
+        tool,
+        <<"cancellable">>,
+        ?MODULE,
+        cancellable_tool,
+        #{
+            description => <<"Long-running tool that observes cancel">>,
+            long_running => true,
+            input_schema => #{<<"type">> => <<"object">>}
+        }
+    ),
+    ok = barrel_mcp_registry:reg(
+        resource_template,
+        <<"file_template">>,
+        ?MODULE,
+        file_resource,
+        #{
+            name => <<"File">>,
+            uri_template => <<"file:///{path}">>,
+            description => <<"File resource template">>,
+            mime_type => <<"text/plain">>
+        }
+    ),
+    ok = barrel_mcp:reg_completion(
+        {prompt, <<"hello_prompt">>, <<"who">>},
+        ?MODULE,
+        echo_completion,
+        #{}
+    ),
     %% Register enough dummy tools to force multi-page behaviour
     %% on tools/list (the server paginates at 50 entries per page).
-    [ok = barrel_mcp_registry:reg(tool,
-                                    iolist_to_binary(io_lib:format(
-                                      "dummy_~3..0B", [N])),
-                                    ?MODULE, echo_tool, #{
-        description => <<"dummy">>,
-        input_schema => #{<<"type">> => <<"object">>}
-      })
-     || N <- lists:seq(1, 60)],
-    ok = barrel_mcp_registry:reg(resource, <<"greeting">>, ?MODULE,
-                                  greeting_resource, #{
-        name => <<"Greeting">>,
-        uri => <<"mem://greeting">>,
-        description => <<"Sample greeting resource">>,
-        mime_type => <<"text/plain">>
-    }),
-    ok = barrel_mcp_registry:reg(prompt, <<"hello_prompt">>, ?MODULE,
-                                  hello_prompt, #{
-        description => <<"Greet a user">>,
-        arguments => [#{name => <<"who">>, required => false}]
-    }),
+    [
+        ok = barrel_mcp_registry:reg(
+            tool,
+            iolist_to_binary(
+                io_lib:format(
+                    "dummy_~3..0B", [N]
+                )
+            ),
+            ?MODULE,
+            echo_tool,
+            #{
+                description => <<"dummy">>,
+                input_schema => #{<<"type">> => <<"object">>}
+            }
+        )
+     || N <- lists:seq(1, 60)
+    ],
+    ok = barrel_mcp_registry:reg(
+        resource,
+        <<"greeting">>,
+        ?MODULE,
+        greeting_resource,
+        #{
+            name => <<"Greeting">>,
+            uri => <<"mem://greeting">>,
+            description => <<"Sample greeting resource">>,
+            mime_type => <<"text/plain">>
+        }
+    ),
+    ok = barrel_mcp_registry:reg(
+        prompt,
+        <<"hello_prompt">>,
+        ?MODULE,
+        hello_prompt,
+        #{
+            description => <<"Greet a user">>,
+            arguments => [#{name => <<"who">>, required => false}]
+        }
+    ),
     ok.
 
 cleanup_fixture() ->
-    try barrel_mcp_registry:unreg(tool, <<"echo">>) catch _:_ -> ok end,
-    try barrel_mcp_registry:unreg(tool, <<"slow_echo">>) catch _:_ -> ok end,
-    try barrel_mcp_registry:unreg(tool, <<"trigger_update">>) catch _:_ -> ok end,
-    try barrel_mcp_registry:unreg(tool, <<"ask_llm">>) catch _:_ -> ok end,
-    try barrel_mcp_registry:unreg(tool, <<"ask_user">>) catch _:_ -> ok end,
-    try barrel_mcp_registry:unreg(tool, <<"list_roots">>) catch _:_ -> ok end,
-    try barrel_mcp_registry:unreg(tool, <<"progress_echo">>) catch _:_ -> ok end,
-    try barrel_mcp_registry:unreg(tool, <<"structured">>) catch _:_ -> ok end,
-    try barrel_mcp_registry:unreg(tool, <<"erroring">>) catch _:_ -> ok end,
-    try barrel_mcp_registry:unreg(tool, <<"churn_registry">>) catch _:_ -> ok end,
-    try barrel_mcp_registry:unreg(tool, <<"cancellable">>) catch _:_ -> ok end,
-    try barrel_mcp_registry:unreg(tool, <<"churned">>) catch _:_ -> ok end,
-    try barrel_mcp_registry:unreg(resource, <<"greeting">>) catch _:_ -> ok end,
-    try barrel_mcp_registry:unreg(resource_template, <<"file_template">>) catch _:_ -> ok end,
-    try barrel_mcp_registry:unreg(prompt, <<"hello_prompt">>) catch _:_ -> ok end,
-    try barrel_mcp:unreg_completion({prompt, <<"hello_prompt">>,
-                                     <<"who">>})
-    catch _:_ -> ok end,
-    [try barrel_mcp_registry:unreg(tool,
-              iolist_to_binary(io_lib:format("dummy_~3..0B", [N])))
-      catch _:_ -> ok end
-     || N <- lists:seq(1, 60)],
+    try
+        barrel_mcp_registry:unreg(tool, <<"echo">>)
+    catch
+        _:_ -> ok
+    end,
+    try
+        barrel_mcp_registry:unreg(tool, <<"slow_echo">>)
+    catch
+        _:_ -> ok
+    end,
+    try
+        barrel_mcp_registry:unreg(tool, <<"trigger_update">>)
+    catch
+        _:_ -> ok
+    end,
+    try
+        barrel_mcp_registry:unreg(tool, <<"ask_llm">>)
+    catch
+        _:_ -> ok
+    end,
+    try
+        barrel_mcp_registry:unreg(tool, <<"ask_user">>)
+    catch
+        _:_ -> ok
+    end,
+    try
+        barrel_mcp_registry:unreg(tool, <<"list_roots">>)
+    catch
+        _:_ -> ok
+    end,
+    try
+        barrel_mcp_registry:unreg(tool, <<"progress_echo">>)
+    catch
+        _:_ -> ok
+    end,
+    try
+        barrel_mcp_registry:unreg(tool, <<"structured">>)
+    catch
+        _:_ -> ok
+    end,
+    try
+        barrel_mcp_registry:unreg(tool, <<"erroring">>)
+    catch
+        _:_ -> ok
+    end,
+    try
+        barrel_mcp_registry:unreg(tool, <<"churn_registry">>)
+    catch
+        _:_ -> ok
+    end,
+    try
+        barrel_mcp_registry:unreg(tool, <<"cancellable">>)
+    catch
+        _:_ -> ok
+    end,
+    try
+        barrel_mcp_registry:unreg(tool, <<"churned">>)
+    catch
+        _:_ -> ok
+    end,
+    try
+        barrel_mcp_registry:unreg(resource, <<"greeting">>)
+    catch
+        _:_ -> ok
+    end,
+    try
+        barrel_mcp_registry:unreg(resource_template, <<"file_template">>)
+    catch
+        _:_ -> ok
+    end,
+    try
+        barrel_mcp_registry:unreg(prompt, <<"hello_prompt">>)
+    catch
+        _:_ -> ok
+    end,
+    try
+        barrel_mcp:unreg_completion({prompt, <<"hello_prompt">>, <<"who">>})
+    catch
+        _:_ -> ok
+    end,
+    [
+        try
+            barrel_mcp_registry:unreg(
+                tool,
+                iolist_to_binary(io_lib:format("dummy_~3..0B", [N]))
+            )
+        catch
+            _:_ -> ok
+        end
+     || N <- lists:seq(1, 60)
+    ],
     ok.
 
 echo_tool(#{<<"text">> := T}) -> T.
@@ -272,14 +464,23 @@ ask_llm_tool(_) ->
     [SessionId | _] = barrel_mcp:list_sessions_with_sampling(),
     Params = #{
         <<"messages">> =>
-            [#{<<"role">> => <<"user">>,
-               <<"content">> => #{<<"type">> => <<"text">>,
-                                   <<"text">> => <<"hi">>}}],
+            [
+                #{
+                    <<"role">> => <<"user">>,
+                    <<"content">> => #{
+                        <<"type">> => <<"text">>,
+                        <<"text">> => <<"hi">>
+                    }
+                }
+            ],
         <<"maxTokens">> => 32
     },
     {ok, Result, _Usage} =
-        barrel_mcp:sampling_create_message(SessionId, Params,
-                                           #{timeout_ms => 5000}),
+        barrel_mcp:sampling_create_message(
+            SessionId,
+            Params,
+            #{timeout_ms => 5000}
+        ),
     maps:get(<<"text">>, maps:get(<<"content">>, Result)).
 
 %% Ask the only elicitation-capable session for a structured
@@ -291,13 +492,20 @@ ask_user_tool(_) ->
         <<"mode">> => <<"form">>,
         <<"message">> => <<"Pick a colour">>,
         <<"requestedSchema">> =>
-            #{<<"type">> => <<"object">>,
-              <<"properties">> =>
-                  #{<<"colour">> =>
-                        #{<<"type">> => <<"string">>}}}
+            #{
+                <<"type">> => <<"object">>,
+                <<"properties">> =>
+                    #{
+                        <<"colour">> =>
+                            #{<<"type">> => <<"string">>}
+                    }
+            }
     },
-    {ok, Result} = barrel_mcp:elicit_create(SessionId, Params,
-                                             #{timeout_ms => 5000}),
+    {ok, Result} = barrel_mcp:elicit_create(
+        SessionId,
+        Params,
+        #{timeout_ms => 5000}
+    ),
     %% The Python callback returns action=accept,
     %% content={"colour": "blue"}. Surface the colour as text.
     Content = maps:get(<<"content">>, Result, #{}),
@@ -307,8 +515,10 @@ ask_user_tool(_) ->
 %% first root's name (so we have a deterministic string to assert on).
 list_roots_tool(_) ->
     [SessionId | _] = barrel_mcp:list_sessions_with_roots(),
-    {ok, Roots} = barrel_mcp:roots_list(SessionId,
-                                         #{timeout_ms => 5000}),
+    {ok, Roots} = barrel_mcp:roots_list(
+        SessionId,
+        #{timeout_ms => 5000}
+    ),
     [#{<<"name">> := N} | _] = Roots,
     N.
 
@@ -320,33 +530,53 @@ progress_tool(_Args, Ctx) ->
     %% Brief sleeps between emits so the SSE writer flushes each
     %% notification ahead of the synchronous tool response, which
     %% otherwise wins the race in the reference Python client.
-    Emit(1, 3, undefined), timer:sleep(50),
-    Emit(2, 3, undefined), timer:sleep(50),
-    Emit(3, 3, undefined), timer:sleep(50),
+    Emit(1, 3, undefined),
+    timer:sleep(50),
+    Emit(2, 3, undefined),
+    timer:sleep(50),
+    Emit(3, 3, undefined),
+    timer:sleep(50),
     <<"progressed">>.
 
 %% Returns structuredContent on the wire.
 structured_tool(_) ->
     Data = #{<<"answer">> => 42, <<"label">> => <<"meaning">>},
-    Content = [#{<<"type">> => <<"text">>,
-                  <<"text">> => <<"answer is 42">>}],
+    Content = [
+        #{
+            <<"type">> => <<"text">>,
+            <<"text">> => <<"answer is 42">>
+        }
+    ],
     {structured, Data, Content}.
 
 %% Returns isError: true on the wire.
 error_tool(_) ->
-    {tool_error, [#{<<"type">> => <<"text">>,
-                    <<"text">> => <<"intentional failure">>}]}.
+    {tool_error, [
+        #{
+            <<"type">> => <<"text">>,
+            <<"text">> => <<"intentional failure">>
+        }
+    ]}.
 
 %% Triggers a tools/list_changed notification by registering and
 %% then unregistering a tool.
 registry_churn_tool(_) ->
-    ok = barrel_mcp_registry:reg(tool, <<"churned">>, ?MODULE,
-                                  echo_tool, #{
-        description => <<"Transient tool registered to test list_changed">>,
-        input_schema => #{<<"type">> => <<"object">>}
-    }),
+    ok = barrel_mcp_registry:reg(
+        tool,
+        <<"churned">>,
+        ?MODULE,
+        echo_tool,
+        #{
+            description => <<"Transient tool registered to test list_changed">>,
+            input_schema => #{<<"type">> => <<"object">>}
+        }
+    ),
     timer:sleep(20),
-    try barrel_mcp_registry:unreg(tool, <<"churned">>) catch _:_ -> ok end,
+    try
+        barrel_mcp_registry:unreg(tool, <<"churned">>)
+    catch
+        _:_ -> ok
+    end,
     <<"churned">>.
 
 %% Cooperative cancel: arity-2 worker watches its mailbox for
@@ -357,9 +587,13 @@ cancellable_tool(_Args, Ctx) ->
 
 cancellable_loop(ReqId) ->
     receive
-        {cancel, ReqId} -> {tool_error,
-                             [#{<<"type">> => <<"text">>,
-                                <<"text">> => <<"cancelled">>}]}
+        {cancel, ReqId} ->
+            {tool_error, [
+                #{
+                    <<"type">> => <<"text">>,
+                    <<"text">> => <<"cancelled">>
+                }
+            ]}
     after 50 ->
         cancellable_loop(ReqId)
     end.
@@ -387,12 +621,21 @@ greeting_resource(_) -> <<"hello, world">>.
 
 hello_prompt(Args) ->
     Who = maps:get(<<"who">>, Args, <<"world">>),
-    #{description => <<"Greet">>,
-      messages => [#{<<"role">> => <<"user">>,
-                      <<"content">> => #{<<"type">> => <<"text">>,
-                                          <<"text">> =>
-                                              iolist_to_binary(
-                                                [<<"hello, ">>, Who])}}]}.
+    #{
+        description => <<"Greet">>,
+        messages => [
+            #{
+                <<"role">> => <<"user">>,
+                <<"content">> => #{
+                    <<"type">> => <<"text">>,
+                    <<"text">> =>
+                        iolist_to_binary(
+                            [<<"hello, ">>, Who]
+                        )
+                }
+            }
+        ]
+    }.
 
 %%====================================================================
 %% Helpers
@@ -404,11 +647,16 @@ python_or_skip() ->
             {skip, "INTEROP_PYTHON not set; run `make interop-test`"};
         Python ->
             case filelib:is_regular(Python) of
-                true -> Python;
+                true ->
+                    Python;
                 false ->
-                    {skip, lists:flatten(
-                             io_lib:format("INTEROP_PYTHON=~s does not exist",
-                                           [Python]))}
+                    {skip,
+                        lists:flatten(
+                            io_lib:format(
+                                "INTEROP_PYTHON=~s does not exist",
+                                [Python]
+                            )
+                        )}
             end
     end.
 
@@ -420,24 +668,30 @@ root_dir() ->
 
 find_root(Dir) ->
     case filelib:is_regular(filename:join(Dir, "rebar.config")) of
-        true -> Dir;
+        true ->
+            Dir;
         false ->
             Parent = filename:dirname(Dir),
             case Parent of
-                Dir -> Dir;  %% reached fs root, give up
+                %% reached fs root, give up
+                Dir -> Dir;
                 _ -> find_root(Parent)
             end
     end.
 
 run_python(Python, Args, Cwd) ->
-    Port = open_port({spawn_executable, Python},
-                     [{args, Args},
-                      {cd, Cwd},
-                      exit_status,
-                      stderr_to_stdout,
-                      use_stdio,
-                      binary,
-                      {line, 4096}]),
+    Port = open_port(
+        {spawn_executable, Python},
+        [
+            {args, Args},
+            {cd, Cwd},
+            exit_status,
+            stderr_to_stdout,
+            use_stdio,
+            binary,
+            {line, 4096}
+        ]
+    ),
     collect(Port, []).
 
 collect(Port, Acc) ->
@@ -449,14 +703,26 @@ collect(Port, Acc) ->
         {Port, {exit_status, Status}} ->
             {Status, lists:flatten(lists:reverse(Acc))}
     after 60000 ->
-        try port_close(Port) catch _:_ -> ok end,
+        try
+            port_close(Port)
+        catch
+            _:_ -> ok
+        end,
         {timeout, lists:flatten(lists:reverse(Acc))}
     end.
 
-wait_ready(_Pid, 0) -> {error, not_ready};
+wait_ready(_Pid, 0) ->
+    {error, not_ready};
 wait_ready(Pid, N) ->
-    case (try barrel_mcp_client:server_capabilities(Pid) catch _:_ -> error end) of
-        {ok, _} -> ok;
+    case
+        (try
+            barrel_mcp_client:server_capabilities(Pid)
+        catch
+            _:_ -> error
+        end)
+    of
+        {ok, _} ->
+            ok;
         _ ->
             timer:sleep(100),
             wait_ready(Pid, N - 1)

@@ -19,8 +19,7 @@ init(_Args) ->
     {ok, undefined}.
 
 handle_request(Method, _Params, State) ->
-    {error, ?JSONRPC_METHOD_NOT_FOUND,
-     <<"Method not found: ", Method/binary>>, State}.
+    {error, ?JSONRPC_METHOD_NOT_FOUND, <<"Method not found: ", Method/binary>>, State}.
 
 handle_notification(_Method, _Params, State) ->
     {ok, State}.

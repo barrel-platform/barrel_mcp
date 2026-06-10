@@ -73,19 +73,22 @@ authenticate(Request, State) ->
 challenge(Reason, State) ->
     HeaderName = maps:get(header_name, State, <<"x-api-key">>),
 
-    {StatusCode, ErrorCode, ErrorDesc} = case Reason of
-        unauthorized ->
-            {401, <<"invalid_request">>, <<"API key required">>};
-        invalid_credentials ->
-            {401, <<"invalid_key">>, <<"Invalid API key">>};
-        _ ->
-            {401, <<"invalid_key">>, <<"Authentication failed">>}
-    end,
+    {StatusCode, ErrorCode, ErrorDesc} =
+        case Reason of
+            unauthorized ->
+                {401, <<"invalid_request">>, <<"API key required">>};
+            invalid_credentials ->
+                {401, <<"invalid_key">>, <<"Invalid API key">>};
+            _ ->
+                {401, <<"invalid_key">>, <<"Authentication failed">>}
+        end,
 
-    Body = iolist_to_binary(json:encode(#{
-        <<"error">> => ErrorCode,
-        <<"error_description">> => ErrorDesc
-    })),
+    Body = iolist_to_binary(
+        json:encode(#{
+            <<"error">> => ErrorCode,
+            <<"error_description">> => ErrorDesc
+        })
+    ),
 
     Headers = #{
         <<"www-authenticate">> => <<"ApiKey header=\"", HeaderName/binary, "\"">>,
@@ -105,20 +108,23 @@ verify_against_state(Key, #{verifier := Verifier}) when is_function(Verifier, 1)
         {error, _} = Error ->
             Error
     end;
-verify_against_state(Key, #{keys := Keys, hash_keys := HashKeys} = State)
-  when map_size(Keys) > 0 ->
+verify_against_state(Key, #{keys := Keys, hash_keys := HashKeys} = State) when
+    map_size(Keys) > 0
+->
     %% Lookup. With `hash_keys' = true the map keys are stored as
     %% legacy hex SHA-256 digests (or, going forward, the new
     %% `hmac-sha256$...' format).
     Pepper = maps:get(pepper, State, undefined),
-    LookupKey = case HashKeys of
-        true ->
-            case Pepper of
-                undefined -> legacy_sha256_hex(Key);
-                _ -> hmac_format(Key, Pepper)
-            end;
-        false -> Key
-    end,
+    LookupKey =
+        case HashKeys of
+            true ->
+                case Pepper of
+                    undefined -> legacy_sha256_hex(Key);
+                    _ -> hmac_format(Key, Pepper)
+                end;
+            false ->
+                Key
+        end,
     case maps:get(LookupKey, Keys, undefined) of
         undefined ->
             %% Try the alternate stored form for backward compat.
@@ -139,11 +145,12 @@ verify_against_state(_Key, _State) ->
     {error, {error, no_keys_configured}}.
 
 info_to_reply(true, LookupKey) ->
-    {ok, add_provider_metadata(#{
-        subject => LookupKey,
-        scopes => [],
-        claims => #{}
-    })};
+    {ok,
+        add_provider_metadata(#{
+            subject => LookupKey,
+            scopes => [],
+            claims => #{}
+        })};
 info_to_reply(AuthInfo, _LookupKey) when is_map(AuthInfo) ->
     {ok, add_provider_metadata(AuthInfo)}.
 
@@ -198,11 +205,15 @@ verify_key(_Key, _Stored) ->
 %% tests) — the auth provider's internal authenticate path goes
 %% through `verify_against_state/2' which already has the pepper
 %% in state.
--spec verify_key(Key :: binary(), Stored :: binary(),
-                 Pepper :: binary() | undefined) ->
+-spec verify_key(
+    Key :: binary(),
+    Stored :: binary(),
+    Pepper :: binary() | undefined
+) ->
     ok | {error, invalid_credentials}.
-verify_key(Key, <<"hmac-sha256$", _/binary>> = Stored, Pepper)
-  when is_binary(Pepper) ->
+verify_key(Key, <<"hmac-sha256$", _/binary>> = Stored, Pepper) when
+    is_binary(Pepper)
+->
     Computed = hmac_format(Key, Pepper),
     case crypto:hash_equals(Computed, Stored) of
         true -> ok;
@@ -228,7 +239,7 @@ legacy_sha256_hex(Key) ->
     encode_hex(Digest).
 
 encode_hex(Bin) ->
-    << <<(hex_digit(N))>> || <<N:4>> <= Bin >>.
+    <<<<(hex_digit(N))>> || <<N:4>> <= Bin>>.
 
 hex_digit(N) when N < 10 -> $0 + N;
 hex_digit(N) -> $a + N - 10.

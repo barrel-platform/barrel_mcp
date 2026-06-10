@@ -1,27 +1,40 @@
 {application, barrel_mcp, [
     {description, "MCP Protocol Library for Erlang"},
     {vsn, "2.2.0"},
-    {registered, [barrel_mcp_registry, barrel_mcp_sup, barrel_mcp_session,
-                  barrel_mcp_tasks, barrel_mcp_client_sup]},
+    {registered, [
+        barrel_mcp_registry,
+        barrel_mcp_sup,
+        barrel_mcp_session,
+        barrel_mcp_tasks,
+        barrel_mcp_client_sup
+    ]},
     {mod, {barrel_mcp_app, []}},
     {applications, [kernel, stdlib, crypto, h1, h2, hackney]},
     {env, [
         {server_name, <<"barrel">>},
         {server_version, <<"2.2.0">>},
         {protocol_version, <<"2025-11-25">>},
-        {session_ttl, 1800000}  %% 30 minutes default
+        %% 30 minutes default
+        {session_ttl, 1800000}
     ]},
     {modules, []},
     {licenses, ["Apache-2.0"]},
     %% Files included in the hex package. Adds `docs/' and the
     %% `guides/' directory to the rebar3 default set so README
     %% links resolve in the published docs.
-    {files, ["src", "include", "priv", "rebar.config",
-             "README.md", "CHANGELOG.md", "LICENSE",
-             "guides", "docs"]},
+    {files, [
+        "src",
+        "include",
+        "priv",
+        "rebar.config",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE",
+        "guides",
+        "docs"
+    ]},
     {links, [
         {"GitHub", "https://github.com/barrel-platform/barrel_mcp"},
-        {"Changelog",
-            "https://github.com/barrel-platform/barrel_mcp/blob/main/CHANGELOG.md"}
+        {"Changelog", "https://github.com/barrel-platform/barrel_mcp/blob/main/CHANGELOG.md"}
     ]}
 ]}.

@@ -20,8 +20,14 @@
 -export([connect/2, send/2, close/1]).
 
 %% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
 -record(state, {
     owner :: pid(),
@@ -36,8 +42,9 @@
 %%====================================================================
 
 connect(Owner, #{command := Cmd} = Opts) ->
-    gen_server:start_link(?MODULE, {Owner, Cmd, maps:get(args, Opts, []),
-                                    maps:get(env, Opts, [])}, []).
+    gen_server:start_link(
+        ?MODULE, {Owner, Cmd, maps:get(args, Opts, []), maps:get(env, Opts, [])}, []
+    ).
 
 send(Pid, Body) ->
     gen_server:call(Pid, {send, iolist_to_binary(Body)}, 5000).
@@ -51,14 +58,15 @@ close(Pid) ->
 
 init({Owner, Cmd, Args, Env}) ->
     process_flag(trap_exit, true),
-    PortOpts = [
-        {args, Args},
-        {line, ?LINE_LIMIT},
-        binary,
-        use_stdio,
-        exit_status,
-        hide
-    ] ++ env_opt(Env),
+    PortOpts =
+        [
+            {args, Args},
+            {line, ?LINE_LIMIT},
+            binary,
+            use_stdio,
+            exit_status,
+            hide
+        ] ++ env_opt(Env),
     try open_port({spawn_executable, Cmd}, PortOpts) of
         Port when is_port(Port) ->
             {ok, #state{owner = Owner, port = Port}}
@@ -84,17 +92,23 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %% A complete line — emit it.
-handle_info({Port, {data, {eol, Line}}},
-            #state{port = Port, owner = Owner, buffer = Buf} = State) ->
+handle_info(
+    {Port, {data, {eol, Line}}},
+    #state{port = Port, owner = Owner, buffer = Buf} = State
+) ->
     Full = <<Buf/binary, Line/binary>>,
     Owner ! {mcp_in, self(), Full},
     {noreply, State#state{buffer = <<>>}};
 %% A partial line — buffer it until the eol arrives.
-handle_info({Port, {data, {noeol, Chunk}}},
-            #state{port = Port, buffer = Buf} = State) ->
+handle_info(
+    {Port, {data, {noeol, Chunk}}},
+    #state{port = Port, buffer = Buf} = State
+) ->
     {noreply, State#state{buffer = <<Buf/binary, Chunk/binary>>}};
-handle_info({Port, {exit_status, Status}},
-            #state{port = Port, owner = Owner} = State) ->
+handle_info(
+    {Port, {exit_status, Status}},
+    #state{port = Port, owner = Owner} = State
+) ->
     Owner ! {mcp_closed, self(), {exit_status, Status}},
     {stop, {shutdown, {exit_status, Status}}, State#state{port = undefined}};
 handle_info({'EXIT', Port, Reason}, #state{port = Port, owner = Owner} = State) ->
@@ -106,7 +120,11 @@ handle_info(_Msg, State) ->
 terminate(_Reason, #state{port = Port, owner = Owner}) ->
     case Port of
         P when is_port(P) ->
-            try port_close(P) catch _:_ -> ok end;
+            try
+                port_close(P)
+            catch
+                _:_ -> ok
+            end;
         _ ->
             ok
     end,

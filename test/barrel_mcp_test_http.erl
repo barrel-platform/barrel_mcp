@@ -39,7 +39,11 @@ start(Name, Port, Handler) when is_function(Handler, 1) ->
     Pid = spawn(fun() -> owner(Parent, Port, Handler) end),
     receive
         {Pid, {ok, _} = Ok} ->
-            try unregister(Name) catch error:badarg -> ok end,
+            try
+                unregister(Name)
+            catch
+                error:badarg -> ok
+            end,
             true = register(Name, Pid),
             Ok;
         {Pid, {error, _} = Err} ->
@@ -56,15 +60,21 @@ stop(Name) ->
         Pid ->
             Ref = erlang:monitor(process, Pid),
             Pid ! stop,
-            receive {'DOWN', Ref, process, Pid, _} -> ok
-            after 5000 -> ok end
+            receive
+                {'DOWN', Ref, process, Pid, _} -> ok
+            after 5000 -> ok
+            end
     end.
 
 owner(Parent, Port, Handler) ->
     case h1:start_server(Port, #{handler => make_handler(Handler)}) of
         {ok, ServerRef} ->
             Parent ! {self(), {ok, ServerRef}},
-            receive stop -> _ = h1:stop_server(ServerRef), ok end;
+            receive
+                stop ->
+                    _ = h1:stop_server(ServerRef),
+                    ok
+            end;
         {error, _} = Err ->
             Parent ! {self(), Err}
     end.
@@ -72,13 +82,18 @@ owner(Parent, Port, Handler) ->
 %% @doc Parse an `application/x-www-form-urlencoded' body into a map.
 form(#{body := Body}) ->
     lists:foldl(
-      fun(<<>>, Acc) -> Acc;
-         (Pair, Acc) ->
-              case binary:split(Pair, <<"=">>) of
-                  [K, V] -> Acc#{urldecode(K) => urldecode(V)};
-                  [K]    -> Acc#{urldecode(K) => <<>>}
-              end
-      end, #{}, binary:split(Body, <<"&">>, [global])).
+        fun
+            (<<>>, Acc) ->
+                Acc;
+            (Pair, Acc) ->
+                case binary:split(Pair, <<"=">>) of
+                    [K, V] -> Acc#{urldecode(K) => urldecode(V)};
+                    [K] -> Acc#{urldecode(K) => <<>>}
+                end
+        end,
+        #{},
+        binary:split(Body, <<"&">>, [global])
+    ).
 
 %% @doc Look up a request header by (case-insensitive) name.
 header(Name, #{headers := H}) ->
@@ -90,20 +105,29 @@ header(Name, #{headers := H}) ->
 
 make_handler(UserFun) ->
     fun(Conn, StreamId, Method, Path, Headers) ->
-        Req = #{method  => Method,
-                path    => path_only(Path),
-                headers => headers_map(Headers),
-                body    => read_body(Method, StreamId)},
+        Req = #{
+            method => Method,
+            path => path_only(Path),
+            headers => headers_map(Headers),
+            body => read_body(Method, StreamId)
+        },
         {Status, RHeaders, RBody} = UserFun(Req),
-        h1:respond(Conn, StreamId, Status,
-                   maps:to_list(RHeaders), iolist_to_binary(RBody))
+        h1:respond(
+            Conn,
+            StreamId,
+            Status,
+            maps:to_list(RHeaders),
+            iolist_to_binary(RBody)
+        )
     end.
 
 %% Only methods that carry a body wait for one; a bodyless GET never
 %% gets an `{h1_stream, _}' frame, so reading it would just block.
-read_body(M, StreamId) when M =:= <<"POST">>;
-                            M =:= <<"PUT">>;
-                            M =:= <<"PATCH">> ->
+read_body(M, StreamId) when
+    M =:= <<"POST">>;
+    M =:= <<"PUT">>;
+    M =:= <<"PATCH">>
+->
     collect_body(StreamId, <<>>);
 read_body(_M, _StreamId) ->
     <<>>.
@@ -136,7 +160,7 @@ urldecode(B) ->
     Spaces = binary:replace(B, <<"+">>, <<" ">>, [global]),
     case uri_string:percent_decode(Spaces) of
         Bin when is_binary(Bin) -> Bin;
-        _                       -> Spaces
+        _ -> Spaces
     end.
 
 lower(B) -> iolist_to_binary(string:lowercase(B)).

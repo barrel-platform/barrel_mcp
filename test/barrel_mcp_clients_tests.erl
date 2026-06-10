@@ -10,15 +10,13 @@
 -define(URL, <<"http://127.0.0.1:19292/mcp">>).
 
 federation_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     {timeout, 30, [
-         {"start_client registers and returns a pid", fun test_start/0},
-         {"duplicate registration is rejected", fun test_dup/0},
-         {"stop_client removes the entry", fun test_stop/0},
-         {"crash auto-removes the entry", fun test_crash/0}
-     ]}}.
+    {setup, fun setup/0, fun cleanup/1,
+        {timeout, 30, [
+            {"start_client registers and returns a pid", fun test_start/0},
+            {"duplicate registration is rejected", fun test_dup/0},
+            {"stop_client removes the entry", fun test_stop/0},
+            {"crash auto-removes the entry", fun test_crash/0}
+        ]}}.
 
 setup() ->
     {ok, _} = application:ensure_all_started(barrel_mcp),
@@ -28,9 +26,19 @@ setup() ->
     ok.
 
 cleanup(_) ->
-    try barrel_mcp_http_stream:stop() catch _:_ -> ok end,
-    [try barrel_mcp:stop_client(Id) catch _:_ -> ok end
-     || {Id, _} <- barrel_mcp:list_clients()],
+    try
+        barrel_mcp_http_stream:stop()
+    catch
+        _:_ -> ok
+    end,
+    [
+        try
+            barrel_mcp:stop_client(Id)
+        catch
+            _:_ -> ok
+        end
+     || {Id, _} <- barrel_mcp:list_clients()
+    ],
     ok.
 
 test_start() ->
@@ -44,8 +52,10 @@ test_start() ->
 test_dup() ->
     Spec = client_spec(),
     {ok, _} = barrel_mcp:start_client(<<"b">>, Spec),
-    ?assertMatch({error, {already_registered, _}},
-                 barrel_mcp:start_client(<<"b">>, Spec)),
+    ?assertMatch(
+        {error, {already_registered, _}},
+        barrel_mcp:start_client(<<"b">>, Spec)
+    ),
     barrel_mcp:stop_client(<<"b">>).
 
 test_stop() ->
@@ -67,13 +77,17 @@ test_crash() ->
 %%====================================================================
 
 client_spec() ->
-    #{transport => {http, ?URL},
-      handler => {barrel_mcp_client_handler_default, []}}.
+    #{
+        transport => {http, ?URL},
+        handler => {barrel_mcp_client_handler_default, []}
+    }.
 
-wait_until_undefined(_Id, 0) -> error(still_registered);
+wait_until_undefined(_Id, 0) ->
+    error(still_registered);
 wait_until_undefined(Id, N) ->
     case barrel_mcp:whereis_client(Id) of
-        undefined -> ok;
+        undefined ->
+            ok;
         _ ->
             timer:sleep(50),
             wait_until_undefined(Id, N - 1)

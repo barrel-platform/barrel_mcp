@@ -13,8 +13,13 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
--export([all/0, init_per_suite/1, end_per_suite/1,
-         init_per_testcase/2, end_per_testcase/2]).
+-export([
+    all/0,
+    init_per_suite/1,
+    end_per_suite/1,
+    init_per_testcase/2,
+    end_per_testcase/2
+]).
 -export([client_emits_roots_list_changed/1]).
 
 %% Roots-changed handler exported for the application env hook.
@@ -31,7 +36,11 @@ init_per_suite(Config) ->
     Config.
 
 end_per_suite(_Config) ->
-    try barrel_mcp:stop_http_stream() catch _:_ -> ok end,
+    try
+        barrel_mcp:stop_http_stream()
+    catch
+        _:_ -> ok
+    end,
     application:unset_env(barrel_mcp, roots_changed_handler),
     application:stop(barrel_mcp),
     ok.
@@ -41,7 +50,11 @@ init_per_testcase(TC, Config) ->
     [{port, Port} | Config].
 
 end_per_testcase(_TC, _Config) ->
-    try barrel_mcp:stop_http_stream() catch _:_ -> ok end,
+    try
+        barrel_mcp:stop_http_stream()
+    catch
+        _:_ -> ok
+    end,
     application:unset_env(barrel_mcp, roots_changed_handler),
     timer:sleep(50),
     ok.
@@ -52,17 +65,26 @@ end_per_testcase(_TC, _Config) ->
 
 client_emits_roots_list_changed(Config) ->
     Port = ?config(port, Config),
-    {ok, _} = barrel_mcp:start_http_stream(#{port => Port,
-                                              session_enabled => true}),
+    {ok, _} = barrel_mcp:start_http_stream(#{
+        port => Port,
+        session_enabled => true
+    }),
 
     %% Forward inbound notifications/roots/list_changed to ourselves.
     Self = self(),
     register_observer(Self),
-    application:set_env(barrel_mcp, roots_changed_handler,
-                        {?MODULE, roots_changed}),
+    application:set_env(
+        barrel_mcp,
+        roots_changed_handler,
+        {?MODULE, roots_changed}
+    ),
 
-    Url = iolist_to_binary(io_lib:format("http://127.0.0.1:~B/mcp",
-                                          [Port])),
+    Url = iolist_to_binary(
+        io_lib:format(
+            "http://127.0.0.1:~B/mcp",
+            [Port]
+        )
+    ),
     {ok, Pid} = barrel_mcp_client:start(#{
         transport => {http, Url}
     }),
@@ -86,8 +108,11 @@ client_emits_roots_list_changed(Config) ->
 
 roots_changed(Params, _State) ->
     case observer() of
-        undefined -> ok;
-        Pid -> Pid ! {roots_list_changed, Params}, ok
+        undefined ->
+            ok;
+        Pid ->
+            Pid ! {roots_list_changed, Params},
+            ok
     end.
 
 %%====================================================================
@@ -100,18 +125,32 @@ register_observer(Pid) ->
     persistent_term:put({?MODULE, observer}, Pid).
 
 unregister_observer() ->
-    try persistent_term:erase({?MODULE, observer}) catch _:_ -> ok end,
+    try
+        persistent_term:erase({?MODULE, observer})
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 observer() ->
-    try persistent_term:get({?MODULE, observer})
-    catch _:_ -> undefined
+    try
+        persistent_term:get({?MODULE, observer})
+    catch
+        _:_ -> undefined
     end.
 
-wait_ready(_Pid, 0) -> {error, not_ready};
+wait_ready(_Pid, 0) ->
+    {error, not_ready};
 wait_ready(Pid, N) ->
-    case (try barrel_mcp_client:server_capabilities(Pid) catch _:_ -> error end) of
-        {ok, _} -> ok;
+    case
+        (try
+            barrel_mcp_client:server_capabilities(Pid)
+        catch
+            _:_ -> error
+        end)
+    of
+        {ok, _} ->
+            ok;
         _ ->
             timer:sleep(100),
             wait_ready(Pid, N - 1)

@@ -18,14 +18,22 @@
 
 -behaviour(gen_server).
 
--export([start_link/0,
-         start_client/2,
-         stop_client/1,
-         whereis_client/1,
-         list_clients/0]).
+-export([
+    start_link/0,
+    start_client/2,
+    stop_client/1,
+    whereis_client/1,
+    list_clients/0
+]).
 
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
 -define(TABLE, ?MODULE).
 

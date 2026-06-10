@@ -92,15 +92,19 @@ challenge(Reason, State) ->
     %% MCP authorization sub-spec.
     Challenge = build_challenge(Realm, ErrorCode, ErrorDesc, MetaUrl),
 
-    Body = iolist_to_binary(json:encode(#{
-        <<"error">> => ErrorCode,
-        <<"error_description">> => ErrorDesc
-    })),
+    Body = iolist_to_binary(
+        json:encode(#{
+            <<"error">> => ErrorCode,
+            <<"error_description">> => ErrorDesc
+        })
+    ),
 
-    {StatusCode, #{
-        <<"www-authenticate">> => Challenge,
-        <<"content-type">> => <<"application/json">>
-    }, Body}.
+    {StatusCode,
+        #{
+            <<"www-authenticate">> => Challenge,
+            <<"content-type">> => <<"application/json">>
+        },
+        Body}.
 
 %%====================================================================
 %% Token verification
@@ -129,7 +133,8 @@ verify_token(Token, #{secret := Secret} = State) when Secret =/= undefined ->
                 Alg ->
                     %% Unsupported algorithm without custom verifier
                     error_logger:warning_msg(
-                        "Unsupported JWT algorithm ~p, use custom verifier~n", [Alg]),
+                        "Unsupported JWT algorithm ~p, use custom verifier~n", [Alg]
+                    ),
                     {error, invalid_token}
             end;
         {error, _} = Error ->
@@ -209,23 +214,28 @@ run_checks([Check | Rest]) ->
 
 check_expiration(Claims, Now, ClockSkew) ->
     case maps:get(<<"exp">>, Claims, undefined) of
-        undefined -> ok;
+        undefined ->
+            ok;
         Exp when is_integer(Exp), Exp + ClockSkew < Now ->
             {error, expired_token};
-        _ -> ok
+        _ ->
+            ok
     end.
 
 check_not_before(Claims, Now, ClockSkew) ->
     case maps:get(<<"nbf">>, Claims, undefined) of
-        undefined -> ok;
+        undefined ->
+            ok;
         Nbf when is_integer(Nbf), Nbf - ClockSkew > Now ->
             {error, invalid_token};
-        _ -> ok
+        _ ->
+            ok
     end.
 
 check_issuer(Claims, State) ->
     case maps:get(issuer, State, undefined) of
-        undefined -> ok;
+        undefined ->
+            ok;
         ExpectedIssuer ->
             case maps:get(<<"iss">>, Claims, undefined) of
                 ExpectedIssuer -> ok;
@@ -236,8 +246,7 @@ check_issuer(Claims, State) ->
 check_audience_claim(Claims, State) ->
     case maps:get(audience, State, undefined) of
         undefined -> ok;
-        ExpectedAud ->
-            check_audience(ExpectedAud, maps:get(<<"aud">>, Claims, undefined))
+        ExpectedAud -> check_audience(ExpectedAud, maps:get(<<"aud">>, Claims, undefined))
     end.
 
 check_audience(Expected, Actual) when is_binary(Expected), is_binary(Actual) ->
@@ -314,18 +323,21 @@ error_details(_) ->
 
 build_challenge(Realm, ErrorCode, ErrorDesc, ResourceMetadataUrl) ->
     Parts = [<<"Bearer realm=\"", Realm/binary, "\"">>],
-    Parts1 = case ErrorCode of
-        <<"invalid_request">> -> Parts;
-        _ -> Parts ++ [<<" error=\"", ErrorCode/binary, "\"">>]
-    end,
-    Parts2 = case ErrorDesc of
-        <<>> -> Parts1;
-        _ -> Parts1 ++ [<<" error_description=\"", ErrorDesc/binary, "\"">>]
-    end,
-    Parts3 = case ResourceMetadataUrl of
-        undefined -> Parts2;
-        Url -> Parts2 ++ [<<" resource_metadata=\"", Url/binary, "\"">>]
-    end,
+    Parts1 =
+        case ErrorCode of
+            <<"invalid_request">> -> Parts;
+            _ -> Parts ++ [<<" error=\"", ErrorCode/binary, "\"">>]
+        end,
+    Parts2 =
+        case ErrorDesc of
+            <<>> -> Parts1;
+            _ -> Parts1 ++ [<<" error_description=\"", ErrorDesc/binary, "\"">>]
+        end,
+    Parts3 =
+        case ResourceMetadataUrl of
+            undefined -> Parts2;
+            Url -> Parts2 ++ [<<" resource_metadata=\"", Url/binary, "\"">>]
+        end,
     iolist_to_binary(lists:join(<<",">>, Parts3)).
 
 %%====================================================================
@@ -334,14 +346,17 @@ build_challenge(Realm, ErrorCode, ErrorDesc, ResourceMetadataUrl) ->
 
 base64url_decode(Data) ->
     %% Add padding if necessary
-    Padded = case byte_size(Data) rem 4 of
-        0 -> Data;
-        2 -> <<Data/binary, "==">>;
-        3 -> <<Data/binary, "=">>
-    end,
+    Padded =
+        case byte_size(Data) rem 4 of
+            0 -> Data;
+            2 -> <<Data/binary, "==">>;
+            3 -> <<Data/binary, "=">>
+        end,
     %% Convert URL-safe characters
     Std = binary:replace(
         binary:replace(Padded, <<"-">>, <<"+">>, [global]),
-        <<"_">>, <<"/">>, [global]
+        <<"_">>,
+        <<"/">>,
+        [global]
     ),
     base64:decode(Std).

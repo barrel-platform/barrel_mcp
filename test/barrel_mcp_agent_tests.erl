@@ -9,21 +9,22 @@
 agent_test_() ->
     {setup, fun setup/0, fun teardown/1, fun(_) ->
         [
-            {"call_tool with no separator returns no_separator",
-             fun test_call_no_separator/0},
+            {"call_tool with no separator returns no_separator", fun test_call_no_separator/0},
             {"call_tool with unknown server returns unknown_server",
-             fun test_call_unknown_server/0},
-            {"custom separator is honoured",
-             fun test_custom_separator/0},
-            {"empty registry yields empty tool list",
-             fun test_empty_list_tools/0},
+                fun test_call_unknown_server/0},
+            {"custom separator is honoured", fun test_custom_separator/0},
+            {"empty registry yields empty tool list", fun test_empty_list_tools/0},
             {"empty registry produces empty Anthropic / OpenAI lists",
-             fun test_empty_provider_lists/0}
+                fun test_empty_provider_lists/0}
         ]
     end}.
 
 setup() ->
-    try application:stop(barrel_mcp) catch _:_ -> ok end,
+    try
+        application:stop(barrel_mcp)
+    catch
+        _:_ -> ok
+    end,
     {ok, _} = application:ensure_all_started(barrel_mcp),
     ok.
 
@@ -32,20 +33,34 @@ teardown(_) ->
     ok.
 
 test_call_no_separator() ->
-    ?assertEqual({error, no_separator},
-                 barrel_mcp_agent:call_tool(<<"plain_name">>, #{})).
+    ?assertEqual(
+        {error, no_separator},
+        barrel_mcp_agent:call_tool(<<"plain_name">>, #{})
+    ).
 
 test_call_unknown_server() ->
-    ?assertEqual({error, unknown_server},
-                 barrel_mcp_agent:call_tool(<<"ghost:tool">>, #{})).
+    ?assertEqual(
+        {error, unknown_server},
+        barrel_mcp_agent:call_tool(<<"ghost:tool">>, #{})
+    ).
 
 test_custom_separator() ->
-    ?assertEqual({error, no_separator},
-                 barrel_mcp_agent:call_tool(<<"ghost:tool">>, #{},
-                                            #{separator => <<"::">>})),
-    ?assertEqual({error, unknown_server},
-                 barrel_mcp_agent:call_tool(<<"ghost::tool">>, #{},
-                                            #{separator => <<"::">>})).
+    ?assertEqual(
+        {error, no_separator},
+        barrel_mcp_agent:call_tool(
+            <<"ghost:tool">>,
+            #{},
+            #{separator => <<"::">>}
+        )
+    ),
+    ?assertEqual(
+        {error, unknown_server},
+        barrel_mcp_agent:call_tool(
+            <<"ghost::tool">>,
+            #{},
+            #{separator => <<"::">>}
+        )
+    ).
 
 test_empty_list_tools() ->
     ?assertEqual([], barrel_mcp_agent:list_tools()).

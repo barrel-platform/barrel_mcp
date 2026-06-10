@@ -100,12 +100,12 @@
 %% expiration timestamp, token claims, and provider metadata.
 
 -type auth_error() ::
-    unauthorized |
-    invalid_token |
-    expired_token |
-    insufficient_scope |
-    invalid_credentials |
-    {error, term()}.
+    unauthorized
+    | invalid_token
+    | expired_token
+    | insufficient_scope
+    | invalid_credentials
+    | {error, term()}.
 %% Possible authentication error reasons.
 
 -type auth_config() :: #{
@@ -204,8 +204,10 @@ auth_headers(#{provider := Provider} = Config) ->
             default_auth_headers(Provider, Config)
     end.
 
-default_auth_headers(barrel_mcp_auth_bearer, _) -> [<<"authorization">>];
-default_auth_headers(barrel_mcp_auth_basic, _)  -> [<<"authorization">>];
+default_auth_headers(barrel_mcp_auth_bearer, _) ->
+    [<<"authorization">>];
+default_auth_headers(barrel_mcp_auth_basic, _) ->
+    [<<"authorization">>];
 default_auth_headers(barrel_mcp_auth_apikey, Config) ->
     Opts = maps:get(provider_opts, Config, #{}),
     Custom = maps:get(header_name, Opts, undefined),
@@ -335,16 +337,21 @@ get_authorization_header(Headers) ->
 find_header(Name, Headers) when is_map(Headers) ->
     NameLower = string:lowercase(Name),
     %% Headers might have different case
-    maps:fold(fun(K, V, Acc) ->
-        case Acc of
-            {ok, _} -> Acc;
-            error ->
-                case string:lowercase(K) of
-                    NameLower -> {ok, V};
-                    _ -> error
-                end
-        end
-    end, error, Headers);
+    maps:fold(
+        fun(K, V, Acc) ->
+            case Acc of
+                {ok, _} ->
+                    Acc;
+                error ->
+                    case string:lowercase(K) of
+                        NameLower -> {ok, V};
+                        _ -> error
+                    end
+            end
+        end,
+        error,
+        Headers
+    );
 find_header(_, _) ->
     error.
 
@@ -365,8 +372,9 @@ decode_basic_auth(Encoded) ->
             {error, no_credentials}
     end.
 
-check_scopes(RequiredScopes, #{scopes := TokenScopes} = AuthInfo)
-  when is_list(TokenScopes) ->
+check_scopes(RequiredScopes, #{scopes := TokenScopes} = AuthInfo) when
+    is_list(TokenScopes)
+->
     case lists:all(fun(S) -> lists:member(S, TokenScopes) end, RequiredScopes) of
         true -> {ok, AuthInfo};
         false -> {error, insufficient_scope}

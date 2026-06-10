@@ -73,19 +73,22 @@ authenticate(Request, State) ->
 challenge(Reason, State) ->
     Realm = maps:get(realm, State, <<"mcp">>),
 
-    {StatusCode, ErrorDesc} = case Reason of
-        unauthorized ->
-            {401, <<"Authentication required">>};
-        invalid_credentials ->
-            {401, <<"Invalid username or password">>};
-        _ ->
-            {401, <<"Authentication failed">>}
-    end,
+    {StatusCode, ErrorDesc} =
+        case Reason of
+            unauthorized ->
+                {401, <<"Authentication required">>};
+            invalid_credentials ->
+                {401, <<"Invalid username or password">>};
+            _ ->
+                {401, <<"Authentication failed">>}
+        end,
 
-    Body = iolist_to_binary(json:encode(#{
-        <<"error">> => <<"unauthorized">>,
-        <<"error_description">> => ErrorDesc
-    })),
+    Body = iolist_to_binary(
+        json:encode(#{
+            <<"error">> => <<"unauthorized">>,
+            <<"error_description">> => ErrorDesc
+        })
+    ),
 
     Headers = #{
         <<"www-authenticate">> => <<"Basic realm=\"", Realm/binary, "\", charset=\"UTF-8\"">>,
@@ -98,8 +101,9 @@ challenge(Reason, State) ->
 %% Credential verification
 %%====================================================================
 
-verify_credentials(Username, Password, #{verifier := Verifier})
-  when is_function(Verifier, 2) ->
+verify_credentials(Username, Password, #{verifier := Verifier}) when
+    is_function(Verifier, 2)
+->
     %% Custom verifier function
     case Verifier(Username, Password) of
         {ok, AuthInfo} when is_map(AuthInfo) ->
@@ -107,8 +111,9 @@ verify_credentials(Username, Password, #{verifier := Verifier})
         {error, _} = Error ->
             Error
     end;
-verify_credentials(Username, Password, #{credentials := Creds, hash_passwords := HashPwd})
-  when map_size(Creds) > 0 ->
+verify_credentials(Username, Password, #{credentials := Creds, hash_passwords := HashPwd}) when
+    map_size(Creds) > 0
+->
     %% Lookup in credentials map. The unknown-user path runs the
     %% same verify_password/2 work as the configured-user path so
     %% timing doesn't leak username existence.
@@ -184,12 +189,19 @@ hash_password(Password, Opts) ->
         'pbkdf2-sha256' ->
             Iterations = maps:get(iterations, Opts, ?PBKDF2_ITERATIONS),
             Salt = crypto:strong_rand_bytes(?PBKDF2_SALT_BYTES),
-            Hash = crypto:pbkdf2_hmac(sha256, Password, Salt,
-                                       Iterations, ?PBKDF2_HASH_BYTES),
+            Hash = crypto:pbkdf2_hmac(
+                sha256,
+                Password,
+                Salt,
+                Iterations,
+                ?PBKDF2_HASH_BYTES
+            ),
             iolist_to_binary([
                 <<"pbkdf2-sha256$">>,
-                integer_to_binary(Iterations), <<"$">>,
-                base64:encode(Salt), <<"$">>,
+                integer_to_binary(Iterations),
+                <<"$">>,
+                base64:encode(Salt),
+                <<"$">>,
                 base64:encode(Hash)
             ])
     end.
@@ -203,8 +215,13 @@ hash_password(Password, Opts) ->
 verify_password(Password, <<"pbkdf2-sha256$", Rest/binary>>) ->
     case parse_pbkdf2(Rest) of
         {ok, Iterations, Salt, ExpectedHash} ->
-            ActualHash = crypto:pbkdf2_hmac(sha256, Password, Salt,
-                                            Iterations, byte_size(ExpectedHash)),
+            ActualHash = crypto:pbkdf2_hmac(
+                sha256,
+                Password,
+                Salt,
+                Iterations,
+                byte_size(ExpectedHash)
+            ),
             case crypto:hash_equals(ActualHash, ExpectedHash) of
                 true -> ok;
                 false -> {error, invalid_credentials}
@@ -216,11 +233,14 @@ verify_password(Password, Stored) when byte_size(Stored) =:= 64 ->
     %% Legacy hex SHA-256.
     case crypto:hash_equals(legacy_sha256_hex(Password), Stored) of
         true ->
-            logger:warning("barrel_mcp_auth_basic: legacy sha256-hex "
-                           "password hash accepted; rotate to "
-                           "pbkdf2-sha256"),
+            logger:warning(
+                "barrel_mcp_auth_basic: legacy sha256-hex "
+                "password hash accepted; rotate to "
+                "pbkdf2-sha256"
+            ),
             ok;
-        false -> {error, invalid_credentials}
+        false ->
+            {error, invalid_credentials}
     end;
 verify_password(_Password, _Stored) ->
     {error, invalid_credentials}.
@@ -229,13 +249,12 @@ parse_pbkdf2(Bin) ->
     case binary:split(Bin, <<"$">>, [global]) of
         [IterBin, SaltB64, HashB64] ->
             try
-                {ok, binary_to_integer(IterBin),
-                     base64:decode(SaltB64),
-                     base64:decode(HashB64)}
+                {ok, binary_to_integer(IterBin), base64:decode(SaltB64), base64:decode(HashB64)}
             catch
                 _:_ -> error
             end;
-        _ -> error
+        _ ->
+            error
     end.
 
 legacy_sha256_hex(Password) ->
@@ -266,11 +285,12 @@ dummy_hash() ->
             H = hash_password(<<"unused-timing-stand-in">>),
             persistent_term:put(?DUMMY_HASH_KEY, H),
             H;
-        H -> H
+        H ->
+            H
     end.
 
 encode_hex(Bin) ->
-    << <<(hex_digit(N))>> || <<N:4>> <= Bin >>.
+    <<<<(hex_digit(N))>> || <<N:4>> <= Bin>>.
 
 hex_digit(N) when N < 10 -> $0 + N;
 hex_digit(N) -> $a + N - 10.

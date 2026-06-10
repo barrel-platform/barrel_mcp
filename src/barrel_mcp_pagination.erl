@@ -21,10 +21,12 @@
 -export([walk/1, walk/2]).
 
 -type fetch_fun() ::
-    fun((undefined | binary()) ->
-        {ok, [term()], undefined | binary()} |
-        {ok, [term()]} |
-        {error, term()}).
+    fun(
+        (undefined | binary()) ->
+            {ok, [term()], undefined | binary()}
+            | {ok, [term()]}
+            | {error, term()}
+    ).
 
 -export_type([fetch_fun/0]).
 

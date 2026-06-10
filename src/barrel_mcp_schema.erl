@@ -54,23 +54,28 @@ validate(_, _) ->
 
 do_validate(Value, Schema, Path) ->
     Errs0 = check_type(Value, maps:get(<<"type">>, Schema, undefined), Path),
-    Errs1 = case Errs0 of
-        [_|_] -> Errs0;
-        [] -> check_constraints(Value, Schema, Path)
-    end,
+    Errs1 =
+        case Errs0 of
+            [_ | _] -> Errs0;
+            [] -> check_constraints(Value, Schema, Path)
+        end,
     Errs1.
 
 check_constraints(Value, Schema, Path) ->
-    lists:foldl(fun(Check, Acc) ->
-        Check(Value, Schema, Path) ++ Acc
-    end, [], [
-        fun check_enum/3,
-        fun check_object/3,
-        fun check_array/3,
-        fun check_string/3,
-        fun check_number/3,
-        fun check_combinators/3
-    ]).
+    lists:foldl(
+        fun(Check, Acc) ->
+            Check(Value, Schema, Path) ++ Acc
+        end,
+        [],
+        [
+            fun check_enum/3,
+            fun check_object/3,
+            fun check_array/3,
+            fun check_string/3,
+            fun check_number/3,
+            fun check_combinators/3
+        ]
+    ).
 
 %%====================================================================
 %% Type
@@ -89,14 +94,14 @@ check_type(Value, Type, Path) when is_binary(Type) ->
         false -> [{Path, {type_mismatch, Type}}]
     end.
 
-matches_type(V, <<"object">>)  -> is_map(V);
-matches_type(V, <<"array">>)   -> is_list(V);
-matches_type(V, <<"string">>)  -> is_binary(V);
+matches_type(V, <<"object">>) -> is_map(V);
+matches_type(V, <<"array">>) -> is_list(V);
+matches_type(V, <<"string">>) -> is_binary(V);
 matches_type(V, <<"integer">>) -> is_integer(V);
-matches_type(V, <<"number">>)  -> is_integer(V) orelse is_float(V);
+matches_type(V, <<"number">>) -> is_integer(V) orelse is_float(V);
 matches_type(V, <<"boolean">>) -> is_boolean(V);
 matches_type(null, <<"null">>) -> true;
-matches_type(_, <<"null">>)    -> false;
+matches_type(_, <<"null">>) -> false;
 matches_type(_, _) -> true.
 
 %%====================================================================
@@ -108,7 +113,8 @@ check_enum(Value, #{<<"enum">> := Allowed}, Path) when is_list(Allowed) ->
         true -> [];
         false -> [{Path, {not_in_enum, Allowed}}]
     end;
-check_enum(_, _, _) -> [].
+check_enum(_, _, _) ->
+    [].
 
 %%====================================================================
 %% Object
@@ -118,20 +124,30 @@ check_object(Value, Schema, Path) when is_map(Value) ->
     Required = maps:get(<<"required">>, Schema, []),
     Properties = maps:get(<<"properties">>, Schema, #{}),
     AdditionalAllowed = maps:get(<<"additionalProperties">>, Schema, true),
-    MissingErrs = [{Path, {missing_required, K}}
-                   || K <- Required, not maps:is_key(K, Value)],
-    PropErrs = lists:flatten(maps:fold(fun(K, V, Acc) ->
-        case maps:find(K, Properties) of
-            {ok, Sub} -> [do_validate(V, Sub, Path ++ [K]) | Acc];
-            error ->
-                case AdditionalAllowed of
-                    false -> [[{Path, {unexpected_property, K}}] | Acc];
-                    _ -> Acc
+    MissingErrs = [
+        {Path, {missing_required, K}}
+     || K <- Required, not maps:is_key(K, Value)
+    ],
+    PropErrs = lists:flatten(
+        maps:fold(
+            fun(K, V, Acc) ->
+                case maps:find(K, Properties) of
+                    {ok, Sub} ->
+                        [do_validate(V, Sub, Path ++ [K]) | Acc];
+                    error ->
+                        case AdditionalAllowed of
+                            false -> [[{Path, {unexpected_property, K}}] | Acc];
+                            _ -> Acc
+                        end
                 end
-        end
-    end, [], Value)),
+            end,
+            [],
+            Value
+        )
+    ),
     MissingErrs ++ PropErrs;
-check_object(_, _, _) -> [].
+check_object(_, _, _) ->
+    [].
 
 %%====================================================================
 %% Array
@@ -139,34 +155,48 @@ check_object(_, _, _) -> [].
 
 check_array(Value, Schema, Path) when is_list(Value) ->
     LenErrs = length_errors(Value, Schema, Path),
-    UniqErrs = case maps:get(<<"uniqueItems">>, Schema, false) of
-        true ->
-            case length(lists:usort(Value)) =:= length(Value) of
-                true -> [];
-                false -> [{Path, items_not_unique}]
-            end;
-        _ -> []
-    end,
-    ItemErrs = case maps:get(<<"items">>, Schema, undefined) of
-        undefined -> [];
-        Sub when is_map(Sub) ->
-            {Errs, _} = lists:foldl(fun(V, {Acc, I}) ->
-                {do_validate(V, Sub, Path ++ [I]) ++ Acc, I + 1}
-            end, {[], 0}, Value),
-            Errs;
-        _ -> []
-    end,
+    UniqErrs =
+        case maps:get(<<"uniqueItems">>, Schema, false) of
+            true ->
+                case length(lists:usort(Value)) =:= length(Value) of
+                    true -> [];
+                    false -> [{Path, items_not_unique}]
+                end;
+            _ ->
+                []
+        end,
+    ItemErrs =
+        case maps:get(<<"items">>, Schema, undefined) of
+            undefined ->
+                [];
+            Sub when is_map(Sub) ->
+                {Errs, _} = lists:foldl(
+                    fun(V, {Acc, I}) ->
+                        {do_validate(V, Sub, Path ++ [I]) ++ Acc, I + 1}
+                    end,
+                    {[], 0},
+                    Value
+                ),
+                Errs;
+            _ ->
+                []
+        end,
     LenErrs ++ UniqErrs ++ ItemErrs;
-check_array(_, _, _) -> [].
+check_array(_, _, _) ->
+    [].
 
 length_errors(List, Schema, Path) ->
     Len = length(List),
     Min = maps:get(<<"minItems">>, Schema, undefined),
     Max = maps:get(<<"maxItems">>, Schema, undefined),
-    [ {Path, {too_short, {min, Min}, {got, Len}}}
-      || Min =/= undefined, Len < Min ] ++
-    [ {Path, {too_long, {max, Max}, {got, Len}}}
-      || Max =/= undefined, Len > Max ].
+    [
+        {Path, {too_short, {min, Min}, {got, Len}}}
+     || Min =/= undefined, Len < Min
+    ] ++
+        [
+            {Path, {too_long, {max, Max}, {got, Len}}}
+         || Max =/= undefined, Len > Max
+        ].
 
 %%====================================================================
 %% String
@@ -176,14 +206,20 @@ check_string(Value, Schema, Path) when is_binary(Value) ->
     MinL = maps:get(<<"minLength">>, Schema, undefined),
     MaxL = maps:get(<<"maxLength">>, Schema, undefined),
     Len = byte_size(Value),
-    [{Path, {too_short, {min, MinL}, {got, Len}}}
-     || MinL =/= undefined, Len < MinL] ++
-    [{Path, {too_long, {max, MaxL}, {got, Len}}}
-     || MaxL =/= undefined, Len > MaxL] ++
-    pattern_errors(Value, maps:get(<<"pattern">>, Schema, undefined), Path);
-check_string(_, _, _) -> [].
+    [
+        {Path, {too_short, {min, MinL}, {got, Len}}}
+     || MinL =/= undefined, Len < MinL
+    ] ++
+        [
+            {Path, {too_long, {max, MaxL}, {got, Len}}}
+         || MaxL =/= undefined, Len > MaxL
+        ] ++
+        pattern_errors(Value, maps:get(<<"pattern">>, Schema, undefined), Path);
+check_string(_, _, _) ->
+    [].
 
-pattern_errors(_, undefined, _) -> [];
+pattern_errors(_, undefined, _) ->
+    [];
 pattern_errors(Value, Pattern, Path) when is_binary(Pattern) ->
     case re:run(Value, Pattern, [{capture, none}, unicode]) of
         match -> [];
@@ -202,17 +238,23 @@ check_number(Value, Schema, Path) when is_integer(Value); is_float(Value) ->
         {<<"exclusiveMinimum">>, fun(V, B) -> V > B end, too_small},
         {<<"exclusiveMaximum">>, fun(V, B) -> V < B end, too_large}
     ],
-    lists:foldl(fun({Key, Pred, ErrTag}, Acc) ->
-        case maps:get(Key, Schema, undefined) of
-            undefined -> Acc;
-            Bound ->
-                case Pred(Value, Bound) of
-                    true -> Acc;
-                    false -> [{Path, {ErrTag, {Key, Bound}, {got, Value}}} | Acc]
-                end
-        end
-    end, [], Bounds);
-check_number(_, _, _) -> [].
+    lists:foldl(
+        fun({Key, Pred, ErrTag}, Acc) ->
+            case maps:get(Key, Schema, undefined) of
+                undefined ->
+                    Acc;
+                Bound ->
+                    case Pred(Value, Bound) of
+                        true -> Acc;
+                        false -> [{Path, {ErrTag, {Key, Bound}, {got, Value}}} | Acc]
+                    end
+            end
+        end,
+        [],
+        Bounds
+    );
+check_number(_, _, _) ->
+    [].
 
 %%====================================================================
 %% allOf / anyOf / oneOf
@@ -224,18 +266,21 @@ check_combinators(Value, Schema, Path) ->
     OneOf = check_one_of(Value, maps:get(<<"oneOf">>, Schema, undefined), Path),
     AllOf ++ AnyOf ++ OneOf.
 
-check_all_of(_, undefined, _) -> [];
+check_all_of(_, undefined, _) ->
+    [];
 check_all_of(Value, Schemas, Path) when is_list(Schemas) ->
     lists:flatten([do_validate(Value, S, Path) || S <- Schemas]).
 
-check_any_of(_, undefined, _) -> [];
+check_any_of(_, undefined, _) ->
+    [];
 check_any_of(Value, Schemas, Path) when is_list(Schemas) ->
     case lists:any(fun(S) -> do_validate(Value, S, Path) =:= [] end, Schemas) of
         true -> [];
         false -> [{Path, no_anyof_match}]
     end.
 
-check_one_of(_, undefined, _) -> [];
+check_one_of(_, undefined, _) ->
+    [];
 check_one_of(Value, Schemas, Path) when is_list(Schemas) ->
     Matches = length([1 || S <- Schemas, do_validate(Value, S, Path) =:= []]),
     case Matches of

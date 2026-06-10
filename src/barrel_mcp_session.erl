@@ -73,7 +73,8 @@
 -define(PENDING_TABLE, barrel_mcp_pending_requests).
 %% In-flight tool calls per session: {{SessionId, RequestId} => #in_flight{}}
 -define(INFLIGHT_TABLE, barrel_mcp_inflight).
--define(CLEANUP_INTERVAL, 60000). %% 1 minute
+%% 1 minute
+-define(CLEANUP_INTERVAL, 60000).
 -define(DEFAULT_SAMPLING_TIMEOUT, 30000).
 
 -record(mcp_session, {
@@ -83,7 +84,8 @@
     client_info :: map(),
     client_capabilities :: map(),
     protocol_version :: binary(),
-    sse_pid :: pid() | undefined,  %% Process handling SSE stream
+    %% Process handling SSE stream
+    sse_pid :: pid() | undefined,
     %% Recent SSE events (newest first) for `Last-Event-ID' replay.
     sse_buffer = [] :: [{binary(), map()}],
     sse_buffer_max = 256 :: pos_integer(),
@@ -93,8 +95,15 @@
     log_level = info :: log_level()
 }).
 
--type log_level() :: debug | info | notice | warning | error
-                   | critical | alert | emergency.
+-type log_level() ::
+    debug
+    | info
+    | notice
+    | warning
+    | error
+    | critical
+    | alert
+    | emergency.
 
 %% Async tool call in-flight tracking.
 -record(in_flight, {
@@ -161,9 +170,13 @@ generate_id() ->
 %% @doc List all sessions.
 -spec list() -> [map()].
 list() ->
-    ets:foldl(fun({_, Session}, Acc) ->
-        [session_to_map(Session) | Acc]
-    end, [], ?SESSION_TABLE).
+    ets:foldl(
+        fun({_, Session}, Acc) ->
+            [session_to_map(Session) | Acc]
+        end,
+        [],
+        ?SESSION_TABLE
+    ).
 
 %% @doc Set the client_capabilities map for a session. Called from the
 %% protocol handler after parsing the `initialize' request.
@@ -205,12 +218,16 @@ has_sampling(SessionId) ->
 %% @doc List session ids whose client declared sampling capability.
 -spec list_sampling_capable() -> [binary()].
 list_sampling_capable() ->
-    ets:foldl(fun({Id, #mcp_session{client_capabilities = Caps}}, Acc) ->
-        case maps:is_key(<<"sampling">>, Caps) of
-            true -> [Id | Acc];
-            false -> Acc
-        end
-    end, [], ?SESSION_TABLE).
+    ets:foldl(
+        fun({Id, #mcp_session{client_capabilities = Caps}}, Acc) ->
+            case maps:is_key(<<"sampling">>, Caps) of
+                true -> [Id | Acc];
+                false -> Acc
+            end
+        end,
+        [],
+        ?SESSION_TABLE
+    ).
 
 %% @doc Whether a session declared elicitation capability in its
 %% initialize request.
@@ -226,12 +243,16 @@ has_elicitation(SessionId) ->
 %% @doc List session ids whose client declared elicitation capability.
 -spec list_elicitation_capable() -> [binary()].
 list_elicitation_capable() ->
-    ets:foldl(fun({Id, #mcp_session{client_capabilities = Caps}}, Acc) ->
-        case maps:is_key(<<"elicitation">>, Caps) of
-            true -> [Id | Acc];
-            false -> Acc
-        end
-    end, [], ?SESSION_TABLE).
+    ets:foldl(
+        fun({Id, #mcp_session{client_capabilities = Caps}}, Acc) ->
+            case maps:is_key(<<"elicitation">>, Caps) of
+                true -> [Id | Acc];
+                false -> Acc
+            end
+        end,
+        [],
+        ?SESSION_TABLE
+    ).
 
 %% @doc Whether a session declared roots capability in its initialize
 %% request.
@@ -247,12 +268,16 @@ has_roots(SessionId) ->
 %% @doc List session ids whose client declared roots capability.
 -spec list_roots_capable() -> [binary()].
 list_roots_capable() ->
-    ets:foldl(fun({Id, #mcp_session{client_capabilities = Caps}}, Acc) ->
-        case maps:is_key(<<"roots">>, Caps) of
-            true -> [Id | Acc];
-            false -> Acc
-        end
-    end, [], ?SESSION_TABLE).
+    ets:foldl(
+        fun({Id, #mcp_session{client_capabilities = Caps}}, Acc) ->
+            case maps:is_key(<<"roots">>, Caps) of
+                true -> [Id | Acc];
+                false -> Acc
+            end
+        end,
+        [],
+        ?SESSION_TABLE
+    ).
 
 %% @doc Set the per-session log level (driven by `logging/setLevel').
 %% `Level' is one of the eight RFC 5424 levels accepted by the MCP
@@ -286,30 +311,49 @@ log_level_priority(Level) ->
         error -> error
     end.
 
-level_priority(debug)     -> 0;
-level_priority(info)      -> 1;
-level_priority(notice)    -> 2;
-level_priority(warning)   -> 3;
-level_priority(error)     -> 4;
-level_priority(critical)  -> 5;
-level_priority(alert)     -> 6;
+level_priority(debug) -> 0;
+level_priority(info) -> 1;
+level_priority(notice) -> 2;
+level_priority(warning) -> 3;
+level_priority(error) -> 4;
+level_priority(critical) -> 5;
+level_priority(alert) -> 6;
 level_priority(emergency) -> 7.
 
 parse_level(L) when is_atom(L) ->
-    case lists:member(L, [debug, info, notice, warning, error,
-                          critical, alert, emergency]) of
+    case
+        lists:member(L, [
+            debug,
+            info,
+            notice,
+            warning,
+            error,
+            critical,
+            alert,
+            emergency
+        ])
+    of
         true -> {ok, L};
         false -> error
     end;
-parse_level(<<"debug">>)     -> {ok, debug};
-parse_level(<<"info">>)      -> {ok, info};
-parse_level(<<"notice">>)    -> {ok, notice};
-parse_level(<<"warning">>)   -> {ok, warning};
-parse_level(<<"error">>)     -> {ok, error};
-parse_level(<<"critical">>)  -> {ok, critical};
-parse_level(<<"alert">>)     -> {ok, alert};
-parse_level(<<"emergency">>) -> {ok, emergency};
-parse_level(_)               -> error.
+parse_level(<<"debug">>) ->
+    {ok, debug};
+parse_level(<<"info">>) ->
+    {ok, info};
+parse_level(<<"notice">>) ->
+    {ok, notice};
+parse_level(<<"warning">>) ->
+    {ok, warning};
+parse_level(<<"error">>) ->
+    {ok, error};
+parse_level(<<"critical">>) ->
+    {ok, critical};
+parse_level(<<"alert">>) ->
+    {ok, alert};
+parse_level(<<"emergency">>) ->
+    {ok, emergency};
+parse_level(_) ->
+    error.
 
 %% @doc Set the SSE process pid for a session.
 -spec set_sse_pid(binary(), pid() | undefined) -> ok | {error, not_found}.
@@ -326,8 +370,9 @@ get_sse_pid(SessionId) ->
 
 %% @doc Subscribe a session to resource updates for a given URI.
 -spec subscribe_resource(binary(), binary()) -> ok.
-subscribe_resource(SessionId, Uri)
-        when is_binary(SessionId), is_binary(Uri) ->
+subscribe_resource(SessionId, Uri) when
+    is_binary(SessionId), is_binary(Uri)
+->
     gen_server:call(?MODULE, {subscribe_resource, SessionId, Uri}).
 
 -spec unsubscribe_resource(binary(), binary()) -> ok.
@@ -348,10 +393,11 @@ subscribers_for(Uri) when is_binary(Uri) ->
 %% sse_pid, and (c) have declared sampling capability in initialize.
 -spec sampling_create_message(binary(), map(), map()) ->
     {ok, map(), map()}
-  | {error, timeout | not_supported | no_sse | not_found | term()}.
+    | {error, timeout | not_supported | no_sse | not_found | term()}.
 sampling_create_message(SessionId, Params, Opts) ->
     case has_sampling(SessionId) of
-        false -> {error, not_supported};
+        false ->
+            {error, not_supported};
         true ->
             case get_sse_pid(SessionId) of
                 {error, _} = E -> E;
@@ -364,10 +410,11 @@ sampling_create_message(SessionId, Params, Opts) ->
 %% sse_pid, and (c) have declared elicitation capability in initialize.
 -spec elicit_create(binary(), map(), map()) ->
     {ok, map()}
-  | {error, timeout | not_supported | no_sse | not_found | term()}.
+    | {error, timeout | not_supported | no_sse | not_found | term()}.
 elicit_create(SessionId, Params, Opts) ->
     case has_elicitation(SessionId) of
-        false -> {error, not_supported};
+        false ->
+            {error, not_supported};
         true ->
             case get_sse_pid(SessionId) of
                 {error, _} = E -> E;
@@ -380,10 +427,11 @@ elicit_create(SessionId, Params, Opts) ->
 %% and (c) have declared roots capability in initialize.
 -spec roots_list(binary(), map()) ->
     {ok, [map()]}
-  | {error, timeout | not_supported | no_sse | not_found | term()}.
+    | {error, timeout | not_supported | no_sse | not_found | term()}.
 roots_list(SessionId, Opts) ->
     case has_roots(SessionId) of
-        false -> {error, not_supported};
+        false ->
+            {error, not_supported};
         true ->
             case get_sse_pid(SessionId) of
                 {error, _} = E -> E;
@@ -404,43 +452,55 @@ deliver_response(Id, Response) ->
 -spec broadcast_list_changed(handler_type()) -> ok.
 broadcast_list_changed(Kind) ->
     case {whereis(?MODULE), list_changed_method(Kind)} of
-        {undefined, _} -> ok;
-        {_, undefined} -> ok;  %% kind has no list_changed notification
+        {undefined, _} ->
+            ok;
+        %% kind has no list_changed notification
+        {_, undefined} ->
+            ok;
         {_, Method} ->
-            Notif = #{<<"jsonrpc">> => <<"2.0">>,
-                      <<"method">> => Method,
-                      <<"params">> => #{}},
+            Notif = #{
+                <<"jsonrpc">> => <<"2.0">>,
+                <<"method">> => Method,
+                <<"params">> => #{}
+            },
             broadcast_to_sse_sessions(Notif)
     end.
 
-list_changed_method(tool)              -> <<"notifications/tools/list_changed">>;
-list_changed_method(resource)          -> <<"notifications/resources/list_changed">>;
+list_changed_method(tool) -> <<"notifications/tools/list_changed">>;
+list_changed_method(resource) -> <<"notifications/resources/list_changed">>;
 list_changed_method(resource_template) -> <<"notifications/resources/list_changed">>;
-list_changed_method(prompt)            -> <<"notifications/prompts/list_changed">>;
-list_changed_method(completion)        -> undefined.
+list_changed_method(prompt) -> <<"notifications/prompts/list_changed">>;
+list_changed_method(completion) -> undefined.
 
 broadcast_to_sse_sessions(Notification) ->
     %% Reads from a `protected' ETS via direct ets:foldl/3 work fine
     %% from any process. We only need the gen_server when we mutate
     %% the table.
     case ets:whereis(?SESSION_TABLE) of
-        undefined -> ok;
+        undefined ->
+            ok;
         _ ->
-            ets:foldl(fun
-                ({_Id, #mcp_session{sse_pid = Pid}}, Acc) when is_pid(Pid) ->
-                    Pid ! {sse_send_message, Notification},
-                    Acc;
-                (_, Acc) -> Acc
-            end, ok, ?SESSION_TABLE)
+            ets:foldl(
+                fun
+                    ({_Id, #mcp_session{sse_pid = Pid}}, Acc) when is_pid(Pid) ->
+                        Pid ! {sse_send_message, Notification},
+                        Acc;
+                    (_, Acc) ->
+                        Acc
+                end,
+                ok,
+                ?SESSION_TABLE
+            )
     end.
 
 %% @doc Record an in-flight tool call so a later
 %% `notifications/cancelled' can find the worker and waiter.
 -spec record_in_flight(binary(), integer() | binary(), pid(), pid()) -> ok.
 record_in_flight(SessionId, RequestId, WorkerPid, WaiterPid) ->
-    gen_server:call(?MODULE,
-                    {record_in_flight, SessionId, RequestId,
-                     WorkerPid, WaiterPid}).
+    gen_server:call(
+        ?MODULE,
+        {record_in_flight, SessionId, RequestId, WorkerPid, WaiterPid}
+    ).
 
 %% @doc Cancel an in-flight tool call. Sends `{cancel, RequestId}'
 %% to the worker and `{cancelled, RequestId}' to the waiter, then
@@ -459,8 +519,10 @@ clear_in_flight(SessionId, RequestId) ->
 %% replay via `Last-Event-ID'.
 -spec record_sse_event(binary(), binary(), map()) -> ok.
 record_sse_event(SessionId, EventId, Payload) ->
-    gen_server:call(?MODULE,
-                    {record_sse_event, SessionId, EventId, Payload}).
+    gen_server:call(
+        ?MODULE,
+        {record_sse_event, SessionId, EventId, Payload}
+    ).
 
 %% @doc Return SSE events newer than `LastId' (oldest first), or
 %% `truncated' when `LastId' is older than the oldest buffered event.
@@ -470,7 +532,8 @@ events_since(SessionId, LastId) ->
     case ets:lookup(?SESSION_TABLE, SessionId) of
         [{_, #mcp_session{sse_buffer = Buf}}] ->
             collect_after(Buf, LastId);
-        [] -> {error, not_found}
+        [] ->
+            {error, not_found}
     end.
 
 %% Buffer is newest-first. Return events after `LastId' in
@@ -498,18 +561,24 @@ set_sse_buffer_max(SessionId, Max) when is_integer(Max), Max > 0 ->
 notify_progress(SessionId, Token, Progress, Total) ->
     case get_sse_pid(SessionId) of
         {ok, Pid} ->
-            Params0 = #{<<"progressToken">> => Token,
-                        <<"progress">> => Progress},
-            Params = case Total of
-                         undefined -> Params0;
-                         _ -> Params0#{<<"total">> => Total}
-                     end,
-            Pid ! {sse_send_message,
-                   #{<<"jsonrpc">> => <<"2.0">>,
-                     <<"method">> => <<"notifications/progress">>,
-                     <<"params">> => Params}},
+            Params0 = #{
+                <<"progressToken">> => Token,
+                <<"progress">> => Progress
+            },
+            Params =
+                case Total of
+                    undefined -> Params0;
+                    _ -> Params0#{<<"total">> => Total}
+                end,
+            Pid !
+                {sse_send_message, #{
+                    <<"jsonrpc">> => <<"2.0">>,
+                    <<"method">> => <<"notifications/progress">>,
+                    <<"params">> => Params
+                }},
             ok;
-        _ -> ok
+        _ ->
+            ok
     end.
 
 %% @doc Cleanup sessions older than TTL milliseconds. Routes through
@@ -528,7 +597,8 @@ delete_inline(SessionId) ->
     case ets:lookup(?SESSION_TABLE, SessionId) of
         [{_, #mcp_session{sse_pid = Pid}}] when is_pid(Pid) ->
             Pid ! session_terminated;
-        _ -> ok
+        _ ->
+            ok
     end,
     true = ets:delete(?SESSION_TABLE, SessionId),
     ok.
@@ -561,150 +631,173 @@ handle_call({create, Opts}, _From, State) ->
     },
     true = ets:insert(?SESSION_TABLE, {SessionId, Session}),
     {reply, {ok, SessionId}, State};
-
 handle_call({update_activity, SessionId}, _From, State) ->
-    Reply = case ets:lookup(?SESSION_TABLE, SessionId) of
-        [{_, Session}] ->
-            Now = erlang:system_time(millisecond),
-            Updated = Session#mcp_session{last_activity = Now},
-            true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
-            ok;
-        [] ->
-            {error, not_found}
-    end,
+    Reply =
+        case ets:lookup(?SESSION_TABLE, SessionId) of
+            [{_, Session}] ->
+                Now = erlang:system_time(millisecond),
+                Updated = Session#mcp_session{last_activity = Now},
+                true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
+                ok;
+            [] ->
+                {error, not_found}
+        end,
     {reply, Reply, State};
-
 handle_call({delete, SessionId}, _From, State) ->
     case ets:lookup(?SESSION_TABLE, SessionId) of
         [{_, #mcp_session{sse_pid = Pid}}] when is_pid(Pid) ->
             Pid ! session_terminated;
-        _ -> ok
+        _ ->
+            ok
     end,
     true = ets:delete(?SESSION_TABLE, SessionId),
     {reply, ok, State};
-
 handle_call({set_client_capabilities, SessionId, Caps}, _From, State) ->
-    Reply = case ets:lookup(?SESSION_TABLE, SessionId) of
-        [{_, Session}] ->
-            Updated = Session#mcp_session{client_capabilities = Caps},
-            true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
-            ok;
-        [] -> {error, not_found}
-    end,
+    Reply =
+        case ets:lookup(?SESSION_TABLE, SessionId) of
+            [{_, Session}] ->
+                Updated = Session#mcp_session{client_capabilities = Caps},
+                true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
+                ok;
+            [] ->
+                {error, not_found}
+        end,
     {reply, Reply, State};
-
 handle_call({set_log_level, SessionId, Level}, _From, State) ->
-    Reply = case ets:lookup(?SESSION_TABLE, SessionId) of
-        [{_, Session}] ->
-            Updated = Session#mcp_session{log_level = Level},
-            true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
-            ok;
-        [] -> {error, not_found}
-    end,
+    Reply =
+        case ets:lookup(?SESSION_TABLE, SessionId) of
+            [{_, Session}] ->
+                Updated = Session#mcp_session{log_level = Level},
+                true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
+                ok;
+            [] ->
+                {error, not_found}
+        end,
     {reply, Reply, State};
-
 handle_call({set_protocol_version, SessionId, Version}, _From, State) ->
-    Reply = case ets:lookup(?SESSION_TABLE, SessionId) of
-        [{_, Session}] ->
-            Updated = Session#mcp_session{protocol_version = Version},
-            true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
-            ok;
-        [] -> {error, not_found}
-    end,
+    Reply =
+        case ets:lookup(?SESSION_TABLE, SessionId) of
+            [{_, Session}] ->
+                Updated = Session#mcp_session{protocol_version = Version},
+                true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
+                ok;
+            [] ->
+                {error, not_found}
+        end,
     {reply, Reply, State};
-
 handle_call({set_sse_pid, SessionId, Pid}, _From, State) ->
-    Reply = case ets:lookup(?SESSION_TABLE, SessionId) of
-        [{_, Session}] ->
-            Updated = Session#mcp_session{sse_pid = Pid},
-            true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
-            ok;
-        [] -> {error, not_found}
-    end,
+    Reply =
+        case ets:lookup(?SESSION_TABLE, SessionId) of
+            [{_, Session}] ->
+                Updated = Session#mcp_session{sse_pid = Pid},
+                true = ets:insert(?SESSION_TABLE, {SessionId, Updated}),
+                ok;
+            [] ->
+                {error, not_found}
+        end,
     {reply, Reply, State};
-
 handle_call({subscribe_resource, SessionId, Uri}, _From, State) ->
     true = ets:insert(?SUBSCRIPTIONS_TABLE, {{SessionId, Uri}}),
     {reply, ok, State};
-
 handle_call({unsubscribe_resource, SessionId, Uri}, _From, State) ->
     true = ets:delete(?SUBSCRIPTIONS_TABLE, {SessionId, Uri}),
     {reply, ok, State};
-
 handle_call({register_pending, RequestId, Pending}, _From, State) ->
     true = ets:insert(?PENDING_TABLE, {RequestId, Pending}),
     {reply, ok, State};
-
 handle_call({discard_pending, RequestId}, _From, State) ->
     true = ets:delete(?PENDING_TABLE, RequestId),
     {reply, ok, State};
-
 handle_call({deliver_response, Key, Response}, _From, State) ->
-    Reply = case ets:lookup(?PENDING_TABLE, Key) of
-        [{_, #pending{caller = Caller, caller_ref = Ref, tag = Tag}}] ->
-            true = ets:delete(?PENDING_TABLE, Key),
-            Caller ! {Tag, Ref, Response},
-            ok;
-        [] ->
-            {error, unknown_id}
-    end,
+    Reply =
+        case ets:lookup(?PENDING_TABLE, Key) of
+            [{_, #pending{caller = Caller, caller_ref = Ref, tag = Tag}}] ->
+                true = ets:delete(?PENDING_TABLE, Key),
+                Caller ! {Tag, Ref, Response},
+                ok;
+            [] ->
+                {error, unknown_id}
+        end,
     {reply, Reply, State};
-
-handle_call({record_in_flight, SessionId, RequestId, Worker, Waiter},
-            _From, State) ->
+handle_call(
+    {record_in_flight, SessionId, RequestId, Worker, Waiter},
+    _From,
+    State
+) ->
     InFlight = #in_flight{
-        session_id = SessionId, request_id = RequestId,
-        worker_pid = Worker, waiter_pid = Waiter
+        session_id = SessionId,
+        request_id = RequestId,
+        worker_pid = Worker,
+        waiter_pid = Waiter
     },
     true = ets:insert(?INFLIGHT_TABLE, {{SessionId, RequestId}, InFlight}),
     {reply, ok, State};
-
 handle_call({cancel_in_flight, SessionId, RequestId}, _From, State) ->
     case ets:lookup(?INFLIGHT_TABLE, {SessionId, RequestId}) of
         [{_, #in_flight{worker_pid = W, waiter_pid = Wt}}] ->
-            _ = (try W ! {cancel, RequestId} catch _:_ -> ok end),
-            _ = (try Wt ! {cancelled, RequestId} catch _:_ -> ok end),
+            _ =
+                (try
+                    W ! {cancel, RequestId}
+                catch
+                    _:_ -> ok
+                end),
+            _ =
+                (try
+                    Wt ! {cancelled, RequestId}
+                catch
+                    _:_ -> ok
+                end),
             true = ets:delete(?INFLIGHT_TABLE, {SessionId, RequestId});
-        [] -> ok
+        [] ->
+            ok
     end,
     {reply, ok, State};
-
 handle_call({clear_in_flight, SessionId, RequestId}, _From, State) ->
     true = ets:delete(?INFLIGHT_TABLE, {SessionId, RequestId}),
     {reply, ok, State};
-
 handle_call({record_sse_event, SessionId, EventId, Payload}, _From, State) ->
     case ets:lookup(?SESSION_TABLE, SessionId) of
         [{_, #mcp_session{sse_buffer = Buf, sse_buffer_max = Max} = S}] ->
             NewBuf = trim([{EventId, Payload} | Buf], Max),
-            true = ets:insert(?SESSION_TABLE,
-                              {SessionId, S#mcp_session{sse_buffer = NewBuf}}),
+            true = ets:insert(
+                ?SESSION_TABLE,
+                {SessionId, S#mcp_session{sse_buffer = NewBuf}}
+            ),
             ok;
-        [] -> ok
+        [] ->
+            ok
     end,
     {reply, ok, State};
-
 handle_call({set_sse_buffer_max, SessionId, Max}, _From, State) ->
-    Reply = case ets:lookup(?SESSION_TABLE, SessionId) of
-        [{_, S}] ->
-            true = ets:insert(?SESSION_TABLE,
-                              {SessionId, S#mcp_session{sse_buffer_max = Max}}),
-            ok;
-        [] -> {error, not_found}
-    end,
+    Reply =
+        case ets:lookup(?SESSION_TABLE, SessionId) of
+            [{_, S}] ->
+                true = ets:insert(
+                    ?SESSION_TABLE,
+                    {SessionId, S#mcp_session{sse_buffer_max = Max}}
+                ),
+                ok;
+            [] ->
+                {error, not_found}
+        end,
     {reply, Reply, State};
-
 handle_call({cleanup_expired, TTL}, _From, State) ->
     Now = erlang:system_time(millisecond),
     Cutoff = Now - TTL,
     Expired = ets:foldl(
-        fun({Id, #mcp_session{last_activity = LA}}, Acc)
-              when LA < Cutoff -> [Id | Acc];
-           (_, Acc) -> Acc
-        end, [], ?SESSION_TABLE),
+        fun
+            ({Id, #mcp_session{last_activity = LA}}, Acc) when
+                LA < Cutoff
+            ->
+                [Id | Acc];
+            (_, Acc) ->
+                Acc
+        end,
+        [],
+        ?SESSION_TABLE
+    ),
     lists:foreach(fun delete_inline/1, Expired),
     {reply, length(Expired), State};
-
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
@@ -719,20 +812,29 @@ handle_info(cleanup, State) ->
     Now = erlang:system_time(millisecond),
     Cutoff = Now - TTL,
     Expired = ets:foldl(
-        fun({Id, #mcp_session{last_activity = LA}}, Acc)
-              when LA < Cutoff -> [Id | Acc];
-           (_, Acc) -> Acc
-        end, [], ?SESSION_TABLE),
+        fun
+            ({Id, #mcp_session{last_activity = LA}}, Acc) when
+                LA < Cutoff
+            ->
+                [Id | Acc];
+            (_, Acc) ->
+                Acc
+        end,
+        [],
+        ?SESSION_TABLE
+    ),
     lists:foreach(fun delete_inline/1, Expired),
     case Expired of
-        [] -> ok;
+        [] ->
+            ok;
         _ ->
-            logger:debug("Cleaned up ~p expired MCP sessions",
-                         [length(Expired)])
+            logger:debug(
+                "Cleaned up ~p expired MCP sessions",
+                [length(Expired)]
+            )
     end,
     erlang:send_after(?CLEANUP_INTERVAL, self(), cleanup),
     {noreply, State};
-
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -770,48 +872,61 @@ ensure_session_table() ->
     case ets:whereis(?SESSION_TABLE) of
         undefined ->
             ets:new(?SESSION_TABLE, [
-                named_table, protected, set,
+                named_table,
+                protected,
+                set,
                 {read_concurrency, true},
                 {write_concurrency, true}
             ]);
-        _ -> ok
+        _ ->
+            ok
     end.
 
 ensure_subs_table() ->
     case ets:whereis(?SUBSCRIPTIONS_TABLE) of
         undefined ->
             ets:new(?SUBSCRIPTIONS_TABLE, [
-                named_table, protected, set,
+                named_table,
+                protected,
+                set,
                 {read_concurrency, true}
             ]);
-        _ -> ok
+        _ ->
+            ok
     end.
 
 ensure_pending_table() ->
     case ets:whereis(?PENDING_TABLE) of
         undefined ->
             ets:new(?PENDING_TABLE, [
-                named_table, protected, set,
+                named_table,
+                protected,
+                set,
                 {read_concurrency, true}
             ]);
-        _ -> ok
+        _ ->
+            ok
     end.
 
 ensure_inflight_table() ->
     case ets:whereis(?INFLIGHT_TABLE) of
         undefined ->
             ets:new(?INFLIGHT_TABLE, [
-                named_table, protected, set,
+                named_table,
+                protected,
+                set,
                 {read_concurrency, true}
             ]);
-        _ -> ok
+        _ ->
+            ok
     end.
 
 do_sampling(SessionId, SsePid, Params, Opts) ->
     Timeout = maps:get(timeout_ms, Opts, ?DEFAULT_SAMPLING_TIMEOUT),
     RequestId = generate_request_id(<<"sampling-">>),
     Ref = make_ref(),
-    ok = gen_server:call(?MODULE,
+    ok = gen_server:call(
+        ?MODULE,
         {register_pending, RequestId, #pending{
             id = RequestId,
             session_id = SessionId,
@@ -819,7 +934,8 @@ do_sampling(SessionId, SsePid, Params, Opts) ->
             caller_ref = Ref,
             expires_at = erlang:system_time(millisecond) + Timeout,
             tag = sampling_response
-        }}),
+        }}
+    ),
     Request = #{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => RequestId,
@@ -842,7 +958,8 @@ do_elicit(SessionId, SsePid, Params, Opts) ->
     Timeout = maps:get(timeout_ms, Opts, ?DEFAULT_SAMPLING_TIMEOUT),
     RequestId = generate_request_id(<<"elicit-">>),
     Ref = make_ref(),
-    ok = gen_server:call(?MODULE,
+    ok = gen_server:call(
+        ?MODULE,
         {register_pending, RequestId, #pending{
             id = RequestId,
             session_id = SessionId,
@@ -850,7 +967,8 @@ do_elicit(SessionId, SsePid, Params, Opts) ->
             caller_ref = Ref,
             expires_at = erlang:system_time(millisecond) + Timeout,
             tag = elicitation_response
-        }}),
+        }}
+    ),
     Request = #{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => RequestId,
@@ -872,7 +990,8 @@ do_roots_list(SessionId, SsePid, Opts) ->
     Timeout = maps:get(timeout_ms, Opts, ?DEFAULT_SAMPLING_TIMEOUT),
     RequestId = generate_request_id(<<"roots-">>),
     Ref = make_ref(),
-    ok = gen_server:call(?MODULE,
+    ok = gen_server:call(
+        ?MODULE,
         {register_pending, RequestId, #pending{
             id = RequestId,
             session_id = SessionId,
@@ -880,7 +999,8 @@ do_roots_list(SessionId, SsePid, Opts) ->
             caller_ref = Ref,
             expires_at = erlang:system_time(millisecond) + Timeout,
             tag = roots_response
-        }}),
+        }}
+    ),
     Request = #{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => RequestId,
@@ -900,8 +1020,7 @@ do_roots_list(SessionId, SsePid, Opts) ->
     end.
 
 generate_request_id(Prefix) ->
-    <<Prefix/binary,
-      (integer_to_binary(erlang:unique_integer([positive])))/binary>>.
+    <<Prefix/binary, (integer_to_binary(erlang:unique_integer([positive])))/binary>>.
 
 id_to_binary(Id) when is_binary(Id) -> Id;
 id_to_binary(Id) when is_integer(Id) -> integer_to_binary(Id);

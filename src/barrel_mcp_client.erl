@@ -53,7 +53,8 @@
     list_resource_templates/1, list_resource_templates/2,
     list_resource_templates_all/1,
     read_resource/2,
-    subscribe/2, unsubscribe/2,
+    subscribe/2,
+    unsubscribe/2,
     %% Prompts
     list_prompts/1, list_prompts/2,
     list_prompts_all/1,
@@ -82,21 +83,25 @@
 -export([connecting/3, initializing/3, ready/3, closing/3]).
 
 -type connect_spec() ::
-    #{transport := {http, binary() | string()} |
-                   {stdio, #{command := string(), args => [string()]}},
-      client_info => #{name => binary(), version => binary()},
-      capabilities => map(),
-      handler => {module(), term()},
-      auth => none
+    #{
+        transport :=
+            {http, binary() | string()}
+            | {stdio, #{command := string(), args => [string()]}},
+        client_info => #{name => binary(), version => binary()},
+        capabilities => map(),
+        handler => {module(), term()},
+        auth =>
+            none
             | {bearer, binary()}
             | {oauth, map()}
             | {oauth_client_credentials, map()}
             | {oauth_enterprise, map()},
-      protocol_version => binary(),
-      request_timeout => pos_integer(),
-      init_timeout => pos_integer(),
-      ping_interval => pos_integer() | infinity,
-      ping_failure_threshold => pos_integer()}.
+        protocol_version => binary(),
+        request_timeout => pos_integer(),
+        init_timeout => pos_integer(),
+        ping_interval => pos_integer() | infinity,
+        ping_failure_threshold => pos_integer()
+    }.
 
 -export_type([connect_spec/0]).
 
@@ -164,8 +169,10 @@ list_tools(Pid) ->
 %%       on the last page (with `undefined' for `NextCursor').</li>
 %%   <li>`{timeout, Ms}' — override the per-request timeout.</li>
 %% </ul>
--spec list_tools(pid(), map()) -> {ok, [map()], NextCursor :: binary() | undefined} |
-                                  {ok, [map()]} | {error, term()}.
+-spec list_tools(pid(), map()) ->
+    {ok, [map()], NextCursor :: binary() | undefined}
+    | {ok, [map()]}
+    | {error, term()}.
 list_tools(Pid, Opts) ->
     paged(Pid, <<"tools/list">>, <<"tools">>, Opts).
 
@@ -203,8 +210,10 @@ list_resources(Pid) -> list_resources(Pid, #{}).
 
 %% @doc List resources with pagination control. Same `Opts' shape as
 %% {@link list_tools/2}.
--spec list_resources(pid(), map()) -> {ok, [map()], binary() | undefined} |
-                                       {ok, [map()]} | {error, term()}.
+-spec list_resources(pid(), map()) ->
+    {ok, [map()], binary() | undefined}
+    | {ok, [map()]}
+    | {error, term()}.
 list_resources(Pid, Opts) ->
     paged(Pid, <<"resources/list">>, <<"resources">>, Opts).
 
@@ -245,7 +254,8 @@ subscribe(Pid, Uri) ->
         {ok, _} = Ok ->
             ok = gen_statem:cast(Pid, {add_subscriber, Uri, self()}),
             Ok;
-        Err -> Err
+        Err ->
+            Err
     end.
 
 %% @doc Stop receiving updates for `Uri' on the calling process.
@@ -255,7 +265,8 @@ unsubscribe(Pid, Uri) ->
         {ok, _} = Ok ->
             ok = gen_statem:cast(Pid, {remove_subscriber, Uri, self()}),
             Ok;
-        Err -> Err
+        Err ->
+            Err
     end.
 
 %% @doc List prompts advertised by the server. Single page.
@@ -264,8 +275,10 @@ list_prompts(Pid) -> list_prompts(Pid, #{}).
 
 %% @doc List prompts with pagination control. Same `Opts' shape as
 %% {@link list_tools/2}.
--spec list_prompts(pid(), map()) -> {ok, [map()], binary() | undefined} |
-                                     {ok, [map()]} | {error, term()}.
+-spec list_prompts(pid(), map()) ->
+    {ok, [map()], binary() | undefined}
+    | {ok, [map()]}
+    | {error, term()}.
 list_prompts(Pid, Opts) ->
     paged(Pid, <<"prompts/list">>, <<"prompts">>, Opts).
 
@@ -307,8 +320,10 @@ set_log_level(Pid, Level) when is_binary(Level) ->
 tasks_list(Pid) ->
     tasks_list(Pid, #{}).
 
--spec tasks_list(pid(), map()) -> {ok, [map()], binary() | undefined} |
-                                   {ok, [map()]} | {error, term()}.
+-spec tasks_list(pid(), map()) ->
+    {ok, [map()], binary() | undefined}
+    | {ok, [map()]}
+    | {error, term()}.
 tasks_list(Pid, Opts) ->
     paged(Pid, <<"tasks/list">>, <<"tasks">>, Opts).
 
@@ -362,8 +377,11 @@ notify_roots_list_changed(Pid) ->
 %% the handler answered with `{async, Tag, _}'. `Result' is either a
 %% plain term (sent as the JSON-RPC `result') or
 %% `{error, Code, Message}'.
--spec reply_async(pid(), term(),
-                  term() | {error, integer(), binary()}) -> ok.
+-spec reply_async(
+    pid(),
+    term(),
+    term() | {error, integer(), binary()}
+) -> ok.
 reply_async(Pid, Tag, Result) ->
     gen_statem:cast(Pid, {async_reply, Tag, Result}).
 
@@ -397,11 +415,12 @@ init(Spec) ->
         maps:get(handler, Spec, {barrel_mcp_client_handler_default, []}),
     case HandlerMod:init(HandlerArgs) of
         {ok, HState} ->
-            Data = #data{spec = Spec,
-                         handler_mod = HandlerMod,
-                         handler_state = HState},
-            {ok, connecting, Data,
-             [{next_event, internal, open_transport}]};
+            Data = #data{
+                spec = Spec,
+                handler_mod = HandlerMod,
+                handler_state = HState
+            },
+            {ok, connecting, Data, [{next_event, internal, open_transport}]};
         {error, _} = Err ->
             Err
     end.
@@ -411,18 +430,26 @@ init(Spec) ->
 connecting(internal, open_transport, Data) ->
     case open_transport(Data) of
         {ok, Data1} ->
-            InitTimeout = maps:get(init_timeout,
-                                   Data#data.spec, ?DEFAULT_INIT_TIMEOUT),
+            InitTimeout = maps:get(
+                init_timeout,
+                Data#data.spec,
+                ?DEFAULT_INIT_TIMEOUT
+            ),
             {Id, Data2} = next_id(Data1),
             Params = build_initialize_params(Data2),
-            send_envelope(Data2,
-                barrel_mcp_protocol:encode_request(Id, <<"initialize">>, Params)),
-            P = #pending{caller = init,
-                         method = <<"initialize">>,
-                         deadline = deadline(InitTimeout)},
+            send_envelope(
+                Data2,
+                barrel_mcp_protocol:encode_request(Id, <<"initialize">>, Params)
+            ),
+            P = #pending{
+                caller = init,
+                method = <<"initialize">>,
+                deadline = deadline(InitTimeout)
+            },
             Pending1 = (Data2#data.pending)#{Id => P},
-            {next_state, initializing, Data2#data{pending = Pending1},
-             [{state_timeout, InitTimeout, init_timeout}]};
+            {next_state, initializing, Data2#data{pending = Pending1}, [
+                {state_timeout, InitTimeout, init_timeout}
+            ]};
         {error, Reason} ->
             {stop, {transport_failed, Reason}}
     end;
@@ -437,8 +464,11 @@ initializing(state_timeout, init_timeout, _Data) ->
     {stop, init_timeout};
 initializing({call, From}, _Req, _Data) ->
     {keep_state_and_data, [{reply, From, {error, not_ready}}]};
-initializing(info, {mcp_in, Pid, Json},
-             #data{transport = {_, Pid}} = Data) ->
+initializing(
+    info,
+    {mcp_in, Pid, Json},
+    #data{transport = {_, Pid}} = Data
+) ->
     handle_inbound(Json, initializing, Data);
 initializing(EventType, EventContent, Data) ->
     common_handler(EventType, EventContent, Data).
@@ -457,30 +487,40 @@ ready({call, From}, {request, Method, Params, Timeout}, Data) ->
             {keep_state_and_data, [{reply, From, {error, {unsupported, Method}}}]};
         true ->
             {Id, Data1} = next_id(Data),
-            send_envelope(Data1,
-                barrel_mcp_protocol:encode_request(Id, Method, Params)),
+            send_envelope(
+                Data1,
+                barrel_mcp_protocol:encode_request(Id, Method, Params)
+            ),
             ProgressToken = progress_token_from_params(Params),
             {CallerPid, _Tag} = From,
-            Data2 = case ProgressToken of
-                undefined -> Data1;
-                Tok -> Data1#data{progress = (Data1#data.progress)#{Tok => CallerPid}}
-            end,
-            P = #pending{caller = From, method = Method,
-                         deadline = deadline(Timeout),
-                         progress_token = ProgressToken},
+            Data2 =
+                case ProgressToken of
+                    undefined -> Data1;
+                    Tok -> Data1#data{progress = (Data1#data.progress)#{Tok => CallerPid}}
+                end,
+            P = #pending{
+                caller = From,
+                method = Method,
+                deadline = deadline(Timeout),
+                progress_token = ProgressToken
+            },
             Pending = (Data2#data.pending)#{Id => P},
-            Actions = case Timeout of
-                          infinity -> [];
-                          T -> [{{timeout, {req, Id}}, T, request_timeout}]
-                      end,
+            Actions =
+                case Timeout of
+                    infinity -> [];
+                    T -> [{{timeout, {req, Id}}, T, request_timeout}]
+                end,
             {keep_state, Data2#data{pending = Pending}, Actions}
     end;
 ready(cast, {cancel, Id}, Data) ->
     do_cancel(Id, Data);
 ready(cast, notify_roots_list_changed, Data) ->
-    send_envelope(Data,
+    send_envelope(
+        Data,
         barrel_mcp_protocol:encode_notification(
-            <<"notifications/roots/list_changed">>, #{})),
+            <<"notifications/roots/list_changed">>, #{}
+        )
+    ),
     {keep_state, Data};
 ready(cast, {add_subscriber, Uri, Pid}, Data) ->
     {keep_state, add_sub(Uri, Pid, Data)};
@@ -493,8 +533,11 @@ ready({timeout, {req, Id}}, request_timeout, Data) ->
 ready(state_timeout, ping_tick, Data) ->
     {Data1, Actions} = issue_ping(Data),
     {keep_state, Data1, Actions};
-ready(info, {mcp_in, Pid, Json},
-      #data{transport = {_, Pid}} = Data) ->
+ready(
+    info,
+    {mcp_in, Pid, Json},
+    #data{transport = {_, Pid}} = Data
+) ->
     handle_inbound(Json, ready, Data);
 ready(EventType, EventContent, Data) ->
     common_handler(EventType, EventContent, Data).
@@ -510,15 +553,24 @@ closing(_E, _C, _Data) ->
 %% Common event handling (transport messages, casts, etc.)
 %%====================================================================
 
-common_handler(info, {mcp_closed, Pid, _Reason},
-               #data{transport = {_, Pid}}) ->
+common_handler(
+    info,
+    {mcp_closed, Pid, _Reason},
+    #data{transport = {_, Pid}}
+) ->
     {stop, normal};
 common_handler(info, {'EXIT', _, _}, _Data) ->
     keep_state_and_data;
 common_handler(cast, close, Data) ->
     case Data#data.transport of
-        {Mod, Pid} -> try Mod:close(Pid) catch _:_ -> ok end;
-        _ -> ok
+        {Mod, Pid} ->
+            try
+                Mod:close(Pid)
+            catch
+                _:_ -> ok
+            end;
+        _ ->
+            ok
     end,
     {stop, normal, Data};
 common_handler(_E, _C, _D) ->
@@ -587,14 +639,18 @@ settle_data(#pending{progress_token = Tok}, Data) ->
     drop_progress(Tok, Data).
 
 drop_progress(undefined, Data) -> Data;
-drop_progress(Tok, Data) ->
-    Data#data{progress = maps:remove(Tok, Data#data.progress)}.
+drop_progress(Tok, Data) -> Data#data{progress = maps:remove(Tok, Data#data.progress)}.
 
 drop_req_timeout(Id) ->
     {{timeout, {req, Id}}, infinity, request_timeout}.
 
-handle_server_request(Id, Method, Params, _State,
-                      #data{handler_mod = Mod, handler_state = HS} = Data) ->
+handle_server_request(
+    Id,
+    Method,
+    Params,
+    _State,
+    #data{handler_mod = Mod, handler_state = HS} = Data
+) ->
     case Mod:handle_request(Method, Params, HS) of
         {reply, Result, HS1} ->
             send_envelope(Data, barrel_mcp_protocol:encode_response(Id, Result)),
@@ -604,39 +660,53 @@ handle_server_request(Id, Method, Params, _State,
             {keep_state, Data#data{handler_state = HS1}};
         {async, Tag, HS1} ->
             Async = (Data#data.async_replies)#{Tag => Id},
-            {keep_state, Data#data{handler_state = HS1,
-                                   async_replies = Async}}
+            {keep_state, Data#data{
+                handler_state = HS1,
+                async_replies = Async
+            }}
     end.
 
 deliver_async_reply(Tag, Result, Data) ->
     case maps:take(Tag, Data#data.async_replies) of
         {Id, Rest} ->
-            Envelope = case Result of
-                {error, Code, Msg} ->
-                    barrel_mcp_protocol:encode_error(Id, Code, Msg);
-                _ ->
-                    barrel_mcp_protocol:encode_response(Id, Result)
-            end,
+            Envelope =
+                case Result of
+                    {error, Code, Msg} ->
+                        barrel_mcp_protocol:encode_error(Id, Code, Msg);
+                    _ ->
+                        barrel_mcp_protocol:encode_response(Id, Result)
+                end,
             send_envelope(Data, Envelope),
             Data#data{async_replies = Rest};
         error ->
             Data
     end.
 
-handle_server_notification(<<"notifications/resources/updated">> = Method, Params,
-                           _State, Data) ->
+handle_server_notification(
+    <<"notifications/resources/updated">> = Method,
+    Params,
+    _State,
+    Data
+) ->
     Uri = maps:get(<<"uri">>, Params, <<>>),
     notify_subscribers(Uri, Params, Data),
     dispatch_notification(Method, Params, Data);
-handle_server_notification(<<"notifications/progress">> = Method, Params,
-                           _State, Data) ->
+handle_server_notification(
+    <<"notifications/progress">> = Method,
+    Params,
+    _State,
+    Data
+) ->
     notify_progress(Params, Data),
     dispatch_notification(Method, Params, Data);
 handle_server_notification(Method, Params, _State, Data) ->
     dispatch_notification(Method, Params, Data).
 
-dispatch_notification(Method, Params,
-                      #data{handler_mod = Mod, handler_state = HS} = Data) ->
+dispatch_notification(
+    Method,
+    Params,
+    #data{handler_mod = Mod, handler_state = HS} = Data
+) ->
     case Mod:handle_notification(Method, Params, HS) of
         {ok, HS1} ->
             {keep_state, Data#data{handler_state = HS1}}
@@ -644,20 +714,27 @@ dispatch_notification(Method, Params,
 
 notify_subscribers(Uri, Params, Data) ->
     case maps:get(Uri, Data#data.subscriptions, []) of
-        [] -> ok;
+        [] ->
+            ok;
         Pids ->
-            lists:foreach(fun(P) -> P ! {mcp_resource_updated, Uri, Params} end,
-                          Pids),
+            lists:foreach(
+                fun(P) -> P ! {mcp_resource_updated, Uri, Params} end,
+                Pids
+            ),
             ok
     end.
 
 notify_progress(Params, Data) ->
     case maps:get(<<"progressToken">>, Params, undefined) of
-        undefined -> ok;
+        undefined ->
+            ok;
         Tok ->
             case maps:get(Tok, Data#data.progress, undefined) of
-                undefined -> ok;
-                Pid -> Pid ! {mcp_progress, Tok, Params}, ok
+                undefined ->
+                    ok;
+                Pid ->
+                    Pid ! {mcp_progress, Tok, Params},
+                    ok
             end
     end.
 
@@ -666,9 +743,14 @@ notify_progress(Params, Data) ->
 %%====================================================================
 
 build_initialize_params(#data{spec = Spec}) ->
-    ClientInfo0 = maps:get(client_info, Spec,
-                           #{<<"name">> => <<"barrel_mcp_client">>,
-                             <<"version">> => <<"2.2.0">>}),
+    ClientInfo0 = maps:get(
+        client_info,
+        Spec,
+        #{
+            <<"name">> => <<"barrel_mcp_client">>,
+            <<"version">> => <<"2.2.0">>
+        }
+    ),
     ClientInfo = normalize_keys(ClientInfo0),
     Caps = capabilities_to_wire(maps:get(capabilities, Spec, #{})),
     Version = maps:get(protocol_version, Spec, ?MCP_CLIENT_PROTOCOL_VERSION),
@@ -681,23 +763,34 @@ build_initialize_params(#data{spec = Spec}) ->
 %% Sugar -> spec-shaped wire form. `true' becomes an empty object;
 %% maps are passed through with binary keys.
 capabilities_to_wire(Map) when is_map(Map) ->
-    maps:fold(fun(K, V, Acc) ->
-        Acc#{cap_key(K) => cap_value(V)}
-    end, #{}, Map).
+    maps:fold(
+        fun(K, V, Acc) ->
+            Acc#{cap_key(K) => cap_value(V)}
+        end,
+        #{},
+        Map
+    ).
 
 cap_key(K) when is_atom(K) -> atom_to_binary(K, utf8);
 cap_key(K) when is_binary(K) -> K.
 
-cap_value(true) -> #{};
-cap_value(false) -> undefined;
+cap_value(true) ->
+    #{};
+cap_value(false) ->
+    undefined;
 cap_value(Map) when is_map(Map) ->
-    maps:fold(fun(K, V, Acc) ->
-        case V of
-            false -> Acc;
-            _ -> Acc#{cap_subkey(K) => cap_subvalue(V)}
-        end
-    end, #{}, Map);
-cap_value(_) -> #{}.
+    maps:fold(
+        fun(K, V, Acc) ->
+            case V of
+                false -> Acc;
+                _ -> Acc#{cap_subkey(K) => cap_subvalue(V)}
+            end
+        end,
+        #{},
+        Map
+    );
+cap_value(_) ->
+    #{}.
 
 cap_subkey(list_changed) -> <<"listChanged">>;
 cap_subkey(K) when is_atom(K) -> atom_to_binary(K, utf8);
@@ -707,13 +800,18 @@ cap_subvalue(true) -> true;
 cap_subvalue(V) -> V.
 
 normalize_keys(Map) when is_map(Map) ->
-    maps:fold(fun(K, V, Acc) ->
-        Key = case K of
-                  A when is_atom(A) -> atom_to_binary(A, utf8);
-                  B when is_binary(B) -> B
-              end,
-        Acc#{Key => V}
-    end, #{}, Map).
+    maps:fold(
+        fun(K, V, Acc) ->
+            Key =
+                case K of
+                    A when is_atom(A) -> atom_to_binary(A, utf8);
+                    B when is_binary(B) -> B
+                end,
+            Acc#{Key => V}
+        end,
+        #{},
+        Map
+    ).
 
 handle_initialize_result(Result, Data) ->
     case maps:get(<<"protocolVersion">>, Result, undefined) of
@@ -736,9 +834,12 @@ finish_initialize(Version, Result, Data) ->
         _ ->
             ok
     end,
-    send_envelope(Data,
+    send_envelope(
+        Data,
         barrel_mcp_protocol:encode_notification(
-            <<"notifications/initialized">>, #{})),
+            <<"notifications/initialized">>, #{}
+        )
+    ),
     Data1 = Data#data{
         server_capabilities = maps:get(<<"capabilities">>, Result, #{}),
         server_info = maps:get(<<"serverInfo">>, Result, #{}),
@@ -755,16 +856,21 @@ open_transport(#data{spec = Spec} = Data) ->
         {http, Url} ->
             Auth = barrel_mcp_client_auth:new(maps:get(auth, Spec, none)),
             case Auth of
-                {error, _} = Err -> Err;
+                {error, _} = Err ->
+                    Err;
                 _ ->
-                    Opts = #{url => Url, auth => Auth,
-                             open_event_stream => true,
-                             headers => maps:get(http_headers, Spec, [])},
+                    Opts = #{
+                        url => Url,
+                        auth => Auth,
+                        open_event_stream => true,
+                        headers => maps:get(http_headers, Spec, [])
+                    },
                     case barrel_mcp_client_http:connect(self(), Opts) of
                         {ok, Pid} ->
                             link(Pid),
                             {ok, Data#data{transport = {barrel_mcp_client_http, Pid}}};
-                        Err -> Err
+                        Err ->
+                            Err
                     end
             end;
         {stdio, StdioOpts} ->
@@ -772,14 +878,16 @@ open_transport(#data{spec = Spec} = Data) ->
                 {ok, Pid} ->
                     link(Pid),
                     {ok, Data#data{transport = {barrel_mcp_client_stdio, Pid}}};
-                Err -> Err
+                Err ->
+                    Err
             end
     end.
 
 send_envelope(#data{transport = {Mod, Pid}}, Envelope) ->
     Json = iolist_to_binary(json:encode(Envelope)),
     Mod:send(Pid, Json);
-send_envelope(_, _) -> ok.
+send_envelope(_, _) ->
+    ok.
 
 %%====================================================================
 %% Helpers
@@ -788,7 +896,8 @@ send_envelope(_, _) -> ok.
 next_id(#data{request_id = N} = Data) ->
     {N, Data#data{request_id = N + 1}}.
 
-deadline(infinity) -> infinity;
+deadline(infinity) ->
+    infinity;
 deadline(T) when is_integer(T) ->
     erlang:monotonic_time(millisecond) + T.
 
@@ -796,10 +905,11 @@ request(Pid, Method, Params) ->
     request(Pid, Method, Params, ?DEFAULT_REQUEST_TIMEOUT).
 
 request(Pid, Method, Params, Timeout) ->
-    CallTimeout = case Timeout of
-                      infinity -> infinity;
-                      T when is_integer(T) -> T + 5000
-                  end,
+    CallTimeout =
+        case Timeout of
+            infinity -> infinity;
+            T when is_integer(T) -> T + 5000
+        end,
     gen_statem:call(Pid, {request, Method, Params, Timeout}, CallTimeout).
 
 walk_all(Fetch) ->
@@ -809,10 +919,11 @@ page_opts(undefined) -> #{want_cursor => true};
 page_opts(Cursor) -> #{cursor => Cursor, want_cursor => true}.
 
 paged(Pid, Method, ResultKey, Opts) ->
-    Params = case maps:get(cursor, Opts, undefined) of
-                 undefined -> #{};
-                 C -> #{<<"cursor">> => C}
-             end,
+    Params =
+        case maps:get(cursor, Opts, undefined) of
+            undefined -> #{};
+            C -> #{<<"cursor">> => C}
+        end,
     case request(Pid, Method, Params, request_timeout(Opts)) of
         {ok, Result} ->
             Items = maps:get(ResultKey, Result, []),
@@ -822,7 +933,8 @@ paged(Pid, Method, ResultKey, Opts) ->
                 {undefined, false} -> {ok, Items};
                 _ -> {ok, Items, Next}
             end;
-        Err -> Err
+        Err ->
+            Err
     end.
 
 map_get_default(K, M, D) ->
@@ -865,8 +977,14 @@ maybe_close_on_ping_failures(Data, _Id) ->
     case Data#data.ping_failures >= ping_failure_threshold(Data) of
         true ->
             case Data#data.transport of
-                {Mod, TPid} -> try Mod:close(TPid) catch _:_ -> ok end;
-                _ -> ok
+                {Mod, TPid} ->
+                    try
+                        Mod:close(TPid)
+                    catch
+                        _:_ -> ok
+                    end;
+                _ ->
+                    ok
             end,
             {stop, ping_failed};
         false ->
@@ -881,19 +999,29 @@ arm_ping_timer(Data) ->
 
 issue_ping(Data) ->
     {Id, Data1} = next_id(Data),
-    send_envelope(Data1,
-        barrel_mcp_protocol:encode_request(Id, <<"ping">>, #{})),
-    P = #pending{caller = ping, method = <<"ping">>,
-                 deadline = deadline(?DEFAULT_PING_TIMEOUT)},
+    send_envelope(
+        Data1,
+        barrel_mcp_protocol:encode_request(Id, <<"ping">>, #{})
+    ),
+    P = #pending{
+        caller = ping,
+        method = <<"ping">>,
+        deadline = deadline(?DEFAULT_PING_TIMEOUT)
+    },
     Pending = (Data1#data.pending)#{Id => P},
-    {Data1#data{pending = Pending},
-     [{{timeout, {req, Id}}, ?DEFAULT_PING_TIMEOUT, request_timeout},
-      arm_ping_timer(Data1)]}.
+    {Data1#data{pending = Pending}, [
+        {{timeout, {req, Id}}, ?DEFAULT_PING_TIMEOUT, request_timeout},
+        arm_ping_timer(Data1)
+    ]}.
 
-is_supported(<<"initialize">>, _) -> true;
-is_supported(<<"ping">>, _) -> true;
-is_supported(<<"notifications/", _/binary>>, _) -> true;
-is_supported(_, #data{server_capabilities = undefined}) -> false;
+is_supported(<<"initialize">>, _) ->
+    true;
+is_supported(<<"ping">>, _) ->
+    true;
+is_supported(<<"notifications/", _/binary>>, _) ->
+    true;
+is_supported(_, #data{server_capabilities = undefined}) ->
+    false;
 is_supported(<<"tools/", _/binary>>, #data{server_capabilities = Caps}) ->
     maps:is_key(<<"tools">>, Caps);
 is_supported(<<"resources/", _/binary>>, #data{server_capabilities = Caps}) ->
@@ -906,15 +1034,20 @@ is_supported(<<"logging/", _/binary>>, #data{server_capabilities = Caps}) ->
     maps:is_key(<<"logging">>, Caps);
 is_supported(<<"tasks/", _/binary>>, #data{server_capabilities = Caps}) ->
     maps:is_key(<<"tasks">>, Caps);
-is_supported(_, _) -> true.
+is_supported(_, _) ->
+    true.
 
 do_cancel(Id, #data{pending = Pending} = Data) ->
     case maps:take(Id, Pending) of
         {#pending{caller = From} = P, Rest} when From =/= init, From =/= ping ->
             gen_statem:reply(From, {error, cancelled}),
-            send_envelope(Data, barrel_mcp_protocol:encode_notification(
-                <<"notifications/cancelled">>,
-                #{<<"requestId">> => Id, <<"reason">> => <<"cancelled by client">>})),
+            send_envelope(
+                Data,
+                barrel_mcp_protocol:encode_notification(
+                    <<"notifications/cancelled">>,
+                    #{<<"requestId">> => Id, <<"reason">> => <<"cancelled by client">>}
+                )
+            ),
             Data1 = settle_data(P, Data#data{pending = Rest}),
             {keep_state, Data1, [drop_req_timeout(Id)]};
         _ ->
@@ -925,15 +1058,23 @@ timeout_pending(Id, #data{pending = Pending} = Data) ->
     case maps:take(Id, Pending) of
         {#pending{caller = ping} = P, Rest} ->
             Data1 = settle_data(P, bump_ping_failures(Data#data{pending = Rest})),
-            send_envelope(Data1, barrel_mcp_protocol:encode_notification(
-                <<"notifications/cancelled">>,
-                #{<<"requestId">> => Id, <<"reason">> => <<"timeout">>})),
+            send_envelope(
+                Data1,
+                barrel_mcp_protocol:encode_notification(
+                    <<"notifications/cancelled">>,
+                    #{<<"requestId">> => Id, <<"reason">> => <<"timeout">>}
+                )
+            ),
             maybe_close_on_ping_failures(Data1, Id);
         {#pending{caller = From} = P, Rest} when From =/= init ->
             gen_statem:reply(From, {error, timeout}),
-            send_envelope(Data, barrel_mcp_protocol:encode_notification(
-                <<"notifications/cancelled">>,
-                #{<<"requestId">> => Id, <<"reason">> => <<"timeout">>})),
+            send_envelope(
+                Data,
+                barrel_mcp_protocol:encode_notification(
+                    <<"notifications/cancelled">>,
+                    #{<<"requestId">> => Id, <<"reason">> => <<"timeout">>}
+                )
+            ),
             Data1 = settle_data(P, Data#data{pending = Rest}),
             {keep_state, Data1};
         _ ->
@@ -948,7 +1089,8 @@ add_sub(Uri, Pid, Data) ->
 del_sub(Uri, Pid, Data) ->
     Subs = Data#data.subscriptions,
     case maps:get(Uri, Subs, []) of
-        [] -> Data;
+        [] ->
+            Data;
         L ->
             case lists:delete(Pid, L) of
                 [] -> Data#data{subscriptions = maps:remove(Uri, Subs)};
@@ -960,15 +1102,30 @@ del_sub(Uri, Pid, Data) ->
 %% Termination
 %%====================================================================
 
-terminate(Reason, _State,
-          #data{handler_mod = Mod, handler_state = HS, transport = T}) ->
+terminate(
+    Reason,
+    _State,
+    #data{handler_mod = Mod, handler_state = HS, transport = T}
+) ->
     case T of
-        {Tmod, Pid} -> try Tmod:close(Pid) catch _:_ -> ok end;
-        _ -> ok
+        {Tmod, Pid} ->
+            try
+                Tmod:close(Pid)
+            catch
+                _:_ -> ok
+            end;
+        _ ->
+            ok
     end,
     case erlang:function_exported(Mod, terminate, 2) of
-        true -> try Mod:terminate(Reason, HS) catch _:_ -> ok end;
-        false -> ok
+        true ->
+            try
+                Mod:terminate(Reason, HS)
+            catch
+                _:_ -> ok
+            end;
+        false ->
+            ok
     end,
     ok.
 
