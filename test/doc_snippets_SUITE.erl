@@ -18,16 +18,28 @@
 all() -> [snippets_compile].
 
 snippets_compile(_Config) ->
-    Script = filename:join([code:lib_dir(barrel_mcp), "..", "..", "..", "..",
-                            "test", "snippet_check.escript"]),
+    Script = filename:join([
+        code:lib_dir(barrel_mcp),
+        "..",
+        "..",
+        "..",
+        "..",
+        "test",
+        "snippet_check.escript"
+    ]),
     %% When the suite runs from a release-style location, fall back to
     %% the canonical project path.
-    Resolved = case filelib:is_regular(Script) of
-                   true -> Script;
-                   false ->
-                       filename:join([project_root(),
-                                      "test", "snippet_check.escript"])
-               end,
+    Resolved =
+        case filelib:is_regular(Script) of
+            true ->
+                Script;
+            false ->
+                filename:join([
+                    project_root(),
+                    "test",
+                    "snippet_check.escript"
+                ])
+        end,
     Cmd = "escript " ++ Resolved,
     {Status, Output} = run(Cmd),
     ct:log("snippet_check output:~n~s", [Output]),
@@ -45,7 +57,11 @@ collect(Port, Acc) ->
         {Port, {data, D}} -> collect(Port, <<Acc/binary, D/binary>>);
         {Port, {exit_status, S}} -> {S, binary_to_list(Acc)}
     after 60000 ->
-        try port_close(Port) catch _:_ -> ok end,
+        try
+            port_close(Port)
+        catch
+            _:_ -> ok
+        end,
         {1, "snippet_check: timed out"}
     end.
 
@@ -56,7 +72,8 @@ project_root() ->
 
 walk_up(Dir) ->
     case filelib:is_regular(filename:join(Dir, "rebar.config")) of
-        true -> Dir;
+        true ->
+            Dir;
         false ->
             Parent = filename:dirname(Dir),
             case Parent of

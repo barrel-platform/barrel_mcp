@@ -14,10 +14,7 @@
 %%====================================================================
 
 registry_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     [
+    {setup, fun setup/0, fun cleanup/1, [
         {"Register and find tool", fun test_register_tool/0},
         {"Register and find resource", fun test_register_resource/0},
         {"Register and find prompt", fun test_register_prompt/0},
@@ -28,8 +25,7 @@ registry_test_() ->
         {"List handlers by type", fun test_all_type/0},
         {"Namespace isolation", fun test_namespace_isolation/0},
         {"Function validation", fun test_function_validation/0}
-     ]
-    }.
+    ]}.
 
 setup() ->
     %% Start the application (which starts the registry)
@@ -39,15 +35,24 @@ setup() ->
 
 cleanup(_) ->
     %% Clean up any registered handlers
-    lists:foreach(fun({Name, _}) ->
-        barrel_mcp_registry:unreg(tool, Name)
-    end, barrel_mcp_registry:all(tool)),
-    lists:foreach(fun({Name, _}) ->
-        barrel_mcp_registry:unreg(resource, Name)
-    end, barrel_mcp_registry:all(resource)),
-    lists:foreach(fun({Name, _}) ->
-        barrel_mcp_registry:unreg(prompt, Name)
-    end, barrel_mcp_registry:all(prompt)),
+    lists:foreach(
+        fun({Name, _}) ->
+            barrel_mcp_registry:unreg(tool, Name)
+        end,
+        barrel_mcp_registry:all(tool)
+    ),
+    lists:foreach(
+        fun({Name, _}) ->
+            barrel_mcp_registry:unreg(resource, Name)
+        end,
+        barrel_mcp_registry:all(resource)
+    ),
+    lists:foreach(
+        fun({Name, _}) ->
+            barrel_mcp_registry:unreg(prompt, Name)
+        end,
+        barrel_mcp_registry:all(prompt)
+    ),
     ok.
 
 %%====================================================================

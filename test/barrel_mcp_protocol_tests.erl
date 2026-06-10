@@ -14,10 +14,7 @@
 %%====================================================================
 
 protocol_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     [
+    {setup, fun setup/0, fun cleanup/1, [
         {"Decode valid JSON", fun test_decode_valid/0},
         {"Decode invalid JSON", fun test_decode_invalid/0},
         {"Encode response", fun test_encode/0},
@@ -31,8 +28,7 @@ protocol_test_() ->
         {"Handle notification", fun test_handle_notification/0},
         {"Handle unknown method", fun test_handle_unknown_method/0},
         {"Handle invalid request", fun test_handle_invalid_request/0}
-     ]
-    }.
+    ]}.
 
 setup() ->
     %% Start the application (which starts the registry)
@@ -42,9 +38,12 @@ setup() ->
 
 cleanup(_) ->
     %% Clean up registered handlers
-    lists:foreach(fun({Name, _}) ->
-        barrel_mcp_registry:unreg(tool, Name)
-    end, barrel_mcp_registry:all(tool)),
+    lists:foreach(
+        fun({Name, _}) ->
+            barrel_mcp_registry:unreg(tool, Name)
+        end,
+        barrel_mcp_registry:all(tool)
+    ),
     ok.
 
 %%====================================================================
@@ -126,10 +125,13 @@ test_handle_tools_call() ->
     },
     {async, Plan} = barrel_mcp_protocol:handle(Request),
     Self = self(),
-    Ctx = #{request_id => 1, reply_to => Self,
-            session_id => undefined,
-            progress_token => undefined,
-            emit_progress => fun(_, _, _) -> ok end},
+    Ctx = #{
+        request_id => 1,
+        reply_to => Self,
+        session_id => undefined,
+        progress_token => undefined,
+        emit_progress => fun(_, _, _) -> ok end
+    },
     _Pid = (maps:get(spawn, Plan))(Ctx),
     receive
         {tool_result, 1, Result} ->
@@ -154,10 +156,13 @@ test_handle_tools_call_not_found() ->
     },
     {async, Plan} = barrel_mcp_protocol:handle(Request),
     Self = self(),
-    Ctx = #{request_id => 1, reply_to => Self,
-            session_id => undefined,
-            progress_token => undefined,
-            emit_progress => fun(_, _, _) -> ok end},
+    Ctx = #{
+        request_id => 1,
+        reply_to => Self,
+        session_id => undefined,
+        progress_token => undefined,
+        emit_progress => fun(_, _, _) -> ok end
+    },
     _Pid = (maps:get(spawn, Plan))(Ctx),
     receive
         {tool_failed, 1, {error, {not_found, tool, <<"nonexistent">>}}} -> ok

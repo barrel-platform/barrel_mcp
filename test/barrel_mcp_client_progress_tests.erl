@@ -12,17 +12,15 @@
 -define(URL, <<"http://127.0.0.1:19393/mcp">>).
 
 ping_test_() ->
-    {setup,
-     fun setup_loopback/0,
-     fun cleanup_loopback/1,
-     {timeout, 30, [
-         {"ping cadence keeps the client alive against a live server",
-          fun test_ping_keeps_alive/0},
-         {"no ping is sent when ping_interval is left as default (infinity)",
-          fun test_ping_disabled_by_default/0},
-         {"progress_token registers in client state and clears on settle",
-          fun test_progress_lifecycle/0}
-     ]}}.
+    {setup, fun setup_loopback/0, fun cleanup_loopback/1,
+        {timeout, 30, [
+            {"ping cadence keeps the client alive against a live server",
+                fun test_ping_keeps_alive/0},
+            {"no ping is sent when ping_interval is left as default (infinity)",
+                fun test_ping_disabled_by_default/0},
+            {"progress_token registers in client state and clears on settle",
+                fun test_progress_lifecycle/0}
+        ]}}.
 
 setup_loopback() ->
     {ok, _} = application:ensure_all_started(barrel_mcp),
@@ -32,7 +30,11 @@ setup_loopback() ->
     ok.
 
 cleanup_loopback(_) ->
-    try barrel_mcp_http_stream:stop() catch _:_ -> ok end,
+    try
+        barrel_mcp_http_stream:stop()
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 test_ping_keeps_alive() ->
@@ -57,8 +59,12 @@ test_progress_lifecycle() ->
     Self = self(),
     Tok = <<"prog-lifecycle-1">>,
     Caller = spawn_link(fun() ->
-        Res = barrel_mcp_client:call_tool(Pid, <<"slow">>, #{},
-                                          #{progress_token => Tok}),
+        Res = barrel_mcp_client:call_tool(
+            Pid,
+            <<"slow">>,
+            #{},
+            #{progress_token => Tok}
+        ),
         Self ! {settled, Res}
     end),
     %% Wait until the token is visible in the gen_statem's progress map.
@@ -75,18 +81,29 @@ test_progress_lifecycle() ->
     barrel_mcp_client:close(Pid).
 
 start_client(Extras) ->
-    Spec = maps:merge(#{
-        transport => {http, ?URL},
-        handler => {barrel_mcp_client_handler_default, []}
-    }, Extras),
+    Spec = maps:merge(
+        #{
+            transport => {http, ?URL},
+            handler => {barrel_mcp_client_handler_default, []}
+        },
+        Extras
+    ),
     {ok, Pid} = barrel_mcp_client:start(Spec),
     wait_ready(Pid, 30),
     {ok, Pid}.
 
-wait_ready(_Pid, 0) -> error(client_not_ready);
+wait_ready(_Pid, 0) ->
+    error(client_not_ready);
 wait_ready(Pid, N) ->
-    case (try barrel_mcp_client:server_capabilities(Pid) catch _:_ -> error end) of
-        {ok, _} -> ok;
+    case
+        (try
+            barrel_mcp_client:server_capabilities(Pid)
+        catch
+            _:_ -> error
+        end)
+    of
+        {ok, _} ->
+            ok;
         _ ->
             timer:sleep(100),
             wait_ready(Pid, N - 1)
@@ -98,22 +115,26 @@ slow_handler(_Args) ->
     timer:sleep(200),
     <<"done">>.
 
-wait_progress_present(_Pid, _Tok, 0) -> error({progress_not_seen});
+wait_progress_present(_Pid, _Tok, 0) ->
+    error({progress_not_seen});
 wait_progress_present(Pid, Tok, N) ->
     case progress_map(Pid) of
-        #{Tok := _} -> ok;
+        #{Tok := _} ->
+            ok;
         _ ->
             timer:sleep(20),
             wait_progress_present(Pid, Tok, N - 1)
     end.
 
-wait_progress_absent(_Pid, _Tok, 0) -> error({progress_lingered});
+wait_progress_absent(_Pid, _Tok, 0) ->
+    error({progress_lingered});
 wait_progress_absent(Pid, Tok, N) ->
     case progress_map(Pid) of
         #{Tok := _} ->
             timer:sleep(20),
             wait_progress_absent(Pid, Tok, N - 1);
-        _ -> ok
+        _ ->
+            ok
     end.
 
 progress_map(Pid) ->

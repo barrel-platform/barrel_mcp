@@ -53,11 +53,13 @@
 %%====================================================================
 
 %% @doc Construct an auth handle from a user-facing config term.
--spec new(none
-        | {bearer, binary()}
-        | {oauth, map()}
-        | {oauth_client_credentials, map()}
-        | {oauth_enterprise, map()}) ->
+-spec new(
+    none
+    | {bearer, binary()}
+    | {oauth, map()}
+    | {oauth_client_credentials, map()}
+    | {oauth_enterprise, map()}
+) ->
     t() | {error, term()}.
 new(none) ->
     none;
@@ -91,7 +93,8 @@ header({Mod, H}) -> Mod:header(H).
 
 %% @doc Refresh after a 401, returning a new handle.
 -spec refresh(t(), binary() | undefined) -> {ok, t()} | {error, term()}.
-refresh(none, _) -> {error, no_auth_configured};
+refresh(none, _) ->
+    {error, no_auth_configured};
 refresh({Mod, H}, Www) ->
     case Mod:refresh(H, Www) of
         {ok, H1} -> {ok, {Mod, H1}};

@@ -34,18 +34,24 @@ start(Opts) ->
     Port = maps:get(port, Opts, 9090),
     Ip = maps:get(ip, Opts, {127, 0, 0, 1}),
     Loopback = barrel_mcp_http_engine:is_loopback(Ip),
-    case barrel_mcp_http_engine:resolve_allowed_origins(
-           Loopback, maps:get(allowed_origins, Opts, undefined)) of
+    case
+        barrel_mcp_http_engine:resolve_allowed_origins(
+            Loopback, maps:get(allowed_origins, Opts, undefined)
+        )
+    of
         {error, _} = Err ->
             Err;
         {ok, AllowedOrigins} ->
             AllowMissing = maps:get(allow_missing_origin, Opts, Loopback),
             ResourceMetadata = barrel_mcp_http_engine:normalize_resource_metadata(
-                                 maps:get(resource_metadata, Opts, undefined)),
+                maps:get(resource_metadata, Opts, undefined)
+            ),
             AuthConfig0 = barrel_mcp_http_engine:init_auth(
-                            maps:get(auth, Opts, #{})),
+                maps:get(auth, Opts, #{})
+            ),
             AuthConfig = barrel_mcp_http_engine:inject_resource_metadata_url(
-                           AuthConfig0, ResourceMetadata),
+                AuthConfig0, ResourceMetadata
+            ),
             EngineConfig = #{
                 mode => simple,
                 auth_config => AuthConfig,
@@ -54,8 +60,9 @@ start(Opts) ->
                 resource_metadata => ResourceMetadata
             },
             ListenOpts = maps:merge(
-                           #{port => Port, ip => Ip, ssl => normalize_ssl(Opts)},
-                           maps:with([max_connections, acceptors], Opts)),
+                #{port => Port, ip => Ip, ssl => normalize_ssl(Opts)},
+                maps:with([max_connections, acceptors], Opts)
+            ),
             barrel_mcp_http_listener:start(?HTTP_LISTENER, ListenOpts, EngineConfig)
     end.
 

@@ -19,10 +19,7 @@
 %%====================================================================
 
 prompts_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     [
+    {setup, fun setup/0, fun cleanup/1, [
         {"List prompts returns registered prompts", fun test_list_prompts/0},
         {"List prompts returns empty when none registered", fun test_list_prompts_empty/0},
         {"Get prompt returns messages", fun test_get_prompt/0},
@@ -30,8 +27,7 @@ prompts_test_() ->
         {"Get prompt returns multiple messages", fun test_get_prompt_multi_message/0},
         {"Get non-existent prompt returns error", fun test_get_prompt_not_found/0},
         {"Prompt with arguments is listed correctly", fun test_prompt_arguments/0}
-     ]
-    }.
+    ]}.
 
 setup() ->
     application:ensure_all_started(barrel_mcp),
@@ -39,9 +35,12 @@ setup() ->
     ok.
 
 cleanup(_) ->
-    lists:foreach(fun({Name, _}) ->
-        barrel_mcp_registry:unreg(prompt, Name)
-    end, barrel_mcp_registry:all(prompt)),
+    lists:foreach(
+        fun({Name, _}) ->
+            barrel_mcp_registry:unreg(prompt, Name)
+        end,
+        barrel_mcp_registry:all(prompt)
+    ),
     ok.
 
 %%====================================================================

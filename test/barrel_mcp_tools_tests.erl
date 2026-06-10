@@ -22,10 +22,7 @@
 %%====================================================================
 
 tools_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     [
+    {setup, fun setup/0, fun cleanup/1, [
         {"List tools returns registered tools", fun test_list_tools/0},
         {"List tools returns empty when none registered", fun test_list_tools_empty/0},
         {"Call tool returns text result", fun test_call_tool_text/0},
@@ -34,16 +31,12 @@ tools_test_() ->
         {"Call non-existent tool returns error", fun test_call_tool_not_found/0},
         {"Call tool with error returns error response", fun test_call_tool_error/0},
         {"Tool with input schema is listed correctly", fun test_tool_input_schema/0},
-        {"Tool annotations are surfaced in tools/list",
-         fun test_tool_annotations/0},
+        {"Tool annotations are surfaced in tools/list", fun test_tool_annotations/0},
         {"Tool returning {result_meta, _, _} surfaces _meta on the wire",
-         fun test_tool_result_meta/0},
-        {"Arity-2 tool receives auth_info in Ctx",
-         fun test_tool_receives_auth_info/0},
-        {"Arity-1 tool is unaffected by auth_info in Ctx",
-         fun test_arity1_tool_ignores_auth_info/0}
-     ]
-    }.
+            fun test_tool_result_meta/0},
+        {"Arity-2 tool receives auth_info in Ctx", fun test_tool_receives_auth_info/0},
+        {"Arity-1 tool is unaffected by auth_info in Ctx", fun test_arity1_tool_ignores_auth_info/0}
+    ]}.
 
 setup() ->
     application:ensure_all_started(barrel_mcp),
@@ -51,9 +44,12 @@ setup() ->
     ok.
 
 cleanup(_) ->
-    lists:foreach(fun({Name, _}) ->
-        barrel_mcp_registry:unreg(tool, Name)
-    end, barrel_mcp_registry:all(tool)),
+    lists:foreach(
+        fun({Name, _}) ->
+            barrel_mcp_registry:unreg(tool, Name)
+        end,
+        barrel_mcp_registry:all(tool)
+    ),
     ok.
 
 %%====================================================================
@@ -82,8 +78,7 @@ list_result_tool(_Args) ->
 %% propagation on responses.
 result_meta_tool(_Args, Ctx) ->
     Inbound = maps:get(meta, Ctx, #{}),
-    {result_meta, <<"ok">>,
-     Inbound#{<<"echoedBy">> => <<"barrel_mcp">>}}.
+    {result_meta, <<"ok">>, Inbound#{<<"echoedBy">> => <<"barrel_mcp">>}}.
 
 %% Arity-2 handler that records the `auth_info' it received in Ctx so
 %% the test can assert the authenticated principal was threaded through.
@@ -145,17 +140,23 @@ drive_call(Name, Args) ->
     },
     {async, Plan} = barrel_mcp_protocol:handle(Request),
     Self = self(),
-    Ctx = #{request_id => 1, reply_to => Self,
-            session_id => undefined,
-            progress_token => undefined,
-            emit_progress => fun(_, _, _) -> ok end},
+    Ctx = #{
+        request_id => 1,
+        reply_to => Self,
+        session_id => undefined,
+        progress_token => undefined,
+        emit_progress => fun(_, _, _) -> ok end
+    },
     _Pid = (maps:get(spawn, Plan))(Ctx),
     receive
         {tool_result, 1, Result} ->
             {result, barrel_mcp_protocol:format_tool_result_external(Result)};
-        {tool_failed, 1, Reason} -> {failed, Reason};
-        {tool_error, 1, Content} -> {tool_error, Content};
-        {tool_validation_failed, 1, Errors} -> {validation_failed, Errors}
+        {tool_failed, 1, Reason} ->
+            {failed, Reason};
+        {tool_error, 1, Content} ->
+            {tool_error, Content};
+        {tool_validation_failed, 1, Errors} ->
+            {validation_failed, Errors}
     after 2000 ->
         timeout
     end.
@@ -252,9 +253,12 @@ test_tool_annotations() ->
     Response2 = barrel_mcp_protocol:handle(Request),
     [_, _] = maps:get(<<"tools">>, maps:get(<<"result">>, Response2)),
     Tools = maps:get(<<"tools">>, maps:get(<<"result">>, Response2)),
-    Plain = lists:filter(fun(T) ->
-                              maps:get(<<"name">>, T) =:= <<"plain">>
-                          end, Tools),
+    Plain = lists:filter(
+        fun(T) ->
+            maps:get(<<"name">>, T) =:= <<"plain">>
+        end,
+        Tools
+    ),
     [PlainTool] = Plain,
     ?assertNot(maps:is_key(<<"annotations">>, PlainTool)),
     barrel_mcp_registry:unreg(tool, <<"reader">>),
@@ -265,16 +269,23 @@ test_tool_result_meta() ->
     %% echoes it back via the `{result_meta, Result, MetaMap}'
     %% return shape. Verifies _meta flows in (Ctx) and out
     %% (response envelope).
-    ok = barrel_mcp_registry:reg(tool, <<"meta_echo">>, ?MODULE,
-                                  result_meta_tool, #{}),
+    ok = barrel_mcp_registry:reg(
+        tool,
+        <<"meta_echo">>,
+        ?MODULE,
+        result_meta_tool,
+        #{}
+    ),
     Inbound = #{<<"requestId">> => <<"abc-123">>},
     Request = #{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => 1,
         <<"method">> => <<"tools/call">>,
-        <<"params">> => #{<<"name">> => <<"meta_echo">>,
-                          <<"arguments">> => #{},
-                          <<"_meta">> => Inbound}
+        <<"params">> => #{
+            <<"name">> => <<"meta_echo">>,
+            <<"arguments">> => #{},
+            <<"_meta">> => Inbound
+        }
     },
     {async, Plan} = barrel_mcp_protocol:handle(Request),
     Resp = barrel_mcp_protocol:drive_async_plan(Plan, 2000),
@@ -291,15 +302,22 @@ test_tool_receives_auth_info() ->
     %% map returned by the auth provider's authenticate/2. The capture
     %% tool records it in ETS; drive_async_plan/3 threads it through.
     ensure_capture_table(),
-    ok = barrel_mcp_registry:reg(tool, <<"auth_capture">>, ?MODULE,
-                                  auth_capture_tool, #{}),
+    ok = barrel_mcp_registry:reg(
+        tool,
+        <<"auth_capture">>,
+        ?MODULE,
+        auth_capture_tool,
+        #{}
+    ),
     Expected = #{subject => <<"user:123">>, scopes => [<<"read">>]},
     Request = #{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => 1,
         <<"method">> => <<"tools/call">>,
-        <<"params">> => #{<<"name">> => <<"auth_capture">>,
-                          <<"arguments">> => #{}}
+        <<"params">> => #{
+            <<"name">> => <<"auth_capture">>,
+            <<"arguments">> => #{}
+        }
     },
     {async, Plan} = barrel_mcp_protocol:handle(Request),
     _Resp = barrel_mcp_protocol:drive_async_plan(Plan, 2000, Expected),
@@ -314,12 +332,17 @@ test_arity1_tool_ignores_auth_info() ->
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => 1,
         <<"method">> => <<"tools/call">>,
-        <<"params">> => #{<<"name">> => <<"echo1">>,
-                          <<"arguments">> => #{<<"input">> => <<"hi">>}}
+        <<"params">> => #{
+            <<"name">> => <<"echo1">>,
+            <<"arguments">> => #{<<"input">> => <<"hi">>}
+        }
     },
     {async, Plan} = barrel_mcp_protocol:handle(Request),
-    Resp = barrel_mcp_protocol:drive_async_plan(Plan, 2000,
-                                                #{subject => <<"user:123">>}),
+    Resp = barrel_mcp_protocol:drive_async_plan(
+        Plan,
+        2000,
+        #{subject => <<"user:123">>}
+    ),
     [Block | _] = maps:get(<<"content">>, maps:get(<<"result">>, Resp)),
     ?assertEqual(<<"Echo: hi">>, maps:get(<<"text">>, Block)),
     barrel_mcp_registry:unreg(tool, <<"echo1">>).

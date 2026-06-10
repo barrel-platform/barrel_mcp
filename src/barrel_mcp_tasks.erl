@@ -17,21 +17,30 @@
 
 -behaviour(gen_server).
 
--export([start_link/0,
-         create/3,
-         get/2,
-         list/2,
-         cancel/2,
-         finish/3,
-         fail/3,
-         set_worker/3]).
+-export([
+    start_link/0,
+    create/3,
+    get/2,
+    list/2,
+    cancel/2,
+    finish/3,
+    fail/3,
+    set_worker/3
+]).
 
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2
+]).
 
 -define(TABLE, barrel_mcp_tasks_table).
--define(TASK_TTL, 3600 * 1000). %% 1 hour
--define(SWEEP_INTERVAL, 60 * 1000). %% 1 minute
+%% 1 hour
+-define(TASK_TTL, 3600 * 1000).
+%% 1 minute
+-define(SWEEP_INTERVAL, 60 * 1000).
 
 -record(task, {
     id :: binary(),
@@ -59,9 +68,11 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %% @doc Create a new running task. Returns the task id.
--spec create(SessionId :: binary() | undefined,
-             Method :: binary(),
-             Opts :: map()) -> {ok, binary()}.
+-spec create(
+    SessionId :: binary() | undefined,
+    Method :: binary(),
+    Opts :: map()
+) -> {ok, binary()}.
 create(SessionId, Method, _Opts) ->
     gen_server:call(?MODULE, {create, SessionId, Method}).
 
@@ -75,10 +86,14 @@ get(SessionId, TaskId) ->
 
 -spec list(SessionId :: binary() | undefined, map()) -> {ok, [map()]}.
 list(SessionId, _Opts) ->
-    Tasks = ets:foldl(fun
-        ({{S, _}, T}, Acc) when S =:= SessionId -> [task_to_map(T) | Acc];
-        (_, Acc) -> Acc
-    end, [], ?TABLE),
+    Tasks = ets:foldl(
+        fun
+            ({{S, _}, T}, Acc) when S =:= SessionId -> [task_to_map(T) | Acc];
+            (_, Acc) -> Acc
+        end,
+        [],
+        ?TABLE
+    ),
     {ok, Tasks}.
 
 %% @doc Mark a task as cancelled and notify the client. Sends
@@ -90,9 +105,14 @@ cancel(SessionId, TaskId) ->
 
 %% @doc Record the worker pid (and optional originating request id)
 %% on a running task so a later `tasks/cancel' can stop it.
--spec set_worker(binary() | undefined, binary(),
-                 #{worker := pid(),
-                   request_id => integer() | binary()}) ->
+-spec set_worker(
+    binary() | undefined,
+    binary(),
+    #{
+        worker := pid(),
+        request_id => integer() | binary()
+    }
+) ->
     ok | {error, not_found}.
 set_worker(SessionId, TaskId, Info) ->
     gen_server:call(?MODULE, {set_worker, SessionId, TaskId, Info}).
@@ -120,39 +140,50 @@ handle_call({create, SessionId, Method}, _From, State) ->
     Now = erlang:system_time(millisecond),
     TaskId = generate_id(),
     Task = #task{
-        id = TaskId, session_id = SessionId, method = Method,
-        status = working, created_at = Now, updated_at = Now
+        id = TaskId,
+        session_id = SessionId,
+        method = Method,
+        status = working,
+        created_at = Now,
+        updated_at = Now
     },
     true = ets:insert(?TABLE, {{SessionId, TaskId}, Task}),
     notify_changed(SessionId, Task),
     {reply, {ok, TaskId}, State};
-
 handle_call({cancel, SessionId, TaskId}, _From, State) ->
     %% Best-effort: send the worker a cooperative cancel signal so
     %% arity-2 tool handlers can short-circuit. Then transition
     %% the stored status. Arity-1 handlers run to completion;
     %% their result is dropped because the task is already in a
     %% terminal state.
-    _ = case ets:lookup(?TABLE, {SessionId, TaskId}) of
-            [{_, #task{worker_pid = Pid, request_id = ReqId}}]
-                    when is_pid(Pid) ->
-                try Pid ! {cancel, ReqId} catch _:_ -> ok end;
-            _ -> ok
+    _ =
+        case ets:lookup(?TABLE, {SessionId, TaskId}) of
+            [{_, #task{worker_pid = Pid, request_id = ReqId}}] when
+                is_pid(Pid)
+            ->
+                try
+                    Pid ! {cancel, ReqId}
+                catch
+                    _:_ -> ok
+                end;
+            _ ->
+                ok
         end,
     Reply = transition(SessionId, TaskId, cancelled, undefined, undefined),
     {reply, Reply, State};
-
 handle_call({set_worker, SessionId, TaskId, Info}, _From, State) ->
-    Reply = case ets:lookup(?TABLE, {SessionId, TaskId}) of
-        [{_, #task{} = Task}] ->
-            Updated = Task#task{
-                worker_pid = maps:get(worker, Info),
-                request_id = maps:get(request_id, Info, undefined)
-            },
-            true = ets:insert(?TABLE, {{SessionId, TaskId}, Updated}),
-            ok;
-        [] -> {error, not_found}
-    end,
+    Reply =
+        case ets:lookup(?TABLE, {SessionId, TaskId}) of
+            [{_, #task{} = Task}] ->
+                Updated = Task#task{
+                    worker_pid = maps:get(worker, Info),
+                    request_id = maps:get(request_id, Info, undefined)
+                },
+                true = ets:insert(?TABLE, {{SessionId, TaskId}, Updated}),
+                ok;
+            [] ->
+                {error, not_found}
+        end,
     {reply, Reply, State};
 handle_call({finish, SessionId, TaskId, Result}, _From, State) ->
     Reply = transition(SessionId, TaskId, completed, Result, undefined),
@@ -168,15 +199,20 @@ handle_cast(_Msg, State) -> {noreply, State}.
 handle_info(sweep, State) ->
     Now = erlang:system_time(millisecond),
     Cutoff = Now - ?TASK_TTL,
-    Drop = ets:foldl(fun
-        ({_, #task{status = working}}, Acc) -> Acc;
-        ({Key, #task{updated_at = U}}, Acc) when U < Cutoff -> [Key | Acc];
-        (_, Acc) -> Acc
-    end, [], ?TABLE),
+    Drop = ets:foldl(
+        fun
+            ({_, #task{status = working}}, Acc) -> Acc;
+            ({Key, #task{updated_at = U}}, Acc) when U < Cutoff -> [Key | Acc];
+            (_, Acc) -> Acc
+        end,
+        [],
+        ?TABLE
+    ),
     lists:foreach(fun(K) -> ets:delete(?TABLE, K) end, Drop),
     erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
     {noreply, State};
-handle_info(_, State) -> {noreply, State}.
+handle_info(_, State) ->
+    {noreply, State}.
 
 terminate(_Reason, _State) -> ok.
 
@@ -187,9 +223,14 @@ terminate(_Reason, _State) -> ok.
 ensure_table() ->
     case ets:whereis(?TABLE) of
         undefined ->
-            ets:new(?TABLE, [named_table, protected, set,
-                             {read_concurrency, true}]);
-        _ -> ok
+            ets:new(?TABLE, [
+                named_table,
+                protected,
+                set,
+                {read_concurrency, true}
+            ]);
+        _ ->
+            ok
     end.
 
 generate_id() ->
@@ -202,7 +243,9 @@ transition(SessionId, TaskId, Status, Result, Reason) ->
         [{_, #task{status = working} = Task}] ->
             Now = erlang:system_time(millisecond),
             Updated = Task#task{
-                status = Status, result = Result, error = Reason,
+                status = Status,
+                result = Result,
+                error = Reason,
                 updated_at = Now
             },
             true = ets:insert(?TABLE, {{SessionId, TaskId}, Updated}),
@@ -215,22 +258,32 @@ transition(SessionId, TaskId, Status, Result, Reason) ->
             {error, not_found}
     end.
 
-notify_changed(undefined, _) -> ok;
+notify_changed(undefined, _) ->
+    ok;
 notify_changed(SessionId, #task{} = Task) ->
     case barrel_mcp_session:get_sse_pid(SessionId) of
         {ok, Pid} when is_pid(Pid) ->
-            Pid ! {sse_send_message, #{
-                <<"jsonrpc">> => <<"2.0">>,
-                <<"method">> => <<"notifications/tasks/status">>,
-                <<"params">> => task_to_map(Task)
-            }},
+            Pid !
+                {sse_send_message, #{
+                    <<"jsonrpc">> => <<"2.0">>,
+                    <<"method">> => <<"notifications/tasks/status">>,
+                    <<"params">> => task_to_map(Task)
+                }},
             ok;
-        _ -> ok
+        _ ->
+            ok
     end.
 
-task_to_map(#task{id = Id, session_id = Sid, method = M, status = St,
-                  result = R, error = E,
-                  created_at = C, updated_at = U}) ->
+task_to_map(#task{
+    id = Id,
+    session_id = Sid,
+    method = M,
+    status = St,
+    result = R,
+    error = E,
+    created_at = C,
+    updated_at = U
+}) ->
     Base = #{
         <<"taskId">> => Id,
         <<"method">> => M,
@@ -242,23 +295,33 @@ task_to_map(#task{id = Id, session_id = Sid, method = M, status = St,
         %% TTL, so we report null.
         <<"ttl">> => null
     },
-    Base1 = case Sid of undefined -> Base;
-                       _ -> Base#{<<"sessionId">> => Sid} end,
-    Base2 = case St =:= completed of
-                true when R =/= undefined -> Base1#{<<"result">> => R};
-                _ -> Base1
-            end,
+    Base1 =
+        case Sid of
+            undefined -> Base;
+            _ -> Base#{<<"sessionId">> => Sid}
+        end,
+    Base2 =
+        case St =:= completed of
+            true when R =/= undefined -> Base1#{<<"result">> => R};
+            _ -> Base1
+        end,
     case St =:= failed of
         true when E =/= undefined ->
             Base2#{<<"error">> => format_error(E)};
-        _ -> Base2
+        _ ->
+            Base2
     end.
 
 to_rfc3339(Ms) when is_integer(Ms) ->
     iolist_to_binary(
-      calendar:system_time_to_rfc3339(Ms,
-                                      [{unit, millisecond},
-                                       {offset, "Z"}])).
+        calendar:system_time_to_rfc3339(
+            Ms,
+            [
+                {unit, millisecond},
+                {offset, "Z"}
+            ]
+        )
+    ).
 
 format_error(B) when is_binary(B) -> B;
 format_error(T) -> iolist_to_binary(io_lib:format("~p", [T])).

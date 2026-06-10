@@ -11,10 +11,7 @@
 %%====================================================================
 
 session_manager_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     [
+    {setup, fun setup/0, fun cleanup/1, [
         {"Generate ID creates unique IDs", fun test_generate_id/0},
         {"Create session returns ID", fun test_create_session/0},
         {"Get session returns session data", fun test_get_session/0},
@@ -23,23 +20,28 @@ session_manager_test_() ->
         {"Delete session removes it", fun test_delete_session/0},
         {"List sessions returns all", fun test_list_sessions/0},
         {"Cleanup expired removes old sessions", fun test_cleanup_expired/0}
-     ]
-    }.
+    ]}.
 
 setup() ->
     application:ensure_all_started(barrel_mcp),
     ok = barrel_mcp_registry:wait_for_ready(),
     %% Clear any existing sessions
-    lists:foreach(fun(#{id := Id}) ->
-        barrel_mcp_session:delete(Id)
-    end, barrel_mcp_session:list()),
+    lists:foreach(
+        fun(#{id := Id}) ->
+            barrel_mcp_session:delete(Id)
+        end,
+        barrel_mcp_session:list()
+    ),
     ok.
 
 cleanup(_) ->
     %% Clear sessions
-    lists:foreach(fun(#{id := Id}) ->
-        barrel_mcp_session:delete(Id)
-    end, barrel_mcp_session:list()),
+    lists:foreach(
+        fun(#{id := Id}) ->
+            barrel_mcp_session:delete(Id)
+        end,
+        barrel_mcp_session:list()
+    ),
     ok.
 
 %%====================================================================

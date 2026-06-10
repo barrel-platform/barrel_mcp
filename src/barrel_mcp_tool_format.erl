@@ -68,11 +68,14 @@
 to_anthropic(Tools) when is_list(Tools) ->
     [to_anthropic(T) || T <- Tools];
 to_anthropic(Tool) when is_map(Tool) ->
-    Schema = maps:get(<<"inputSchema">>, Tool,
-                      #{<<"type">> => <<"object">>}),
+    Schema = maps:get(
+        <<"inputSchema">>,
+        Tool,
+        #{<<"type">> => <<"object">>}
+    ),
     #{
-        <<"name">>         => maps:get(<<"name">>, Tool),
-        <<"description">>  => maps:get(<<"description">>, Tool, <<>>),
+        <<"name">> => maps:get(<<"name">>, Tool),
+        <<"description">> => maps:get(<<"description">>, Tool, <<>>),
         <<"input_schema">> => Schema
     }.
 
@@ -84,14 +87,17 @@ to_anthropic(Tool) when is_map(Tool) ->
 to_openai(Tools) when is_list(Tools) ->
     [to_openai(T) || T <- Tools];
 to_openai(Tool) when is_map(Tool) ->
-    Schema = maps:get(<<"inputSchema">>, Tool,
-                      #{<<"type">> => <<"object">>}),
+    Schema = maps:get(
+        <<"inputSchema">>,
+        Tool,
+        #{<<"type">> => <<"object">>}
+    ),
     #{
-        <<"type">>     => <<"function">>,
+        <<"type">> => <<"function">>,
         <<"function">> => #{
-            <<"name">>        => maps:get(<<"name">>, Tool),
+            <<"name">> => maps:get(<<"name">>, Tool),
             <<"description">> => maps:get(<<"description">>, Tool, <<>>),
-            <<"parameters">>  => Schema
+            <<"parameters">> => Schema
         }
     }.
 

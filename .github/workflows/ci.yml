@@ -104,8 +104,77 @@ jobs:
       - name: Run Python interop tests
         run: make interop-test
 
-  check:
-    name: Check / OTP ${{ matrix.otp }}
+  format:
+    name: Format
+    needs: compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '29'
+          rebar3-version: '3.27'
+      - name: Restore rebar3 cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/rebar3
+            _build
+          key: ${{ runner.os }}-rebar3-29-${{ hashFiles('rebar.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rebar3-29-
+      - name: Check formatting
+        run: rebar3 fmt --check
+
+  lint:
+    name: Lint
+    needs: compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '29'
+          rebar3-version: '3.27'
+      - name: Restore rebar3 cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/rebar3
+            _build
+          key: ${{ runner.os }}-rebar3-29-${{ hashFiles('rebar.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rebar3-29-
+      - name: Run elvis
+        run: rebar3 lint
+
+  xref:
+    name: Xref / OTP ${{ matrix.otp }}
+    needs: compile
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        otp: ['28', '29']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          rebar3-version: '3.27'
+      - name: Restore rebar3 cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/rebar3
+            _build
+          key: ${{ runner.os }}-rebar3-${{ matrix.otp }}-${{ hashFiles('rebar.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rebar3-${{ matrix.otp }}-
+      - name: Run xref
+        run: rebar3 xref
+
+  dialyzer:
+    name: Dialyzer / OTP ${{ matrix.otp }}
     needs: compile
     runs-on: ubuntu-latest
     strategy:
@@ -133,7 +202,5 @@ jobs:
           key: ${{ runner.os }}-plt-${{ matrix.otp }}-${{ hashFiles('rebar.lock') }}
           restore-keys: |
             ${{ runner.os }}-plt-${{ matrix.otp }}-
-      - name: Run xref
-        run: rebar3 xref
       - name: Run dialyzer
         run: rebar3 dialyzer

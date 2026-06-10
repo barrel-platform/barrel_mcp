@@ -15,10 +15,7 @@
 %%====================================================================
 
 session_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     [
+    {setup, fun setup/0, fun cleanup/1, [
         {"Initialize returns protocol version and capabilities", fun test_initialize/0},
         {"Initialize returns server info", fun test_initialize_server_info/0},
         {"Server capabilities reflect registered handlers", fun test_server_capabilities/0},
@@ -27,8 +24,7 @@ session_test_() ->
         {"Invalid JSON returns parse error", fun test_invalid_json/0},
         {"Missing method returns invalid request", fun test_missing_method/0},
         {"Notification has no response", fun test_notification_no_response/0}
-     ]
-    }.
+    ]}.
 
 setup() ->
     application:ensure_all_started(barrel_mcp),
@@ -37,15 +33,24 @@ setup() ->
 
 cleanup(_) ->
     %% Clean up handlers
-    lists:foreach(fun({Name, _}) ->
-        barrel_mcp_registry:unreg(tool, Name)
-    end, barrel_mcp_registry:all(tool)),
-    lists:foreach(fun({Name, _}) ->
-        barrel_mcp_registry:unreg(resource, Name)
-    end, barrel_mcp_registry:all(resource)),
-    lists:foreach(fun({Name, _}) ->
-        barrel_mcp_registry:unreg(prompt, Name)
-    end, barrel_mcp_registry:all(prompt)),
+    lists:foreach(
+        fun({Name, _}) ->
+            barrel_mcp_registry:unreg(tool, Name)
+        end,
+        barrel_mcp_registry:all(tool)
+    ),
+    lists:foreach(
+        fun({Name, _}) ->
+            barrel_mcp_registry:unreg(resource, Name)
+        end,
+        barrel_mcp_registry:all(resource)
+    ),
+    lists:foreach(
+        fun({Name, _}) ->
+            barrel_mcp_registry:unreg(prompt, Name)
+        end,
+        barrel_mcp_registry:all(prompt)
+    ),
     ok.
 
 %%====================================================================

@@ -103,13 +103,14 @@ do_match(Uri, [{var, Name}], Vars) ->
     %% suffix; here we require at least one character.
     case Uri of
         <<>> -> nomatch;
-        _    -> {ok, Vars#{Name => Uri}}
+        _ -> {ok, Vars#{Name => Uri}}
     end;
 do_match(Uri, [{var, Name}, {literal, NextLit} | Rest], Vars) ->
     %% Variable followed by a literal: consume up to the next
     %% occurrence of NextLit.
     case binary:match(Uri, NextLit) of
-        nomatch -> nomatch;
+        nomatch ->
+            nomatch;
         {Pos, Len} when Pos > 0 ->
             <<Value:Pos/binary, _:Len/binary, Tail/binary>> = Uri,
             do_match(Tail, Rest, Vars#{Name => Value});
@@ -125,8 +126,11 @@ do_match(Uri, [{var, Name1}, {var, Name2} | Rest], Vars) ->
     %% this shape. Implement simply: split on the next `/'.
     case binary:split(Uri, <<"/">>) of
         [V1, V2] when V1 =/= <<>>, V2 =/= <<>> ->
-            do_match(<<>>, Rest,
-                     Vars#{Name1 => V1, Name2 => V2});
+            do_match(
+                <<>>,
+                Rest,
+                Vars#{Name1 => V1, Name2 => V2}
+            );
         _ ->
             nomatch
     end.

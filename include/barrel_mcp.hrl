@@ -17,13 +17,15 @@
 %% downward when the peer reports an older revision.
 -define(MCP_CLIENT_PROTOCOL_VERSION, <<"2025-11-25">>).
 %% Older revisions the client knows how to speak (in preference order).
--define(MCP_CLIENT_SUPPORTED_VERSIONS,
-        [<<"2025-11-25">>, <<"2025-06-18">>, <<"2025-03-26">>, <<"2024-11-05">>]).
+-define(MCP_CLIENT_SUPPORTED_VERSIONS, [
+    <<"2025-11-25">>, <<"2025-06-18">>, <<"2025-03-26">>, <<"2024-11-05">>
+]).
 %% Versions the server is willing to accept on the
 %% `MCP-Protocol-Version' request header. Same set as the client list
 %% today; bumping the server's preferred default is a separate change.
--define(MCP_SUPPORTED_VERSIONS,
-        [<<"2025-11-25">>, <<"2025-06-18">>, <<"2025-03-26">>, <<"2024-11-05">>]).
+-define(MCP_SUPPORTED_VERSIONS, [
+    <<"2025-11-25">>, <<"2025-06-18">>, <<"2025-03-26">>, <<"2024-11-05">>
+]).
 
 %% JSON-RPC Error Codes
 -define(JSONRPC_PARSE_ERROR, -32700).
@@ -38,8 +40,12 @@
 -define(MCP_PROMPT_ERROR, -32002).
 
 %% Handler types
--type handler_type() :: tool | resource | prompt | resource_template
-                       | completion.
+-type handler_type() ::
+    tool
+    | resource
+    | prompt
+    | resource_template
+    | completion.
 
 %% Tool definition
 -type tool_def() :: #{
@@ -76,18 +82,21 @@
 
 %% MCP Content types
 -type text_content() :: #{
-    type := binary(),  % <<"text">>
+    % <<"text">>
+    type := binary(),
     text := binary()
 }.
 
 -type image_content() :: #{
-    type := binary(),  % <<"image">>
+    % <<"image">>
+    type := binary(),
     data := binary(),
     mimeType := binary()
 }.
 
 -type resource_content() :: #{
-    type := binary(),  % <<"resource">>
+    % <<"resource">>
+    type := binary(),
     resource := #{
         uri := binary(),
         text => binary(),

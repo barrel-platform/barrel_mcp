@@ -310,16 +310,23 @@ validate_tool_input(Args, Handler) ->
                 ok -> ok;
                 {error, Errors} -> {error, Errors}
             end;
-        _ -> ok
+        _ ->
+            ok
     end.
 
-invoke_tool_handler(Args, Ctx, #{module := M, function := F} = Handler,
-                     ReplyTo, RequestId) ->
+invoke_tool_handler(
+    Args,
+    Ctx,
+    #{module := M, function := F} = Handler,
+    ReplyTo,
+    RequestId
+) ->
     try
-        Result = case erlang:function_exported(M, F, 2) of
-                     true -> M:F(Args, Ctx);
-                     false -> M:F(Args)
-                 end,
+        Result =
+            case erlang:function_exported(M, F, 2) of
+                true -> M:F(Args, Ctx);
+                false -> M:F(Args)
+            end,
         deliver_tool_result(Result, Handler, ReplyTo, RequestId)
     catch
         Class:Reason:Stack ->
@@ -327,27 +334,41 @@ invoke_tool_handler(Args, Ctx, #{module := M, function := F} = Handler,
             %% surface only an opaque request-scoped reference to the
             %% client. The wire layer renders a generic "Internal tool
             %% error" text; operators cross-reference using the id.
-            logger:error("Tool handler crashed: ~p:~p ~p (request_id=~p, "
-                         "module=~p, function=~p)",
-                         [Class, Reason, Stack, RequestId, M, F]),
+            logger:error(
+                "Tool handler crashed: ~p:~p ~p (request_id=~p, "
+                "module=~p, function=~p)",
+                [Class, Reason, Stack, RequestId, M, F]
+            ),
             ReplyTo ! {tool_failed, RequestId, internal_error}
     end.
 
 deliver_tool_result({tool_error, Content}, _Handler, ReplyTo, RequestId) ->
     ReplyTo ! {tool_error, RequestId, Content};
-deliver_tool_result({tool_error, Content, Meta}, _Handler, ReplyTo, RequestId)
-  when is_map(Meta) ->
+deliver_tool_result({tool_error, Content, Meta}, _Handler, ReplyTo, RequestId) when
+    is_map(Meta)
+->
     ReplyTo ! {tool_error_meta, RequestId, Content, Meta};
 deliver_tool_result({structured, Data}, Handler, ReplyTo, RequestId) ->
-    deliver_structured(Data, default_content_for(Data), #{}, Handler,
-                       ReplyTo, RequestId);
+    deliver_structured(
+        Data,
+        default_content_for(Data),
+        #{},
+        Handler,
+        ReplyTo,
+        RequestId
+    );
 deliver_tool_result({structured, Data, Content}, Handler, ReplyTo, RequestId) ->
     deliver_structured(Data, Content, #{}, Handler, ReplyTo, RequestId);
-deliver_tool_result({structured_meta, Data, Content, Meta}, Handler,
-                     ReplyTo, RequestId) when is_map(Meta) ->
+deliver_tool_result(
+    {structured_meta, Data, Content, Meta},
+    Handler,
+    ReplyTo,
+    RequestId
+) when is_map(Meta) ->
     deliver_structured(Data, Content, Meta, Handler, ReplyTo, RequestId);
-deliver_tool_result({result_meta, Result, Meta}, _Handler, ReplyTo, RequestId)
-  when is_map(Meta) ->
+deliver_tool_result({result_meta, Result, Meta}, _Handler, ReplyTo, RequestId) when
+    is_map(Meta)
+->
     ReplyTo ! {tool_result_meta, RequestId, Result, Meta};
 deliver_tool_result(Result, _Handler, ReplyTo, RequestId) ->
     ReplyTo ! {tool_result, RequestId, Result}.
@@ -359,8 +380,7 @@ deliver_structured(Data, Content, Meta, Handler, ReplyTo, RequestId) ->
         ok ->
             ReplyTo ! {tool_structured_meta, RequestId, Data, Content, Meta};
         {error, Errors} ->
-            ReplyTo ! {tool_validation_failed, RequestId,
-                       {output, Errors}}
+            ReplyTo ! {tool_validation_failed, RequestId, {output, Errors}}
     end.
 
 validate_tool_output(Data, Handler) ->
@@ -370,7 +390,8 @@ validate_tool_output(Data, Handler) ->
                 {ok, Schema} -> barrel_mcp_schema:validate(Data, Schema);
                 error -> ok
             end;
-        _ -> ok
+        _ ->
+            ok
     end.
 
 %% Build a sensible default human-readable content list when the
@@ -378,11 +399,19 @@ validate_tool_output(Data, Handler) ->
 default_content_for(Data) when is_binary(Data) ->
     [#{<<"type">> => <<"text">>, <<"text">> => Data}];
 default_content_for(Data) when is_map(Data); is_list(Data) ->
-    [#{<<"type">> => <<"text">>,
-       <<"text">> => iolist_to_binary(json:encode(Data))}];
+    [
+        #{
+            <<"type">> => <<"text">>,
+            <<"text">> => iolist_to_binary(json:encode(Data))
+        }
+    ];
 default_content_for(Data) ->
-    [#{<<"type">> => <<"text">>,
-       <<"text">> => iolist_to_binary(io_lib:format("~p", [Data]))}].
+    [
+        #{
+            <<"type">> => <<"text">>,
+            <<"text">> => iolist_to_binary(io_lib:format("~p", [Data]))
+        }
+    ].
 
 %% @doc Find a handler by type and name.
 %%
@@ -419,10 +448,14 @@ find(Type, Name) ->
 -spec all() -> #{handler_type() => [{binary(), map()}]}.
 all() ->
     Handlers = persistent_term:get(?REGISTRY_KEY, #{}),
-    lists:foldl(fun({{Type, Name}, Handler}, Acc) ->
-        TypeHandlers = maps:get(Type, Acc, []),
-        Acc#{Type => [{Name, Handler} | TypeHandlers]}
-    end, #{}, maps:to_list(Handlers)).
+    lists:foldl(
+        fun({{Type, Name}, Handler}, Acc) ->
+            TypeHandlers = maps:get(Type, Acc, []),
+            Acc#{Type => [{Name, Handler} | TypeHandlers]}
+        end,
+        #{},
+        maps:to_list(Handlers)
+    ).
 
 %% @doc List all handlers of a specific type.
 %%
@@ -469,16 +502,12 @@ init([]) ->
 
 not_ready(info, ready, Data) ->
     {next_state, ready, Data};
-
 not_ready({call, _From}, wait_for_ready, _Data) ->
     {keep_state_and_data, [postpone]};
-
 not_ready({call, _From}, {reg, _Type, _Name, _Module, _Function, _Opts}, _Data) ->
     {keep_state_and_data, [postpone]};
-
 not_ready({call, _From}, {unreg, _Type, _Name}, _Data) ->
     {keep_state_and_data, [postpone]};
-
 not_ready({call, _From}, _, _Data) ->
     {keep_state_and_data, [postpone]}.
 
@@ -487,24 +516,24 @@ not_ready({call, _From}, _, _Data) ->
 
 ready(info, ready, _Data) ->
     keep_state_and_data;
-
 ready({call, From}, wait_for_ready, _Data) ->
     {keep_state_and_data, [{reply, From, ok}]};
-
 ready({call, From}, {reg, Type, Name, Module, Function, Opts}, Data) ->
     Reply = do_reg(Type, Name, Module, Function, Opts),
     {keep_state, Data, [{reply, From, Reply}]};
-
 ready({call, From}, {unreg, Type, Name}, Data) ->
     Reply = do_unreg(Type, Name),
     {keep_state, Data, [{reply, From, Reply}]};
-
 ready({call, From}, _, _Data) ->
     {keep_state_and_data, [{reply, From, {error, unknown_request}}]}.
 
 %% @private
 terminate(_Reason, _State, _Data) ->
-    try persistent_term:erase(?REGISTRY_KEY) catch _:_ -> ok end,
+    try
+        persistent_term:erase(?REGISTRY_KEY)
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 %%====================================================================
@@ -527,11 +556,12 @@ do_reg(Type, Name, Module, Function, Opts) ->
     %% Tools may register handlers as arity 1 (legacy) or arity 2
     %% (new, accepts Ctx with progress and cancel hooks). Resources,
     %% prompts and resource templates remain arity 1.
-    Arities = case Type of
-                  tool -> [2, 1];
-                  completion -> [2];
-                  _ -> [1]
-              end,
+    Arities =
+        case Type of
+            tool -> [2, 1];
+            completion -> [2];
+            _ -> [1]
+        end,
     case any_exported(Module, Function, Arities) of
         true ->
             Handler = build_handler(Type, Module, Function, Opts),
@@ -544,8 +574,10 @@ do_reg(Type, Name, Module, Function, Opts) ->
     end.
 
 any_exported(Module, Function, Arities) ->
-    lists:any(fun(A) -> erlang:function_exported(Module, Function, A) end,
-              Arities).
+    lists:any(
+        fun(A) -> erlang:function_exported(Module, Function, A) end,
+        Arities
+    ).
 
 do_unreg(Type, Name) ->
     true = ets:delete(?REGISTRY_TABLE, {Type, Name}),
@@ -601,10 +633,11 @@ build_handler(completion, Module, Function, _Opts) ->
     #{module => Module, function => Function}.
 
 add_metadata(Handler, Opts) ->
-    Handler1 = case maps:get(title, Opts, undefined) of
-                   undefined -> Handler;
-                   T -> Handler#{title => T}
-               end,
+    Handler1 =
+        case maps:get(title, Opts, undefined) of
+            undefined -> Handler;
+            T -> Handler#{title => T}
+        end,
     case maps:get(icons, Opts, undefined) of
         undefined -> Handler1;
         I -> Handler1#{icons => I}
@@ -617,7 +650,11 @@ opt_field(Key, Opts) ->
     end.
 
 sync_persistent_term() ->
-    Handlers = ets:foldl(fun({Key, Handler}, Acc) ->
-        Acc#{Key => Handler}
-    end, #{}, ?REGISTRY_TABLE),
+    Handlers = ets:foldl(
+        fun({Key, Handler}, Acc) ->
+            Acc#{Key => Handler}
+        end,
+        #{},
+        ?REGISTRY_TABLE
+    ),
     persistent_term:put(?REGISTRY_KEY, Handlers).

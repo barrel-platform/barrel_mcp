@@ -97,20 +97,40 @@ listener_init(Parent, Name, ListenOpts, EngineConfig) ->
     process_flag(trap_exit, true),
     case listen(ListenOpts) of
         {ok, Transport, LSock} ->
-            case (try register(Name, self()) catch _:_ -> error end) of
+            case
+                (try
+                    register(Name, self())
+                catch
+                    _:_ -> error
+                end)
+            of
                 true ->
                     Handler = make_handler(EngineConfig),
-                    N = maps:get(acceptors, ListenOpts,
-                                 max(2, erlang:system_info(schedulers))),
-                    Max = maps:get(max_connections, ListenOpts,
-                                   ?DEFAULT_MAX_CONNECTIONS),
+                    N = maps:get(
+                        acceptors,
+                        ListenOpts,
+                        max(2, erlang:system_info(schedulers))
+                    ),
+                    Max = maps:get(
+                        max_connections,
+                        ListenOpts,
+                        ?DEFAULT_MAX_CONNECTIONS
+                    ),
                     Counter = atomics:new(1, [{signed, false}]),
                     Listener = self(),
-                    _ = [spawn_link(fun() ->
-                                        acceptor_loop(LSock, Transport, Handler,
-                                                      Listener, Counter, Max)
-                                    end)
-                         || _ <- lists:seq(1, N)],
+                    _ = [
+                        spawn_link(fun() ->
+                            acceptor_loop(
+                                LSock,
+                                Transport,
+                                Handler,
+                                Listener,
+                                Counter,
+                                Max
+                            )
+                        end)
+                     || _ <- lists:seq(1, N)
+                    ],
                     Parent ! {self(), {ok, self()}},
                     listener_loop(LSock, Transport, Counter);
                 _ ->
@@ -152,8 +172,13 @@ listener_loop(LSock, Transport, Counter) ->
 listen(ListenOpts) ->
     Port = maps:get(port, ListenOpts, 9090),
     Ip = maps:get(ip, ListenOpts, {127, 0, 0, 1}),
-    Base = [binary, {active, false}, {reuseaddr, true},
-            {ip, Ip}, {backlog, 1024}],
+    Base = [
+        binary,
+        {active, false},
+        {reuseaddr, true},
+        {ip, Ip},
+        {backlog, 1024}
+    ],
     case maps:get(ssl, ListenOpts, undefined) of
         undefined ->
             case gen_tcp:listen(Port, Base) of
@@ -161,22 +186,31 @@ listen(ListenOpts) ->
                 {error, _} = E -> E
             end;
         #{certfile := Cert, keyfile := Key} = Ssl ->
-            CaOpts = case maps:get(cacertfile, Ssl, undefined) of
-                         undefined -> [];
-                         CaCert -> [{cacertfile, CaCert}]
-                     end,
-            TlsOpts = Base ++ [{certfile, Cert}, {keyfile, Key},
-                               {alpn_preferred_protocols,
-                                [<<"h2">>, <<"http/1.1">>]},
-                               {versions, ['tlsv1.2', 'tlsv1.3']}] ++ CaOpts,
+            CaOpts =
+                case maps:get(cacertfile, Ssl, undefined) of
+                    undefined -> [];
+                    CaCert -> [{cacertfile, CaCert}]
+                end,
+            TlsOpts =
+                Base ++
+                    [
+                        {certfile, Cert},
+                        {keyfile, Key},
+                        {alpn_preferred_protocols, [<<"h2">>, <<"http/1.1">>]},
+                        {versions, ['tlsv1.2', 'tlsv1.3']}
+                    ] ++ CaOpts,
             case ssl:listen(Port, TlsOpts) of
                 {ok, LSock} -> {ok, ssl, LSock};
                 {error, _} = E -> E
             end
     end.
 
-close_listen(gen_tcp, LSock) -> _ = gen_tcp:close(LSock), ok;
-close_listen(ssl, LSock) -> _ = ssl:close(LSock), ok.
+close_listen(gen_tcp, LSock) ->
+    _ = gen_tcp:close(LSock),
+    ok;
+close_listen(ssl, LSock) ->
+    _ = ssl:close(LSock),
+    ok.
 
 %%====================================================================
 %% Acceptor
@@ -185,20 +219,21 @@ close_listen(ssl, LSock) -> _ = ssl:close(LSock), ok.
 acceptor_loop(LSock, Transport, Handler, Listener, Counter, Max) ->
     case do_accept(Transport, LSock) of
         {ok, Socket} ->
-            _ = case atomics:add_get(Counter, 1, 1) > Max of
-                false ->
-                    Pid = start_connection(Socket, Transport, Handler, Listener),
-                    %% Hand the pid to the listener to monitor; it
-                    %% releases the slot on the connection's `DOWN'.
-                    Listener ! {track, Pid};
-                true ->
-                    %% At capacity: undo the reservation and drop the
-                    %% connection so a flood cannot exhaust resources.
-                    %% The brief backoff bounds the accept/close churn.
-                    atomics:sub(Counter, 1, 1),
-                    close(Transport, Socket),
-                    timer:sleep(?ACCEPT_ERROR_BACKOFF)
-            end,
+            _ =
+                case atomics:add_get(Counter, 1, 1) > Max of
+                    false ->
+                        Pid = start_connection(Socket, Transport, Handler, Listener),
+                        %% Hand the pid to the listener to monitor; it
+                        %% releases the slot on the connection's `DOWN'.
+                        Listener ! {track, Pid};
+                    true ->
+                        %% At capacity: undo the reservation and drop the
+                        %% connection so a flood cannot exhaust resources.
+                        %% The brief backoff bounds the accept/close churn.
+                        atomics:sub(Counter, 1, 1),
+                        close(Transport, Socket),
+                        timer:sleep(?ACCEPT_ERROR_BACKOFF)
+                end,
             acceptor_loop(LSock, Transport, Handler, Listener, Counter, Max);
         {error, closed} ->
             ok;
@@ -216,20 +251,25 @@ do_accept(ssl, LSock) -> ssl:transport_accept(LSock, infinity).
 %% a listener `stop' tears every connection down.
 start_connection(Socket, Transport, Handler, Listener) ->
     Pid = spawn(?MODULE, connection_init, [Transport, Handler, Listener]),
-    _ = case transfer(Transport, Socket, Pid) of
-        ok ->
-            Pid ! {socket_ready, Socket};
-        {error, Reason} ->
-            Pid ! {socket_failed, Reason},
-            close(Transport, Socket)
-    end,
+    _ =
+        case transfer(Transport, Socket, Pid) of
+            ok ->
+                Pid ! {socket_ready, Socket};
+            {error, Reason} ->
+                Pid ! {socket_failed, Reason},
+                close(Transport, Socket)
+        end,
     Pid.
 
 transfer(gen_tcp, Socket, Pid) -> gen_tcp:controlling_process(Socket, Pid);
 transfer(ssl, Socket, Pid) -> ssl:controlling_process(Socket, Pid).
 
-close(gen_tcp, Socket) -> _ = gen_tcp:close(Socket), ok;
-close(ssl, Socket) -> _ = ssl:close(Socket), ok.
+close(gen_tcp, Socket) ->
+    _ = gen_tcp:close(Socket),
+    ok;
+close(ssl, Socket) ->
+    _ = ssl:close(Socket),
+    ok.
 
 %%====================================================================
 %% Per-connection process
@@ -273,12 +313,21 @@ run_h1(Socket, Transport, Handler) ->
             case transfer(Transport, Socket, Conn) of
                 ok ->
                     case h1_connection:activate(Conn) of
-                        ok -> h1_loop(Conn, Handler);
+                        ok ->
+                            h1_loop(Conn, Handler);
                         {error, _} ->
-                            try h1_connection:close(Conn) catch _:_ -> ok end
+                            try
+                                h1_connection:close(Conn)
+                            catch
+                                _:_ -> ok
+                            end
                     end;
                 {error, _} ->
-                    try h1_connection:close(Conn) catch _:_ -> ok end,
+                    try
+                        h1_connection:close(Conn)
+                    catch
+                        _:_ -> ok
+                    end,
                     close(Transport, Socket)
             end;
         {error, _Reason} ->
@@ -293,7 +342,11 @@ run_h2(Socket, Handler) ->
                     _ = h2_connection:activate(Conn),
                     h2_loop(Conn, Handler, #{});
                 {error, _} ->
-                    try h2_connection:close(Conn) catch _:_ -> ok end,
+                    try
+                        h2_connection:close(Conn)
+                    catch
+                        _:_ -> ok
+                    end,
                     _ = ssl:close(Socket)
             end;
         {error, _Reason} ->
@@ -307,16 +360,33 @@ run_h2(Socket, Handler) ->
 h1_loop(Conn, Handler) ->
     receive
         {h1, Conn, {request, StreamId, Method, Path, Headers}} ->
-            {Pid, MRef} = spawn_handler(h1, Conn, StreamId, Method, Path,
-                                        Headers, Handler),
+            {Pid, MRef} = spawn_handler(
+                h1,
+                Conn,
+                StreamId,
+                Method,
+                Path,
+                Headers,
+                Handler
+            ),
             h1_pump(Conn, Handler, Pid, MRef, StreamId);
         {h1, Conn, {upgrade, StreamId, _Proto, Method, Path, Headers}} ->
-            {Pid, MRef} = spawn_handler(h1, Conn, StreamId, Method, Path,
-                                        Headers, Handler),
+            {Pid, MRef} = spawn_handler(
+                h1,
+                Conn,
+                StreamId,
+                Method,
+                Path,
+                Headers,
+                Handler
+            ),
             h1_pump(Conn, Handler, Pid, MRef, StreamId);
-        {h1, Conn, {goaway, _, _}} -> ok;
-        {h1, Conn, {closed, _}} -> ok;
-        {'EXIT', Conn, _} -> ok;
+        {h1, Conn, {goaway, _, _}} ->
+            ok;
+        {h1, Conn, {closed, _}} ->
+            ok;
+        {'EXIT', Conn, _} ->
+            ok;
         _Other ->
             h1_loop(Conn, Handler)
     end.
@@ -351,8 +421,15 @@ h1_pump(Conn, Handler, Pid, MRef, StreamId) ->
 h2_loop(Conn, Handler, Streams) ->
     receive
         {h2, Conn, {request, StreamId, Method, Path, Headers}} ->
-            {Pid, MRef} = spawn_handler(h2, Conn, StreamId, Method, Path,
-                                        Headers, Handler),
+            {Pid, MRef} = spawn_handler(
+                h2,
+                Conn,
+                StreamId,
+                Method,
+                Path,
+                Headers,
+                Handler
+            ),
             h2_loop(Conn, Handler, Streams#{StreamId => {Pid, MRef}});
         {h2, Conn, {data, StreamId, Data, Fin}} ->
             route(Streams, StreamId, {mcp_body, StreamId, {data, Data, Fin}}),
@@ -380,8 +457,11 @@ h2_loop(Conn, Handler, Streams) ->
 
 route(Streams, StreamId, Msg) ->
     case maps:find(StreamId, Streams) of
-        {ok, {Pid, _}} -> Pid ! Msg, ok;
-        error -> ok
+        {ok, {Pid, _}} ->
+            Pid ! Msg,
+            ok;
+        error ->
+            ok
     end.
 
 drop_pid(Streams, Pid) ->
@@ -400,15 +480,33 @@ spawn_handler(Proto, Conn, StreamId, Method, Path, Headers, Handler) ->
             Handler(Proto, Conn, StreamId, Method, Path, Headers)
         catch
             Class:Reason:Stack ->
-                logger:error("mcp http handler crash: ~p:~p~n~p",
-                             [Class, Reason, Stack]),
-                try Proto:send_response(Conn, StreamId, 500,
-                                        [{<<"content-type">>, <<"text/plain">>},
-                                         {<<"content-length">>, <<"21">>}])
-                catch _:_ -> ok end,
-                try Proto:send_data(Conn, StreamId,
-                                    <<"Internal Server Error">>, true)
-                catch _:_ -> ok end
+                logger:error(
+                    "mcp http handler crash: ~p:~p~n~p",
+                    [Class, Reason, Stack]
+                ),
+                try
+                    Proto:send_response(
+                        Conn,
+                        StreamId,
+                        500,
+                        [
+                            {<<"content-type">>, <<"text/plain">>},
+                            {<<"content-length">>, <<"21">>}
+                        ]
+                    )
+                catch
+                    _:_ -> ok
+                end,
+                try
+                    Proto:send_data(
+                        Conn,
+                        StreamId,
+                        <<"Internal Server Error">>,
+                        true
+                    )
+                catch
+                    _:_ -> ok
+                end
         end
     end).
 
@@ -417,8 +515,14 @@ make_handler(EngineConfig) ->
     fun(Proto, Conn, StreamId, Method, Path, Headers) ->
         Body = read_request_body(Method, StreamId),
         Responder = responder(Proto, Conn, StreamId),
-        barrel_mcp_http_engine:handle(Method, Path, Headers, Body,
-                                      Responder, EngineConfig)
+        barrel_mcp_http_engine:handle(
+            Method,
+            Path,
+            Headers,
+            Body,
+            Responder,
+            EngineConfig
+        )
     end.
 
 read_request_body(<<"POST">>, StreamId) ->
@@ -482,7 +586,9 @@ ensure_content_length(Headers, Len) ->
         fun({K, _}) ->
             L = string:lowercase(K),
             L =:= <<"content-length">> orelse L =:= <<"transfer-encoding">>
-        end, Headers),
+        end,
+        Headers
+    ),
     case HasFraming of
         true -> Headers;
         false -> [{<<"content-length">>, integer_to_binary(Len)} | Headers]

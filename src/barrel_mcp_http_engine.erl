@@ -84,8 +84,14 @@
 %% Entry point
 %%====================================================================
 
--spec handle(binary(), binary(), [{binary(), binary()}], binary(),
-             responder(), config()) -> ok.
+-spec handle(
+    binary(),
+    binary(),
+    [{binary(), binary()}],
+    binary(),
+    responder(),
+    config()
+) -> ok.
 handle(Method, RawPath, Headers, Body, Responder, Config) ->
     Path = strip_query(RawPath),
     %% The protected-resource-metadata document is served before
@@ -96,8 +102,14 @@ handle(Method, RawPath, Headers, Body, Responder, Config) ->
         _ ->
             case validate_origin(Headers, Config) of
                 ok ->
-                    dispatch(maps:get(mode, Config, stream),
-                             Method, Headers, Body, Responder, Config);
+                    dispatch(
+                        maps:get(mode, Config, stream),
+                        Method,
+                        Headers,
+                        Body,
+                        Responder,
+                        Config
+                    );
                 {error, _Reason} ->
                     %% 403 with no CORS header so the browser surfaces
                     %% the rejection rather than retrying.
@@ -107,10 +119,15 @@ handle(Method, RawPath, Headers, Body, Responder, Config) ->
 
 serve_prm(Responder, Doc) ->
     Body = iolist_to_binary(json:encode(Doc)),
-    reply(Responder, 200,
-          #{<<"content-type">> => <<"application/json">>,
-            <<"cache-control">> => <<"public, max-age=300">>},
-          Body).
+    reply(
+        Responder,
+        200,
+        #{
+            <<"content-type">> => <<"application/json">>,
+            <<"cache-control">> => <<"public, max-age=300">>
+        },
+        Body
+    ).
 
 %%====================================================================
 %% Method dispatch
@@ -122,12 +139,19 @@ dispatch(simple, <<"POST">>, Headers, Body, Responder, Config) ->
 dispatch(simple, <<"OPTIONS">>, Headers, _Body, Responder, Config) ->
     reply(Responder, 204, cors_headers(Headers, Config, #{}), <<>>);
 dispatch(simple, _Method, Headers, _Body, Responder, Config) ->
-    reply(Responder, 405,
-          cors_headers(Headers, Config,
-                       #{<<"content-type">> => <<"application/json">>,
-                         <<"allow">> => <<"POST, OPTIONS">>}),
-          <<"{\"error\":\"Method not allowed\"}">>);
-
+    reply(
+        Responder,
+        405,
+        cors_headers(
+            Headers,
+            Config,
+            #{
+                <<"content-type">> => <<"application/json">>,
+                <<"allow">> => <<"POST, OPTIONS">>
+            }
+        ),
+        <<"{\"error\":\"Method not allowed\"}">>
+    );
 %% --- Streamable transport ---
 dispatch(stream, <<"POST">>, Headers, Body, Responder, Config) ->
     stream_post(Headers, Body, Responder, Config);
@@ -138,11 +162,19 @@ dispatch(stream, <<"DELETE">>, Headers, _Body, Responder, Config) ->
 dispatch(stream, <<"OPTIONS">>, Headers, _Body, Responder, Config) ->
     reply(Responder, 204, cors_headers(Headers, Config, #{}), <<>>);
 dispatch(stream, _Method, Headers, _Body, Responder, Config) ->
-    reply(Responder, 405,
-          cors_headers(Headers, Config,
-                       #{<<"content-type">> => <<"application/json">>,
-                         <<"allow">> => <<"POST, GET, DELETE, OPTIONS">>}),
-          <<"{\"error\":\"Method not allowed\"}">>).
+    reply(
+        Responder,
+        405,
+        cors_headers(
+            Headers,
+            Config,
+            #{
+                <<"content-type">> => <<"application/json">>,
+                <<"allow">> => <<"POST, GET, DELETE, OPTIONS">>
+            }
+        ),
+        <<"{\"error\":\"Method not allowed\"}">>
+    ).
 
 %%====================================================================
 %% Simple transport
@@ -166,24 +198,36 @@ simple_post_authenticated(Headers, Body, Responder, Config, AuthInfo) ->
                 no_response ->
                     reply(Responder, 204, cors_headers(Headers, Config, #{}), <<>>);
                 {async, Plan} ->
-                    Result = barrel_mcp_protocol:drive_async_plan(Plan, 60000,
-                                                                  AuthInfo),
+                    Result = barrel_mcp_protocol:drive_async_plan(
+                        Plan,
+                        60000,
+                        AuthInfo
+                    ),
                     reply_json(Headers, Responder, Config, 200, Result);
                 Result ->
                     reply_json(Headers, Responder, Config, 200, Result)
             end;
         {error, parse_error} ->
-            Err = barrel_mcp_protocol:error_response(null, ?JSONRPC_PARSE_ERROR,
-                                                     <<"Parse error">>),
+            Err = barrel_mcp_protocol:error_response(
+                null,
+                ?JSONRPC_PARSE_ERROR,
+                <<"Parse error">>
+            ),
             reply_json(Headers, Responder, Config, 400, Err)
     end.
 
 reply_json(Headers, Responder, Config, Status, Envelope) ->
     Json = barrel_mcp_protocol:encode(Envelope),
-    reply(Responder, Status,
-          cors_headers(Headers, Config,
-                       #{<<"content-type">> => <<"application/json">>}),
-          Json).
+    reply(
+        Responder,
+        Status,
+        cors_headers(
+            Headers,
+            Config,
+            #{<<"content-type">> => <<"application/json">>}
+        ),
+        Json
+    ).
 
 %%====================================================================
 %% Streamable transport — POST
@@ -192,11 +236,18 @@ reply_json(Headers, Responder, Config, Status, Envelope) ->
 stream_post(Headers, Body, Responder, Config) ->
     case validate_accept_header(Headers) of
         {error, Reason} ->
-            reply(Responder, 406, cors_headers(Headers, Config, #{}),
-                  json_encode(#{<<"error">> => Reason}));
+            reply(
+                Responder,
+                406,
+                cors_headers(Headers, Config, #{}),
+                json_encode(#{<<"error">> => Reason})
+            );
         ok ->
-            AuthConfig = maps:get(auth_config, Config,
-                                  #{provider => barrel_mcp_auth_none}),
+            AuthConfig = maps:get(
+                auth_config,
+                Config,
+                #{provider => barrel_mcp_auth_none}
+            ),
             AuthRequest = #{headers => extract_headers(Headers, AuthConfig)},
             case authenticate(AuthConfig, AuthRequest) of
                 {ok, AuthInfo} ->
@@ -210,18 +261,39 @@ stream_post_authed(Headers, Body, Responder, Config, AuthInfo) ->
     SessionEnabled = maps:get(session_enabled, Config, true),
     case barrel_mcp_protocol:decode(Body) of
         {ok, Request} when is_list(Request) ->
-            reply_jsonrpc_error(Headers, Responder, Config, undefined, 400, null,
-                                ?JSONRPC_INVALID_REQUEST,
-                                <<"Batch requests are not supported">>);
+            reply_jsonrpc_error(
+                Headers,
+                Responder,
+                Config,
+                undefined,
+                400,
+                null,
+                ?JSONRPC_INVALID_REQUEST,
+                <<"Batch requests are not supported">>
+            );
         {ok, Request} when is_map(Request) ->
             %% Pass the raw request through the response-vs-request
             %% split; `_auth' is attached only on the request path
             %% (handle_dispatch), never on inbound responses.
-            stream_post_request(Headers, Responder, Config, SessionEnabled,
-                                Request, AuthInfo);
+            stream_post_request(
+                Headers,
+                Responder,
+                Config,
+                SessionEnabled,
+                Request,
+                AuthInfo
+            );
         {error, parse_error} ->
-            reply_jsonrpc_error(Headers, Responder, Config, undefined, 400, null,
-                                ?JSONRPC_PARSE_ERROR, <<"Parse error">>)
+            reply_jsonrpc_error(
+                Headers,
+                Responder,
+                Config,
+                undefined,
+                400,
+                null,
+                ?JSONRPC_PARSE_ERROR,
+                <<"Parse error">>
+            )
     end.
 
 %% Keep both the original request (for response detection) and an
@@ -231,8 +303,14 @@ stream_post_request(Headers, Responder, Config, SessionEnabled, Request, AuthInf
         true ->
             handle_inbound_response(Headers, Responder, Config, Request);
         false ->
-            handle_inbound_request(Headers, Responder, Config, SessionEnabled,
-                                   Request, AuthInfo)
+            handle_inbound_request(
+                Headers,
+                Responder,
+                Config,
+                SessionEnabled,
+                Request,
+                AuthInfo
+            )
     end.
 
 is_jsonrpc_response(R) ->
@@ -250,53 +328,100 @@ handle_inbound_request(Headers, Responder, Config, SessionEnabled, Request, Auth
         {ok, SessionId} ->
             handle_dispatch(Headers, Responder, Config, SessionId, Request, AuthInfo);
         {error, missing_session_id} ->
-            reply_jsonrpc_error(Headers, Responder, Config, undefined, 400, null,
-                                ?JSONRPC_INVALID_REQUEST,
-                                <<"Mcp-Session-Id header required">>);
+            reply_jsonrpc_error(
+                Headers,
+                Responder,
+                Config,
+                undefined,
+                400,
+                null,
+                ?JSONRPC_INVALID_REQUEST,
+                <<"Mcp-Session-Id header required">>
+            );
         {error, unknown_session} ->
-            reply_jsonrpc_error(Headers, Responder, Config, undefined, 404, null,
-                                ?JSONRPC_INVALID_REQUEST,
-                                <<"Unknown Mcp-Session-Id">>)
+            reply_jsonrpc_error(
+                Headers,
+                Responder,
+                Config,
+                undefined,
+                404,
+                null,
+                ?JSONRPC_INVALID_REQUEST,
+                <<"Unknown Mcp-Session-Id">>
+            )
     end.
 
 handle_dispatch(Headers, Responder, Config, SessionId, Request, AuthInfo) ->
-    _ = case SessionId of
+    _ =
+        case SessionId of
             undefined -> ok;
             _ -> barrel_mcp_session:update_activity(SessionId)
         end,
     Method = maps:get(<<"method">>, Request, undefined),
     case validate_protocol_version(Headers, SessionId, Method) of
         {error, ProtoErr} ->
-            reply_jsonrpc_error(Headers, Responder, Config, SessionId, 400, null,
-                                ?JSONRPC_INVALID_REQUEST, ProtoErr);
+            reply_jsonrpc_error(
+                Headers,
+                Responder,
+                Config,
+                SessionId,
+                400,
+                null,
+                ?JSONRPC_INVALID_REQUEST,
+                ProtoErr
+            );
         ok ->
-            ProtocolState0 = case SessionId of
-                                 undefined -> #{};
-                                 _ -> #{session_id => SessionId}
-                             end,
+            ProtocolState0 =
+                case SessionId of
+                    undefined -> #{};
+                    _ -> #{session_id => SessionId}
+                end,
             ProtocolState = ProtocolState0#{auth_info => AuthInfo},
-            case barrel_mcp_protocol:handle(with_auth(Request, AuthInfo),
-                                            ProtocolState) of
+            case
+                barrel_mcp_protocol:handle(
+                    with_auth(Request, AuthInfo),
+                    ProtocolState
+                )
+            of
                 no_response ->
                     Hdrs = add_session_header(
-                             cors_headers(Headers, Config, #{}), SessionId),
+                        cors_headers(Headers, Config, #{}), SessionId
+                    ),
                     reply(Responder, 202, Hdrs, <<>>);
                 {async, AsyncPlan} ->
-                    handle_async_tool_call(Headers, Responder, Config, SessionId,
-                                           Request, AsyncPlan, AuthInfo);
+                    handle_async_tool_call(
+                        Headers,
+                        Responder,
+                        Config,
+                        SessionId,
+                        Request,
+                        AsyncPlan,
+                        AuthInfo
+                    );
                 Result ->
                     _ = maybe_capture_initialize_version(SessionId, Method, Result),
                     case wants_sse_response(Headers) of
                         true ->
-                            stream_sse_response(Headers, Responder, Config,
-                                                SessionId, Result);
+                            stream_sse_response(
+                                Headers,
+                                Responder,
+                                Config,
+                                SessionId,
+                                Result
+                            );
                         false ->
                             ResponseJson = barrel_mcp_protocol:encode(Result),
                             Hdrs = add_session_header(
-                                     cors_headers(Headers, Config,
-                                                  #{<<"content-type">> =>
-                                                        <<"application/json">>}),
-                                     SessionId),
+                                cors_headers(
+                                    Headers,
+                                    Config,
+                                    #{
+                                        <<"content-type">> =>
+                                            <<"application/json">>
+                                    }
+                                ),
+                                SessionId
+                            ),
                             reply(Responder, 200, Hdrs, ResponseJson)
                     end
             end
@@ -306,8 +431,15 @@ handle_dispatch(Headers, Responder, Config, SessionId, Request, AuthInfo) ->
 %% Async tool calls
 %%====================================================================
 
-handle_async_tool_call(Headers, Responder, Config, SessionId, Request, AsyncPlan,
-                       AuthInfo) ->
+handle_async_tool_call(
+    Headers,
+    Responder,
+    Config,
+    SessionId,
+    Request,
+    AsyncPlan,
+    AuthInfo
+) ->
     RequestId = maps:get(request_id, AsyncPlan),
     Spawn = maps:get(spawn, AsyncPlan),
     Timeout = maps:get(timeout, AsyncPlan, 60000),
@@ -319,9 +451,18 @@ handle_async_tool_call(Headers, Responder, Config, SessionId, Request, AsyncPlan
     Self = self(),
     case LongRunning of
         true ->
-            handle_long_running_call(Headers, Responder, Config, SessionId,
-                                     RequestId, ToolName, ProgressToken, Meta,
-                                     Spawn, AuthInfo);
+            handle_long_running_call(
+                Headers,
+                Responder,
+                Config,
+                SessionId,
+                RequestId,
+                ToolName,
+                ProgressToken,
+                Meta,
+                Spawn,
+                AuthInfo
+            );
         false ->
             Ctx = #{
                 session_id => SessionId,
@@ -334,17 +475,26 @@ handle_async_tool_call(Headers, Responder, Config, SessionId, Request, AsyncPlan
             },
             WorkerPid = Spawn(Ctx),
             case SessionId of
-                undefined -> ok;
-                _ -> ok = barrel_mcp_session:record_in_flight(
-                            SessionId, RequestId, WorkerPid, Self)
+                undefined ->
+                    ok;
+                _ ->
+                    ok = barrel_mcp_session:record_in_flight(
+                        SessionId, RequestId, WorkerPid, Self
+                    )
             end,
             Outcome = wait_for_tool(RequestId, Timeout),
             case SessionId of
                 undefined -> ok;
                 _ -> ok = barrel_mcp_session:clear_in_flight(SessionId, RequestId)
             end,
-            deliver_tool_outcome(Headers, Responder, Config, SessionId,
-                                 RequestId, Outcome)
+            deliver_tool_outcome(
+                Headers,
+                Responder,
+                Config,
+                SessionId,
+                RequestId,
+                Outcome
+            )
     end.
 
 is_long_running_tool(Name) ->
@@ -353,8 +503,18 @@ is_long_running_tool(Name) ->
         error -> false
     end.
 
-handle_long_running_call(Headers, Responder, Config, SessionId, RequestId,
-                         ToolName, ProgressToken, Meta, Spawn, AuthInfo) ->
+handle_long_running_call(
+    Headers,
+    Responder,
+    Config,
+    SessionId,
+    RequestId,
+    ToolName,
+    ProgressToken,
+    Meta,
+    Spawn,
+    AuthInfo
+) ->
     {ok, TaskId} = barrel_mcp_tasks:create(SessionId, ToolName, #{}),
     Collector = spawn_task_collector(SessionId, TaskId),
     Ctx = #{
@@ -367,14 +527,24 @@ handle_long_running_call(Headers, Responder, Config, SessionId, RequestId,
         auth_info => AuthInfo
     },
     Worker = Spawn(Ctx),
-    _ = barrel_mcp_tasks:set_worker(SessionId, TaskId,
-                                    #{worker => Worker, request_id => RequestId}),
-    Task = case barrel_mcp_tasks:get(SessionId, TaskId) of
-               {ok, T} -> T;
-               _ -> #{<<"taskId">> => TaskId, <<"status">> => <<"working">>}
-           end,
-    send_tool_envelope(Headers, Responder, Config, SessionId, RequestId,
-                       #{<<"task">> => Task}).
+    _ = barrel_mcp_tasks:set_worker(
+        SessionId,
+        TaskId,
+        #{worker => Worker, request_id => RequestId}
+    ),
+    Task =
+        case barrel_mcp_tasks:get(SessionId, TaskId) of
+            {ok, T} -> T;
+            _ -> #{<<"taskId">> => TaskId, <<"status">> => <<"working">>}
+        end,
+    send_tool_envelope(
+        Headers,
+        Responder,
+        Config,
+        SessionId,
+        RequestId,
+        #{<<"task">> => Task}
+    ).
 
 spawn_task_collector(SessionId, TaskId) ->
     spawn(fun() -> task_collector_loop(SessionId, TaskId) end).
@@ -385,9 +555,14 @@ task_collector_loop(SessionId, TaskId) ->
             Content = barrel_mcp_protocol:format_tool_result_external(Result),
             barrel_mcp_tasks:finish(SessionId, TaskId, #{<<"content">> => Content});
         {tool_structured, _ReqId, Data, Content} ->
-            barrel_mcp_tasks:finish(SessionId, TaskId,
-                                    #{<<"content">> => Content,
-                                      <<"structuredContent">> => Data});
+            barrel_mcp_tasks:finish(
+                SessionId,
+                TaskId,
+                #{
+                    <<"content">> => Content,
+                    <<"structuredContent">> => Data
+                }
+            );
         {tool_error, _ReqId, Content} ->
             barrel_mcp_tasks:fail(SessionId, TaskId, {tool_error, Content});
         {tool_failed, _ReqId, Reason} ->
@@ -410,23 +585,34 @@ emit_progress_fun(SessionId, Token) ->
     end.
 
 wait_for_tool(RequestId, Timeout) ->
-    Outcome = receive
-        {tool_result, RequestId, Result} -> {result, Result, #{}};
-        {tool_result_meta, RequestId, Result, Meta} -> {result, Result, Meta};
-        {tool_structured, RequestId, Data, Content} -> {structured, Data, Content, #{}};
-        {tool_structured_meta, RequestId, Data, Content, Meta} ->
-            {structured, Data, Content, Meta};
-        {tool_error, RequestId, Content} -> {tool_error, Content, #{}};
-        {tool_error_meta, RequestId, Content, Meta} -> {tool_error, Content, Meta};
-        {tool_failed, RequestId, Reason} -> {failed, Reason};
-        {tool_validation_failed, RequestId, Errors} -> {validation_failed, Errors};
-        {cancelled, RequestId} -> cancelled
-    after Timeout ->
-        timeout
-    end,
+    Outcome =
+        receive
+            {tool_result, RequestId, Result} ->
+                {result, Result, #{}};
+            {tool_result_meta, RequestId, Result, Meta} ->
+                {result, Result, Meta};
+            {tool_structured, RequestId, Data, Content} ->
+                {structured, Data, Content, #{}};
+            {tool_structured_meta, RequestId, Data, Content, Meta} ->
+                {structured, Data, Content, Meta};
+            {tool_error, RequestId, Content} ->
+                {tool_error, Content, #{}};
+            {tool_error_meta, RequestId, Content, Meta} ->
+                {tool_error, Content, Meta};
+            {tool_failed, RequestId, Reason} ->
+                {failed, Reason};
+            {tool_validation_failed, RequestId, Errors} ->
+                {validation_failed, Errors};
+            {cancelled, RequestId} ->
+                cancelled
+        after Timeout ->
+            timeout
+        end,
     case Outcome of
-        cancelled -> cancelled;
-        timeout -> timeout;
+        cancelled ->
+            cancelled;
+        timeout ->
+            timeout;
         _ ->
             %% Cancellation race: prefer a pending cancel.
             receive
@@ -438,33 +624,102 @@ wait_for_tool(RequestId, Timeout) ->
 deliver_tool_outcome(Headers, Responder, Config, SessionId, _RequestId, cancelled) ->
     Hdrs = add_session_header(cors_headers(Headers, Config, #{}), SessionId),
     reply(Responder, 200, Hdrs, <<>>);
-deliver_tool_outcome(Headers, Responder, Config, SessionId, RequestId,
-                     {result, Result, Meta}) ->
+deliver_tool_outcome(
+    Headers,
+    Responder,
+    Config,
+    SessionId,
+    RequestId,
+    {result, Result, Meta}
+) ->
     Content = barrel_mcp_protocol:format_tool_result_external(Result),
-    send_tool_envelope(Headers, Responder, Config, SessionId, RequestId,
-                       #{<<"content">> => Content}, Meta);
-deliver_tool_outcome(Headers, Responder, Config, SessionId, RequestId,
-                     {structured, Data, Content, Meta}) ->
-    send_tool_envelope(Headers, Responder, Config, SessionId, RequestId,
-                       #{<<"content">> => Content,
-                         <<"structuredContent">> => Data}, Meta);
-deliver_tool_outcome(Headers, Responder, Config, SessionId, RequestId,
-                     {tool_error, Content, Meta}) ->
-    send_tool_envelope(Headers, Responder, Config, SessionId, RequestId,
-                       #{<<"content">> => Content, <<"isError">> => true}, Meta);
-deliver_tool_outcome(Headers, Responder, Config, SessionId, RequestId,
-                     {validation_failed, Errors}) ->
+    send_tool_envelope(
+        Headers,
+        Responder,
+        Config,
+        SessionId,
+        RequestId,
+        #{<<"content">> => Content},
+        Meta
+    );
+deliver_tool_outcome(
+    Headers,
+    Responder,
+    Config,
+    SessionId,
+    RequestId,
+    {structured, Data, Content, Meta}
+) ->
+    send_tool_envelope(
+        Headers,
+        Responder,
+        Config,
+        SessionId,
+        RequestId,
+        #{
+            <<"content">> => Content,
+            <<"structuredContent">> => Data
+        },
+        Meta
+    );
+deliver_tool_outcome(
+    Headers,
+    Responder,
+    Config,
+    SessionId,
+    RequestId,
+    {tool_error, Content, Meta}
+) ->
+    send_tool_envelope(
+        Headers,
+        Responder,
+        Config,
+        SessionId,
+        RequestId,
+        #{<<"content">> => Content, <<"isError">> => true},
+        Meta
+    );
+deliver_tool_outcome(
+    Headers,
+    Responder,
+    Config,
+    SessionId,
+    RequestId,
+    {validation_failed, Errors}
+) ->
     Msg = iolist_to_binary(io_lib:format("Invalid tool input: ~p", [Errors])),
-    send_tool_envelope(Headers, Responder, Config, SessionId, RequestId,
-                       #{<<"content">> =>
-                            [#{<<"type">> => <<"text">>, <<"text">> => Msg}],
-                         <<"isError">> => true});
+    send_tool_envelope(
+        Headers,
+        Responder,
+        Config,
+        SessionId,
+        RequestId,
+        #{
+            <<"content">> =>
+                [#{<<"type">> => <<"text">>, <<"text">> => Msg}],
+            <<"isError">> => true
+        }
+    );
 deliver_tool_outcome(Headers, Responder, Config, SessionId, RequestId, {failed, _}) ->
-    send_jsonrpc_error_envelope(Headers, Responder, Config, SessionId, RequestId,
-                                ?MCP_TOOL_ERROR, <<"Internal tool error">>);
+    send_jsonrpc_error_envelope(
+        Headers,
+        Responder,
+        Config,
+        SessionId,
+        RequestId,
+        ?MCP_TOOL_ERROR,
+        <<"Internal tool error">>
+    );
 deliver_tool_outcome(Headers, Responder, Config, SessionId, RequestId, timeout) ->
-    send_jsonrpc_error_envelope(Headers, Responder, Config, SessionId, RequestId,
-                                ?MCP_TOOL_ERROR, <<"Tool timed out">>).
+    send_jsonrpc_error_envelope(
+        Headers,
+        Responder,
+        Config,
+        SessionId,
+        RequestId,
+        ?MCP_TOOL_ERROR,
+        <<"Tool timed out">>
+    ).
 
 send_tool_envelope(Headers, Responder, Config, SessionId, RequestId, Result) ->
     send_tool_envelope(Headers, Responder, Config, SessionId, RequestId, Result, #{}).
@@ -473,27 +728,39 @@ send_tool_envelope(Headers, Responder, Config, SessionId, RequestId, Result, Met
     Resp = barrel_mcp_protocol:success_response(RequestId, Result, Meta),
     Json = barrel_mcp_protocol:encode(Resp),
     Hdrs = add_session_header(
-             cors_headers(Headers, Config,
-                          #{<<"content-type">> => <<"application/json">>}),
-             SessionId),
+        cors_headers(
+            Headers,
+            Config,
+            #{<<"content-type">> => <<"application/json">>}
+        ),
+        SessionId
+    ),
     reply(Responder, 200, Hdrs, Json).
 
 send_jsonrpc_error_envelope(Headers, Responder, Config, SessionId, Id, Code, Message) ->
     Resp = barrel_mcp_protocol:error_response(Id, Code, Message),
     Json = barrel_mcp_protocol:encode(Resp),
     Hdrs = add_session_header(
-             cors_headers(Headers, Config,
-                          #{<<"content-type">> => <<"application/json">>}),
-             SessionId),
+        cors_headers(
+            Headers,
+            Config,
+            #{<<"content-type">> => <<"application/json">>}
+        ),
+        SessionId
+    ),
     reply(Responder, 200, Hdrs, Json).
 
 reply_jsonrpc_error(Headers, Responder, Config, SessionId, Status, Id, Code, Message) ->
     Resp = barrel_mcp_protocol:error_response(Id, Code, Message),
     Json = barrel_mcp_protocol:encode(Resp),
     Hdrs = add_session_header(
-             cors_headers(Headers, Config,
-                          #{<<"content-type">> => <<"application/json">>}),
-             SessionId),
+        cors_headers(
+            Headers,
+            Config,
+            #{<<"content-type">> => <<"application/json">>}
+        ),
+        SessionId
+    ),
     reply(Responder, Status, Hdrs, Json).
 
 %%====================================================================
@@ -523,7 +790,8 @@ lookup_session(Headers, Config, true, Method) ->
             end
     end.
 
-validate_protocol_version(_Headers, _Sid, <<"initialize">>) -> ok;
+validate_protocol_version(_Headers, _Sid, <<"initialize">>) ->
+    ok;
 validate_protocol_version(Headers, SessionId, _Method) ->
     case header(<<"mcp-protocol-version">>, Headers, undefined) of
         undefined ->
@@ -532,48 +800,73 @@ validate_protocol_version(Headers, SessionId, _Method) ->
             case lists:member(Version, ?MCP_SUPPORTED_VERSIONS) of
                 true ->
                     case SessionId of
-                        undefined -> ok;
+                        undefined ->
+                            ok;
                         _ ->
                             _ = barrel_mcp_session:set_protocol_version(
-                                  SessionId, Version),
+                                SessionId, Version
+                            ),
                             ok
                     end;
                 false ->
-                    {error, iolist_to_binary([
-                        <<"Bad MCP-Protocol-Version: ">>, Version,
-                        <<". Supported: ">>,
-                        lists:join(<<", ">>, ?MCP_SUPPORTED_VERSIONS)
-                    ])}
+                    {error,
+                        iolist_to_binary([
+                            <<"Bad MCP-Protocol-Version: ">>,
+                            Version,
+                            <<". Supported: ">>,
+                            lists:join(<<", ">>, ?MCP_SUPPORTED_VERSIONS)
+                        ])}
             end
     end.
 
-maybe_capture_initialize_version(SessionId, <<"initialize">>,
-                                 #{<<"result">> :=
-                                       #{<<"protocolVersion">> := Version}})
-  when is_binary(SessionId) ->
+maybe_capture_initialize_version(
+    SessionId,
+    <<"initialize">>,
+    #{
+        <<"result">> :=
+            #{<<"protocolVersion">> := Version}
+    }
+) when
+    is_binary(SessionId)
+->
     _ = barrel_mcp_session:set_protocol_version(SessionId, Version),
     ok;
-maybe_capture_initialize_version(_, _, _) -> ok.
+maybe_capture_initialize_version(_, _, _) ->
+    ok.
 
 %%====================================================================
 %% Streamable transport — GET (long-lived SSE) and DELETE
 %%====================================================================
 
 stream_get_sse(Headers, Responder, Config) ->
-    with_authenticated(Headers, Responder, Config,
-                       fun() -> stream_get_sse_authed(Headers, Responder, Config) end).
+    with_authenticated(
+        Headers,
+        Responder,
+        Config,
+        fun() -> stream_get_sse_authed(Headers, Responder, Config) end
+    ).
 
 stream_get_sse_authed(Headers, Responder, Config) ->
     case maps:get(session_enabled, Config, true) of
         false ->
-            reply(Responder, 400, cors_headers(Headers, Config, #{}),
-                  json_encode(#{<<"error">> => <<"Sessions not enabled">>}));
+            reply(
+                Responder,
+                400,
+                cors_headers(Headers, Config, #{}),
+                json_encode(#{<<"error">> => <<"Sessions not enabled">>})
+            );
         true ->
             case session_header(Headers) of
                 undefined ->
-                    reply(Responder, 400, cors_headers(Headers, Config, #{}),
-                          json_encode(#{<<"error">> =>
-                                            <<"Mcp-Session-Id header required">>}));
+                    reply(
+                        Responder,
+                        400,
+                        cors_headers(Headers, Config, #{}),
+                        json_encode(#{
+                            <<"error">> =>
+                                <<"Mcp-Session-Id header required">>
+                        })
+                    );
                 SessionId ->
                     stream_get_sse_session(Headers, Responder, Config, SessionId)
             end
@@ -583,19 +876,32 @@ stream_get_sse_session(Headers, Responder, Config, SessionId) ->
     case barrel_mcp_session:get(SessionId) of
         {ok, _Session} ->
             Hdrs = add_session_header(
-                     cors_headers(Headers, Config,
-                                  #{<<"content-type">> => <<"text/event-stream">>,
-                                    <<"cache-control">> => <<"no-cache">>,
-                                    <<"connection">> => <<"keep-alive">>}),
-                     SessionId),
+                cors_headers(
+                    Headers,
+                    Config,
+                    #{
+                        <<"content-type">> => <<"text/event-stream">>,
+                        <<"cache-control">> => <<"no-cache">>,
+                        <<"connection">> => <<"keep-alive">>
+                    }
+                ),
+                SessionId
+            ),
             stream_start(Responder, 200, Hdrs),
-            replay_sse_events(Responder, SessionId,
-                              header(<<"last-event-id">>, Headers, undefined)),
+            replay_sse_events(
+                Responder,
+                SessionId,
+                header(<<"last-event-id">>, Headers, undefined)
+            ),
             _ = barrel_mcp_session:set_sse_pid(SessionId, self()),
             sse_loop(Responder, SessionId);
         {error, not_found} ->
-            reply(Responder, 404, cors_headers(Headers, Config, #{}),
-                  json_encode(#{<<"error">> => <<"Unknown Mcp-Session-Id">>}))
+            reply(
+                Responder,
+                404,
+                cors_headers(Headers, Config, #{}),
+                json_encode(#{<<"error">> => <<"Unknown Mcp-Session-Id">>})
+            )
     end.
 
 %% Long-lived SSE pump. Runs in the per-request process until the
@@ -629,27 +935,44 @@ sse_loop(Responder, SessionId) ->
     end.
 
 sse_cleanup(Responder, SessionId) ->
-    _ = (try barrel_mcp_session:set_sse_pid(SessionId, undefined) catch _:_ -> ok end),
+    _ =
+        (try
+            barrel_mcp_session:set_sse_pid(SessionId, undefined)
+        catch
+            _:_ -> ok
+        end),
     _ = stream_end(Responder),
     ok.
 
 stream_delete(Headers, Responder, Config) ->
-    with_authenticated(Headers, Responder, Config,
-                       fun() -> stream_delete_authed(Headers, Responder, Config) end).
+    with_authenticated(
+        Headers,
+        Responder,
+        Config,
+        fun() -> stream_delete_authed(Headers, Responder, Config) end
+    ).
 
 stream_delete_authed(Headers, Responder, Config) ->
     case session_header(Headers) of
         undefined ->
-            reply(Responder, 400, cors_headers(Headers, Config, #{}),
-                  json_encode(#{<<"error">> => <<"Mcp-Session-Id header required">>}));
+            reply(
+                Responder,
+                400,
+                cors_headers(Headers, Config, #{}),
+                json_encode(#{<<"error">> => <<"Mcp-Session-Id header required">>})
+            );
         SessionId ->
             case barrel_mcp_session:get(SessionId) of
                 {ok, _} ->
                     barrel_mcp_session:delete(SessionId),
                     reply(Responder, 204, cors_headers(Headers, Config, #{}), <<>>);
                 {error, not_found} ->
-                    reply(Responder, 404, cors_headers(Headers, Config, #{}),
-                          json_encode(#{<<"error">> => <<"Unknown Mcp-Session-Id">>}))
+                    reply(
+                        Responder,
+                        404,
+                        cors_headers(Headers, Config, #{}),
+                        json_encode(#{<<"error">> => <<"Unknown Mcp-Session-Id">>})
+                    )
             end
     end.
 
@@ -660,18 +983,30 @@ stream_delete_authed(Headers, Responder, Config) ->
 %% Single-event SSE response to a POST: open, send the result, close.
 stream_sse_response(Headers, Responder, Config, SessionId, Result) ->
     Hdrs = add_session_header(
-             cors_headers(Headers, Config,
-                          #{<<"content-type">> => <<"text/event-stream">>,
-                            <<"cache-control">> => <<"no-cache">>}),
-             SessionId),
+        cors_headers(
+            Headers,
+            Config,
+            #{
+                <<"content-type">> => <<"text/event-stream">>,
+                <<"cache-control">> => <<"no-cache">>
+            }
+        ),
+        SessionId
+    ),
     stream_start(Responder, 200, Hdrs),
     _ = push_sse_event(Responder, generate_event_id(), Result),
     stream_end(Responder).
 
 push_sse_event(Responder, EventId, Data) ->
     Json = json_encode(Data),
-    EventData = iolist_to_binary([<<"id: ">>, EventId, <<"\n">>,
-                                  <<"data: ">>, Json, <<"\n\n">>]),
+    EventData = iolist_to_binary([
+        <<"id: ">>,
+        EventId,
+        <<"\n">>,
+        <<"data: ">>,
+        Json,
+        <<"\n\n">>
+    ]),
     stream_chunk(Responder, EventData).
 
 generate_event_id() ->
@@ -682,17 +1017,26 @@ replay_sse_events(_Responder, _SessionId, undefined) ->
 replay_sse_events(Responder, SessionId, LastId) ->
     case barrel_mcp_session:events_since(SessionId, LastId) of
         {ok, Events} ->
-            lists:foreach(fun({EventId, Payload}) ->
-                _ = push_sse_event(Responder, EventId, Payload)
-            end, Events),
+            lists:foreach(
+                fun({EventId, Payload}) ->
+                    _ = push_sse_event(Responder, EventId, Payload)
+                end,
+                Events
+            ),
             ok;
         truncated ->
-            _ = push_sse_event(Responder, generate_event_id(),
-                               #{<<"jsonrpc">> => <<"2.0">>,
-                                 <<"method">> => <<"notifications/replay_truncated">>,
-                                 <<"params">> => #{}}),
+            _ = push_sse_event(
+                Responder,
+                generate_event_id(),
+                #{
+                    <<"jsonrpc">> => <<"2.0">>,
+                    <<"method">> => <<"notifications/replay_truncated">>,
+                    <<"params">> => #{}
+                }
+            ),
             ok;
-        {error, not_found} -> ok
+        {error, not_found} ->
+            ok
     end.
 
 %%====================================================================
@@ -705,10 +1049,13 @@ validate_accept_header(Headers) ->
     HasJson = binary:match(Accept, <<"application/json">>) =/= nomatch,
     HasSse = binary:match(Accept, <<"text/event-stream">>) =/= nomatch,
     case HasWildcard orelse (HasJson andalso HasSse) of
-        true -> ok;
+        true ->
+            ok;
         false ->
-            {error, <<"Accept header must include both application/json"
-                      " and text/event-stream">>}
+            {error, <<
+                "Accept header must include both application/json"
+                " and text/event-stream"
+            >>}
     end.
 
 wants_sse_response(Headers) ->
@@ -716,12 +1063,14 @@ wants_sse_response(Headers) ->
     HasJson = binary:match(Accept, <<"application/json">>) =/= nomatch,
     HasSse = binary:match(Accept, <<"text/event-stream">>) =/= nomatch,
     case {HasJson, HasSse} of
-        {false, true} -> true;
+        {false, true} ->
+            true;
         {true, true} ->
             SsePos = match_pos(Accept, <<"text/event-stream">>),
             JsonPos = match_pos(Accept, <<"application/json">>),
             SsePos < JsonPos;
-        _ -> false
+        _ ->
+            false
     end.
 
 match_pos(Bin, Needle) ->
@@ -736,15 +1085,16 @@ match_pos(Bin, Needle) ->
 
 init_auth(#{provider := Provider} = AuthOpts) ->
     ProviderOpts = maps:get(provider_opts, AuthOpts, #{}),
-    ProviderState = case erlang:function_exported(Provider, init, 1) of
-        true ->
-            case Provider:init(ProviderOpts) of
-                {ok, S} -> S;
-                _ -> undefined
-            end;
-        false ->
-            undefined
-    end,
+    ProviderState =
+        case erlang:function_exported(Provider, init, 1) of
+            true ->
+                case Provider:init(ProviderOpts) of
+                    {ok, S} -> S;
+                    _ -> undefined
+                end;
+            false ->
+                undefined
+        end,
     AuthOpts#{provider_state => ProviderState};
 init_auth(AuthOpts) ->
     init_auth(AuthOpts#{provider => barrel_mcp_auth_none}).
@@ -759,8 +1109,11 @@ authenticate(AuthConfig, Request) ->
 %% credential as POST instead of trusting the session id alone. With
 %% `barrel_mcp_auth_none' this admits every request unchanged.
 with_authenticated(Headers, Responder, Config, Fun) ->
-    AuthConfig = maps:get(auth_config, Config,
-                          #{provider => barrel_mcp_auth_none}),
+    AuthConfig = maps:get(
+        auth_config,
+        Config,
+        #{provider => barrel_mcp_auth_none}
+    ),
     AuthRequest = #{headers => extract_headers(Headers, AuthConfig)},
     case authenticate(AuthConfig, AuthRequest) of
         {ok, _AuthInfo} ->
@@ -773,54 +1126,70 @@ auth_error(Headers, Responder, AuthConfig, Reason) ->
     {StatusCode, AuthHeaders, Body} =
         barrel_mcp_auth:challenge_response(AuthConfig, Reason),
     %% AuthHeaders is a map; merge with CORS and emit as a list.
-    Merged = maps:merge(AuthHeaders,
-                        cors_headers(Headers, #{auth_config => AuthConfig}, #{})),
+    Merged = maps:merge(
+        AuthHeaders,
+        cors_headers(Headers, #{auth_config => AuthConfig}, #{})
+    ),
     reply(Responder, StatusCode, Merged, Body).
 
 extract_headers(Headers, AuthConfig) ->
-    Names = case AuthConfig of
-                undefined -> [<<"authorization">>, <<"x-api-key">>];
-                _ ->
-                    case barrel_mcp_auth:auth_headers(AuthConfig) of
-                        [] -> [<<"authorization">>, <<"x-api-key">>];
-                        Decl -> Decl
-                    end
-            end,
-    lists:foldl(fun(Name, Acc) ->
-        case header(Name, Headers, undefined) of
-            undefined -> Acc;
-            Value -> Acc#{Name => Value}
-        end
-    end, #{}, Names).
+    Names =
+        case AuthConfig of
+            undefined ->
+                [<<"authorization">>, <<"x-api-key">>];
+            _ ->
+                case barrel_mcp_auth:auth_headers(AuthConfig) of
+                    [] -> [<<"authorization">>, <<"x-api-key">>];
+                    Decl -> Decl
+                end
+        end,
+    lists:foldl(
+        fun(Name, Acc) ->
+            case header(Name, Headers, undefined) of
+                undefined -> Acc;
+                Value -> Acc#{Name => Value}
+            end
+        end,
+        #{},
+        Names
+    ).
 
 %% The user-facing `resource_metadata' option processing.
 normalize_resource_metadata(undefined) ->
     undefined;
 normalize_resource_metadata(#{resource := ResourceUrl} = M) ->
     Doc = maps:without([metadata_url], M),
-    MetaUrl = case maps:get(metadata_url, M, undefined) of
-        undefined -> derive_prm_url(ResourceUrl);
-        Explicit when is_binary(Explicit) -> Explicit
-    end,
+    MetaUrl =
+        case maps:get(metadata_url, M, undefined) of
+            undefined -> derive_prm_url(ResourceUrl);
+            Explicit when is_binary(Explicit) -> Explicit
+        end,
     #{document => Doc, url => MetaUrl}.
 
 derive_prm_url(Resource) when is_binary(Resource) ->
     case uri_string:parse(Resource) of
         #{scheme := Scheme, host := Host} = Parsed ->
-            PortPart = case maps:get(port, Parsed, undefined) of
-                undefined -> <<>>;
-                P -> iolist_to_binary([<<":">>, integer_to_binary(P)])
-            end,
-            iolist_to_binary([Scheme, <<"://">>, Host, PortPart,
-                              <<"/.well-known/oauth-protected-resource">>]);
+            PortPart =
+                case maps:get(port, Parsed, undefined) of
+                    undefined -> <<>>;
+                    P -> iolist_to_binary([<<":">>, integer_to_binary(P)])
+                end,
+            iolist_to_binary([
+                Scheme,
+                <<"://">>,
+                Host,
+                PortPart,
+                <<"/.well-known/oauth-protected-resource">>
+            ]);
         _ ->
             <<Resource/binary, "/.well-known/oauth-protected-resource">>
     end.
 
 inject_resource_metadata_url(AuthConfig, undefined) ->
     AuthConfig;
-inject_resource_metadata_url(#{provider_state := State} = AuthConfig, #{url := Url})
-  when is_map(State) ->
+inject_resource_metadata_url(#{provider_state := State} = AuthConfig, #{url := Url}) when
+    is_map(State)
+->
     AuthConfig#{provider_state => State#{resource_metadata_url => Url}};
 inject_resource_metadata_url(AuthConfig, _) ->
     AuthConfig.
@@ -830,13 +1199,18 @@ inject_resource_metadata_url(AuthConfig, _) ->
 %%====================================================================
 
 cors_headers(Headers, Config, Extra) ->
-    BaseAllowHeaders = [<<"content-type">>, <<"accept">>,
-                        <<"mcp-session-id">>, <<"mcp-protocol-version">>,
-                        <<"last-event-id">>],
-    AuthHeaders = case maps:get(auth_config, Config, undefined) of
-                      undefined -> [];
-                      AC -> barrel_mcp_auth:auth_headers(AC)
-                  end,
+    BaseAllowHeaders = [
+        <<"content-type">>,
+        <<"accept">>,
+        <<"mcp-session-id">>,
+        <<"mcp-protocol-version">>,
+        <<"last-event-id">>
+    ],
+    AuthHeaders =
+        case maps:get(auth_config, Config, undefined) of
+            undefined -> [];
+            AC -> barrel_mcp_auth:auth_headers(AC)
+        end,
     AllowHeaders = lists:join(<<", ">>, BaseAllowHeaders ++ AuthHeaders),
     ExposeHeaders = <<"www-authenticate, mcp-session-id, mcp-protocol-version">>,
     Base = #{
@@ -844,11 +1218,16 @@ cors_headers(Headers, Config, Extra) ->
         <<"access-control-allow-headers">> => iolist_to_binary(AllowHeaders),
         <<"access-control-expose-headers">> => ExposeHeaders
     },
-    WithOrigin = case header(<<"origin">>, Headers, undefined) of
-                     undefined -> Base;
-                     Origin -> Base#{<<"access-control-allow-origin">> => Origin,
-                                     <<"vary">> => <<"Origin">>}
-                 end,
+    WithOrigin =
+        case header(<<"origin">>, Headers, undefined) of
+            undefined ->
+                Base;
+            Origin ->
+                Base#{
+                    <<"access-control-allow-origin">> => Origin,
+                    <<"vary">> => <<"Origin">>
+                }
+        end,
     maps:merge(WithOrigin, Extra).
 
 %%====================================================================
@@ -865,17 +1244,22 @@ resolve_allowed_origins(_Loopback, List) when is_list(List) ->
     {ok, [parse_origin(O) || O <- List]}.
 
 default_loopback_origins() ->
-    [#{scheme => <<"http">>, host => <<"localhost">>, port => any},
-     #{scheme => <<"http">>, host => <<"127.0.0.1">>, port => any},
-     #{scheme => <<"http">>, host => <<"[::1]">>, port => any}].
+    [
+        #{scheme => <<"http">>, host => <<"localhost">>, port => any},
+        #{scheme => <<"http">>, host => <<"127.0.0.1">>, port => any},
+        #{scheme => <<"http">>, host => <<"[::1]">>, port => any}
+    ].
 
 parse_origin(<<"null">>) ->
     null;
 parse_origin(Bin) when is_binary(Bin) ->
     case uri_string:parse(Bin) of
         #{scheme := Scheme, host := Host} = U ->
-            #{scheme => to_bin(Scheme), host => to_bin(Host),
-              port => maps:get(port, U, any)};
+            #{
+                scheme => to_bin(Scheme),
+                host => to_bin(Host),
+                port => maps:get(port, U, any)
+            };
         _ ->
             #{scheme => undefined, host => Bin, port => any}
     end.
@@ -895,7 +1279,8 @@ validate_origin(Headers, Config) ->
         Origin -> match_origin(Origin, Allowed)
     end.
 
-match_origin(_Origin, any) -> ok;
+match_origin(_Origin, any) ->
+    ok;
 match_origin(<<"null">>, Allowed) ->
     case lists:member(null, Allowed) of
         true -> ok;
@@ -908,13 +1293,15 @@ match_origin(Origin, Allowed) ->
         false -> {error, origin_not_allowed}
     end.
 
-origin_matches(null, _) -> false;
+origin_matches(null, _) ->
+    false;
 origin_matches(#{scheme := S, host := H, port := P}, Parsed) ->
     SOk = (S =:= undefined) orelse (S =:= maps:get(scheme, Parsed)),
     HOk = (H =:= maps:get(host, Parsed)),
     POk = (P =:= any) orelse (P =:= maps:get(port, Parsed)),
     SOk andalso HOk andalso POk;
-origin_matches(_, _) -> false.
+origin_matches(_, _) ->
+    false.
 
 %%====================================================================
 %% Session manager bootstrap
@@ -945,14 +1332,17 @@ session_header(Headers) ->
     header(<<"mcp-session-id">>, Headers, undefined).
 
 add_session_header(Headers, undefined) -> Headers;
-add_session_header(Headers, SessionId) ->
-    Headers#{<<"mcp-session-id">> => SessionId}.
+add_session_header(Headers, SessionId) -> Headers#{<<"mcp-session-id">> => SessionId}.
 
 %% Case-insensitive header lookup over a `[{binary(), binary()}]' list.
 header(Name, Headers, Default) ->
     Lower = string:lowercase(Name),
-    case lists:search(fun({K, _}) -> string:lowercase(to_bin(K)) =:= Lower end,
-                      Headers) of
+    case
+        lists:search(
+            fun({K, _}) -> string:lowercase(to_bin(K)) =:= Lower end,
+            Headers
+        )
+    of
         {value, {_, V}} -> to_bin(V);
         false -> Default
     end.

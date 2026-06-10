@@ -22,10 +22,7 @@
 %%====================================================================
 
 resources_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     [
+    {setup, fun setup/0, fun cleanup/1, [
         {"List resources returns registered resources", fun test_list_resources/0},
         {"List resources returns empty when none registered", fun test_list_resources_empty/0},
         {"Read resource returns text content", fun test_read_resource_text/0},
@@ -34,16 +31,14 @@ resources_test_() ->
         {"Read non-existent resource returns error", fun test_read_resource_not_found/0},
         {"Resource with mime type is listed correctly", fun test_resource_mime_type/0},
         {"List resource templates returns empty", fun test_list_resource_templates/0},
-        {"Resource annotations are surfaced in resources/list",
-         fun test_resource_annotations/0},
+        {"Resource annotations are surfaced in resources/list", fun test_resource_annotations/0},
         {"Resource read carries annotations on the content block",
-         fun test_resource_read_block_annotations/0},
+            fun test_resource_read_block_annotations/0},
         {"Resource read accepts a list of pre-built content blocks",
-         fun test_resource_read_multi_block/0},
+            fun test_resource_read_multi_block/0},
         {"Resource read against a templated URI routes to the template handler",
-         fun test_resource_read_via_template/0}
-     ]
-    }.
+            fun test_resource_read_via_template/0}
+    ]}.
 
 setup() ->
     application:ensure_all_started(barrel_mcp),
@@ -51,9 +46,12 @@ setup() ->
     ok.
 
 cleanup(_) ->
-    lists:foreach(fun({Name, _}) ->
-        barrel_mcp_registry:unreg(resource, Name)
-    end, barrel_mcp_registry:all(resource)),
+    lists:foreach(
+        fun({Name, _}) ->
+            barrel_mcp_registry:unreg(resource, Name)
+        end,
+        barrel_mcp_registry:all(resource)
+    ),
     ok.
 
 %%====================================================================
@@ -70,15 +68,23 @@ json_resource(_Args) ->
     #{<<"name">> => <<"test">>, <<"value">> => 42}.
 
 annotated_resource(_Args) ->
-    #{text => <<"hello">>,
-      mimeType => <<"text/markdown">>,
-      annotations => #{<<"audience">> => [<<"assistant">>],
-                       <<"priority">> => 0.5}}.
+    #{
+        text => <<"hello">>,
+        mimeType => <<"text/markdown">>,
+        annotations => #{
+            <<"audience">> => [<<"assistant">>],
+            <<"priority">> => 0.5
+        }
+    }.
 
 multi_block_resource(_Args) ->
-    [#{<<"text">> => <<"summary">>},
-     #{<<"uri">> => <<"mem://multi/details">>,
-       <<"text">> => <<"details">>}].
+    [
+        #{<<"text">> => <<"summary">>},
+        #{
+            <<"uri">> => <<"mem://multi/details">>,
+            <<"text">> => <<"details">>
+        }
+    ].
 
 file_template(Args) ->
     Path = maps:get(<<"path">>, Args, <<"unset">>),
@@ -258,8 +264,10 @@ test_list_resource_templates() ->
     ?assertEqual([], Templates).
 
 test_resource_annotations() ->
-    Annotations = #{<<"audience">> => [<<"user">>],
-                    <<"priority">> => 0.8},
+    Annotations = #{
+        <<"audience">> => [<<"user">>],
+        <<"priority">> => 0.8
+    },
     ok = barrel_mcp_registry:reg(resource, <<"ann_res">>, ?MODULE, text_resource, #{
         name => <<"Annotated">>,
         uri => <<"mem://annotated">>,
@@ -277,38 +285,60 @@ test_resource_annotations() ->
     barrel_mcp_registry:unreg(resource, <<"ann_res">>).
 
 test_resource_read_block_annotations() ->
-    ok = barrel_mcp_registry:reg(resource, <<"ann_block">>, ?MODULE,
-                                  annotated_resource, #{
-        name => <<"AnnBlock">>,
-        uri => <<"mem://ann-block">>
-    }),
-    Request = #{<<"jsonrpc">> => <<"2.0">>,
-                <<"id">> => 1,
-                <<"method">> => <<"resources/read">>,
-                <<"params">> => #{<<"uri">> => <<"mem://ann-block">>}},
+    ok = barrel_mcp_registry:reg(
+        resource,
+        <<"ann_block">>,
+        ?MODULE,
+        annotated_resource,
+        #{
+            name => <<"AnnBlock">>,
+            uri => <<"mem://ann-block">>
+        }
+    ),
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"resources/read">>,
+        <<"params">> => #{<<"uri">> => <<"mem://ann-block">>}
+    },
     Response = barrel_mcp_protocol:handle(Request),
-    [Block] = maps:get(<<"contents">>,
-                       maps:get(<<"result">>, Response)),
+    [Block] = maps:get(
+        <<"contents">>,
+        maps:get(<<"result">>, Response)
+    ),
     ?assertEqual(<<"hello">>, maps:get(<<"text">>, Block)),
     ?assertEqual(<<"text/markdown">>, maps:get(<<"mimeType">>, Block)),
-    ?assertEqual(#{<<"audience">> => [<<"assistant">>],
-                   <<"priority">> => 0.5},
-                 maps:get(<<"annotations">>, Block)),
+    ?assertEqual(
+        #{
+            <<"audience">> => [<<"assistant">>],
+            <<"priority">> => 0.5
+        },
+        maps:get(<<"annotations">>, Block)
+    ),
     barrel_mcp_registry:unreg(resource, <<"ann_block">>).
 
 test_resource_read_multi_block() ->
-    ok = barrel_mcp_registry:reg(resource, <<"multi">>, ?MODULE,
-                                  multi_block_resource, #{
-        name => <<"Multi">>,
-        uri => <<"mem://multi">>
-    }),
-    Request = #{<<"jsonrpc">> => <<"2.0">>,
-                <<"id">> => 1,
-                <<"method">> => <<"resources/read">>,
-                <<"params">> => #{<<"uri">> => <<"mem://multi">>}},
+    ok = barrel_mcp_registry:reg(
+        resource,
+        <<"multi">>,
+        ?MODULE,
+        multi_block_resource,
+        #{
+            name => <<"Multi">>,
+            uri => <<"mem://multi">>
+        }
+    ),
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"resources/read">>,
+        <<"params">> => #{<<"uri">> => <<"mem://multi">>}
+    },
     Response = barrel_mcp_protocol:handle(Request),
-    Blocks = maps:get(<<"contents">>,
-                      maps:get(<<"result">>, Response)),
+    Blocks = maps:get(
+        <<"contents">>,
+        maps:get(<<"result">>, Response)
+    ),
     ?assertEqual(2, length(Blocks)),
     [B1, B2] = Blocks,
     %% URI is auto-injected when the handler omits it.
@@ -321,19 +351,28 @@ test_resource_read_via_template() ->
     %% Register a template; resources/read against a concrete URI
     %% matching the template should route to the handler with the
     %% expanded variables in Args.
-    ok = barrel_mcp_registry:reg(resource_template, <<"file_tpl">>, ?MODULE,
-                                  file_template, #{
-        name => <<"File">>,
-        uri_template => <<"file:///{path}">>,
-        mime_type => <<"text/plain">>
-    }),
-    Request = #{<<"jsonrpc">> => <<"2.0">>,
-                <<"id">> => 1,
-                <<"method">> => <<"resources/read">>,
-                <<"params">> => #{<<"uri">> => <<"file:///etc/hosts">>}},
+    ok = barrel_mcp_registry:reg(
+        resource_template,
+        <<"file_tpl">>,
+        ?MODULE,
+        file_template,
+        #{
+            name => <<"File">>,
+            uri_template => <<"file:///{path}">>,
+            mime_type => <<"text/plain">>
+        }
+    ),
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"resources/read">>,
+        <<"params">> => #{<<"uri">> => <<"file:///etc/hosts">>}
+    },
     Response = barrel_mcp_protocol:handle(Request),
-    [Block | _] = maps:get(<<"contents">>,
-                            maps:get(<<"result">>, Response)),
+    [Block | _] = maps:get(
+        <<"contents">>,
+        maps:get(<<"result">>, Response)
+    ),
     %% The handler echoes the substituted path; the response URI
     %% is the original URI, not the template.
     ?assertEqual(<<"file:///etc/hosts">>, maps:get(<<"uri">>, Block)),

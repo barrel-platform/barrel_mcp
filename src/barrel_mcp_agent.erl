@@ -53,24 +53,28 @@ list_tools() -> list_tools(#{}).
 list_tools(Opts) ->
     Sep = sep(Opts),
     Servers = barrel_mcp_clients:list_clients(),
-    lists:flatmap(fun({ServerId, Pid}) ->
-        case fetch_tools(Pid) of
-            {ok, Tools} ->
-                [namespace_tool(ServerId, Sep, T) || T <- Tools];
-            {error, Reason} ->
-                logger:warning("barrel_mcp_agent: list_tools ~p failed: ~p",
-                               [ServerId, Reason]),
-                []
-        end
-    end, Servers).
+    lists:flatmap(
+        fun({ServerId, Pid}) ->
+            case fetch_tools(Pid) of
+                {ok, Tools} ->
+                    [namespace_tool(ServerId, Sep, T) || T <- Tools];
+                {error, Reason} ->
+                    logger:warning(
+                        "barrel_mcp_agent: list_tools ~p failed: ~p",
+                        [ServerId, Reason]
+                    ),
+                    []
+            end
+        end,
+        Servers
+    ).
 
 fetch_tools(Pid) ->
     barrel_mcp_client:list_tools_all(Pid).
 
 namespace_tool(ServerId, Sep, Tool) ->
     Original = maps:get(<<"name">>, Tool),
-    Tool#{<<"name">> => <<(to_bin(ServerId))/binary, Sep/binary,
-                          Original/binary>>}.
+    Tool#{<<"name">> => <<(to_bin(ServerId))/binary, Sep/binary, Original/binary>>}.
 
 %%====================================================================
 %% Provider formats
@@ -118,14 +122,17 @@ call_tool(NsName, Args) ->
 call_tool(NsName, Args, Opts) ->
     Sep = sep(Opts),
     case split_ns(NsName, Sep) of
-        {error, _} = E -> E;
+        {error, _} = E ->
+            E;
         {ServerId, ToolName} ->
             case barrel_mcp_clients:whereis_client(ServerId) of
-                undefined -> {error, unknown_server};
+                undefined ->
+                    {error, unknown_server};
                 Pid ->
                     Timeout = maps:get(timeout, Opts, 30000),
                     barrel_mcp_client:call_tool(
-                      Pid, ToolName, Args, #{timeout => Timeout})
+                        Pid, ToolName, Args, #{timeout => Timeout}
+                    )
             end
     end.
 

@@ -451,31 +451,42 @@ list_prompts() ->
 %% and return `{ok, [Suggestion]}' or
 %% `{ok, [Suggestion], #{has_more => true}}'.
 -spec reg_completion(Ref, Module, Function, Opts) -> ok | {error, term()} when
-    Ref :: {prompt, binary(), binary()}
-         | {resource_template, binary(), binary()},
+    Ref ::
+        {prompt, binary(), binary()}
+        | {resource_template, binary(), binary()},
     Module :: module(),
     Function :: atom(),
     Opts :: map().
-reg_completion({prompt, PromptName, ArgName}, Module, Function, Opts)
-  when is_binary(PromptName), is_binary(ArgName) ->
+reg_completion({prompt, PromptName, ArgName}, Module, Function, Opts) when
+    is_binary(PromptName), is_binary(ArgName)
+->
     Key = completion_key(prompt, PromptName, ArgName),
     barrel_mcp_registry:reg(completion, Key, Module, Function, Opts);
-reg_completion({resource_template, TemplateUri, ArgName}, Module, Function, Opts)
-  when is_binary(TemplateUri), is_binary(ArgName) ->
+reg_completion({resource_template, TemplateUri, ArgName}, Module, Function, Opts) when
+    is_binary(TemplateUri), is_binary(ArgName)
+->
     Key = completion_key(resource_template, TemplateUri, ArgName),
     barrel_mcp_registry:reg(completion, Key, Module, Function, Opts).
 
 -spec unreg_completion(term()) -> ok.
 unreg_completion({prompt, PromptName, ArgName}) ->
-    barrel_mcp_registry:unreg(completion,
-                              completion_key(prompt, PromptName, ArgName));
+    barrel_mcp_registry:unreg(
+        completion,
+        completion_key(prompt, PromptName, ArgName)
+    );
 unreg_completion({resource_template, TemplateUri, ArgName}) ->
-    barrel_mcp_registry:unreg(completion,
-                              completion_key(resource_template,
-                                             TemplateUri, ArgName)).
+    barrel_mcp_registry:unreg(
+        completion,
+        completion_key(
+            resource_template,
+            TemplateUri,
+            ArgName
+        )
+    ).
 
 completion_key(Kind, Outer, Arg) ->
-    K = case Kind of
+    K =
+        case Kind of
             prompt -> <<"prompt">>;
             resource_template -> <<"resource_template">>
         end,
@@ -721,7 +732,7 @@ find(Name) ->
 %% client responds or `timeout_ms' (default 30s) elapses.
 -spec sampling_create_message(binary(), map(), map()) ->
     {ok, Result :: map(), Usage :: map()}
-  | {error, timeout | not_supported | no_sse | not_found | term()}.
+    | {error, timeout | not_supported | no_sse | not_found | term()}.
 sampling_create_message(SessionId, Params, Opts) ->
     barrel_mcp_session:sampling_create_message(SessionId, Params, Opts).
 
@@ -738,7 +749,7 @@ list_sessions_with_sampling() ->
 %% 30s) elapses.
 -spec elicit_create(binary(), map(), map()) ->
     {ok, Result :: map()}
-  | {error, timeout | not_supported | no_sse | not_found | term()}.
+    | {error, timeout | not_supported | no_sse | not_found | term()}.
 elicit_create(SessionId, Params, Opts) ->
     barrel_mcp_session:elicit_create(SessionId, Params, Opts).
 
@@ -756,13 +767,13 @@ list_sessions_with_elicitation() ->
 %% `timeout_ms' (default 30s) elapses.
 -spec roots_list(binary()) ->
     {ok, [map()]}
-  | {error, timeout | not_supported | no_sse | not_found | term()}.
+    | {error, timeout | not_supported | no_sse | not_found | term()}.
 roots_list(SessionId) ->
     roots_list(SessionId, #{}).
 
 -spec roots_list(binary(), map()) ->
     {ok, [map()]}
-  | {error, timeout | not_supported | no_sse | not_found | term()}.
+    | {error, timeout | not_supported | no_sse | not_found | term()}.
 roots_list(SessionId, Opts) ->
     barrel_mcp_session:roots_list(SessionId, Opts).
 
@@ -787,12 +798,15 @@ notify_resource_updated(Uri, Extra) when is_binary(Uri) ->
         <<"method">> => <<"notifications/resources/updated">>,
         <<"params">> => maps:merge(#{<<"uri">> => Uri}, Extra)
     },
-    lists:foreach(fun(SessionId) ->
-        case barrel_mcp_session:get_sse_pid(SessionId) of
-            {ok, Pid} -> Pid ! {sse_send_message, Notification};
-            _ -> ok
-        end
-    end, Subscribers),
+    lists:foreach(
+        fun(SessionId) ->
+            case barrel_mcp_session:get_sse_pid(SessionId) of
+                {ok, Pid} -> Pid ! {sse_send_message, Notification};
+                _ -> ok
+            end
+        end,
+        Subscribers
+    ),
     ok.
 
 %% @doc Emit `notifications/progress' to a session. `Total' may be
@@ -814,24 +828,34 @@ notify_progress(SessionId, Token, Progress, Total) ->
 notify_log(SessionId, Level, Data) ->
     notify_log(SessionId, Level, undefined, Data).
 
--spec notify_log(binary(), atom() | binary(), binary() | undefined,
-                 term()) -> ok.
+-spec notify_log(
+    binary(),
+    atom() | binary(),
+    binary() | undefined,
+    term()
+) -> ok.
 notify_log(SessionId, Level, Logger, Data) ->
     case barrel_mcp_session:log_level_priority(Level) of
-        error -> ok;  %% invalid level — drop
+        %% invalid level — drop
+        error ->
+            ok;
         EventPrio ->
-            ConfigPrio = case barrel_mcp_session:get_log_level(SessionId) of
-                {ok, L} -> barrel_mcp_session:log_level_priority(L);
-                _ -> 1  %% default `info'
-            end,
+            ConfigPrio =
+                case barrel_mcp_session:get_log_level(SessionId) of
+                    {ok, L} -> barrel_mcp_session:log_level_priority(L);
+                    %% default `info'
+                    _ -> 1
+                end,
             case EventPrio >= ConfigPrio of
-                false -> ok;
+                false ->
+                    ok;
                 true ->
                     case barrel_mcp_session:get_sse_pid(SessionId) of
                         {ok, Pid} when is_pid(Pid) ->
                             Pid ! {sse_send_message, log_envelope(Level, Logger, Data)},
                             ok;
-                        _ -> ok
+                        _ ->
+                            ok
                     end
             end
     end.
@@ -839,13 +863,16 @@ notify_log(SessionId, Level, Logger, Data) ->
 log_envelope(Level, Logger, Data) ->
     LevelBin = level_to_binary(Level),
     Params0 = #{<<"level">> => LevelBin, <<"data">> => Data},
-    Params = case Logger of
-                 undefined -> Params0;
-                 _ -> Params0#{<<"logger">> => Logger}
-             end,
-    #{<<"jsonrpc">> => <<"2.0">>,
-      <<"method">> => <<"notifications/message">>,
-      <<"params">> => Params}.
+    Params =
+        case Logger of
+            undefined -> Params0;
+            _ -> Params0#{<<"logger">> => Logger}
+        end,
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"method">> => <<"notifications/message">>,
+        <<"params">> => Params
+    }.
 
 level_to_binary(L) when is_atom(L) -> atom_to_binary(L, utf8);
 level_to_binary(L) when is_binary(L) -> L.
@@ -855,9 +882,11 @@ level_to_binary(L) when is_binary(L) -> L.
 %% the catalogue out-of-band (the registry already calls it for
 %% `reg/4,5' and `unreg/2').
 -spec notify_list_changed(tool | resource | prompt) -> ok.
-notify_list_changed(Kind) when Kind =:= tool;
-                                Kind =:= resource;
-                                Kind =:= prompt ->
+notify_list_changed(Kind) when
+    Kind =:= tool;
+    Kind =:= resource;
+    Kind =:= prompt
+->
     barrel_mcp_session:broadcast_list_changed(Kind).
 
 %%====================================================================

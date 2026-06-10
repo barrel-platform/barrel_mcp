@@ -243,7 +243,8 @@ process_request(Line) ->
                     %% synchronously here. stdio is single-threaded;
                     %% the worker reports back via mailbox.
                     Response = barrel_mcp_protocol:drive_async_plan(
-                                 Plan, 60000),
+                        Plan, 60000
+                    ),
                     send_response(Response);
                 Response ->
                     send_response(Response)
