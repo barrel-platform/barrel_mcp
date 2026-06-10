@@ -1,14 +1,12 @@
 %%%-------------------------------------------------------------------
 %%% @doc Tests for `barrel_mcp_client_auth_oauth' covering pure
-%%% helpers and a refresh-token round-trip against a tiny cowboy
-%%% authorization server.
+%%% helpers and a refresh-token round-trip against a tiny mock
+%%% authorization server (on the project's own `h1' server).
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_client_auth_oauth_tests).
 
 -include_lib("eunit/include/eunit.hrl").
-
--export([init/2]).
 
 -define(PORT, 19494).
 -define(BASE, <<"http://127.0.0.1:19494">>).
@@ -106,47 +104,29 @@ refresh_round_trip_test_() ->
      ]}}.
 
 setup_mock() ->
-    {ok, _} = application:ensure_all_started(cowboy),
     {ok, _} = application:ensure_all_started(hackney),
-    Dispatch = cowboy_router:compile([{'_', [
-        {"/.well-known/oauth-protected-resource", ?MODULE, prm},
-        {"/.well-known/oauth-authorization-server", ?MODULE, as},
-        {"/oauth/token", ?MODULE, token},
-        %% IdP token endpoint for the EMA token-exchange step.
-        {"/idp/token", ?MODULE, idp_token},
-        {"/oauth/register", ?MODULE, register}
-    ]}]),
-    {ok, _} = cowboy:start_clear(?MODULE, [{port, ?PORT}],
-                                 #{env => #{dispatch => Dispatch}}),
-    timer:sleep(100),
+    {ok, _} = barrel_mcp_test_http:start(?MODULE, ?PORT, fun handle/1),
     ok.
 
 cleanup_mock(_) ->
-    try cowboy:stop_listener(?MODULE) catch _:_ -> ok end,
+    try barrel_mcp_test_http:stop(?MODULE) catch _:_ -> ok end,
     ok.
 
-%% Cowboy handler used as a tiny mock authorization server.
-init(Req, prm) ->
-    Body = json_encode(#{
+%% Tiny mock authorization server.
+handle(#{path := <<"/.well-known/oauth-protected-resource">>}) ->
+    {200, json_ct(), json_encode(#{
         <<"resource">> => <<"http://127.0.0.1:19494/mcp">>,
         <<"authorization_servers">> => [?BASE]
-    }),
-    R = cowboy_req:reply(200,
-        #{<<"content-type">> => <<"application/json">>}, Body, Req),
-    {ok, R, prm};
-init(Req, as) ->
-    Body = json_encode(#{
+    })};
+handle(#{path := <<"/.well-known/oauth-authorization-server">>}) ->
+    {200, json_ct(), json_encode(#{
         <<"issuer">> => ?BASE,
         <<"authorization_endpoint">> => <<?BASE/binary, "/oauth/authorize">>,
         <<"token_endpoint">> => <<?BASE/binary, "/oauth/token">>,
         <<"code_challenge_methods_supported">> => [<<"S256">>]
-    }),
-    R = cowboy_req:reply(200,
-        #{<<"content-type">> => <<"application/json">>}, Body, Req),
-    {ok, R, as};
-init(Req0, token) ->
-    {ok, Body, Req} = cowboy_req:read_urlencoded_body(Req0),
-    Form = maps:from_list(Body),
+    })};
+handle(#{path := <<"/oauth/token">>} = Req) ->
+    Form = barrel_mcp_test_http:form(Req),
     Resp = case maps:get(<<"grant_type">>, Form, undefined) of
         <<"refresh_token">> ->
             <<"old-refresh">> = maps:get(<<"refresh_token">>, Form),
@@ -164,7 +144,8 @@ init(Req0, token) ->
             case maps:get(<<"client_assertion">>, Form, undefined) of
                 undefined ->
                     %% client_secret_basic
-                    AuthHdr = cowboy_req:header(<<"authorization">>, Req0),
+                    AuthHdr = barrel_mcp_test_http:header(
+                                <<"authorization">>, Req),
                     true = is_binary(AuthHdr),
                     <<"Basic ", _/binary>> = AuthHdr;
                 JWT when is_binary(JWT), JWT =/= <<>> ->
@@ -183,7 +164,7 @@ init(Req0, token) ->
             %% carry the ID-JAG under `assertion'. With
             %% client_secret, http_post_form strips client_id
             %% and authenticates via HTTP Basic.
-            AuthHdr = cowboy_req:header(<<"authorization">>, Req0),
+            AuthHdr = barrel_mcp_test_http:header(<<"authorization">>, Req),
             true = is_binary(AuthHdr),
             <<"Basic ", _/binary>> = AuthHdr,
             <<"id-jag.signed.jwt">> = maps:get(<<"assertion">>, Form),
@@ -193,14 +174,10 @@ init(Req0, token) ->
         _ ->
             #{<<"error">> => <<"unsupported_grant_type">>}
     end,
-    R = cowboy_req:reply(200,
-        #{<<"content-type">> => <<"application/json">>},
-        json_encode(Resp), Req),
-    {ok, R, token};
+    {200, json_ct(), json_encode(Resp)};
 %% Mock IdP token-exchange endpoint for the EMA chain.
-init(Req0, idp_token) ->
-    {ok, Body, Req} = cowboy_req:read_urlencoded_body(Req0),
-    Form = maps:from_list(Body),
+handle(#{path := <<"/idp/token">>} = Req) ->
+    Form = barrel_mcp_test_http:form(Req),
     <<"urn:ietf:params:oauth:grant-type:token-exchange">> =
         maps:get(<<"grant_type">>, Form),
     <<"urn:ietf:params:oauth:token-type:id-jag">> =
@@ -209,14 +186,11 @@ init(Req0, idp_token) ->
     %% steer between happy path and `subject_token_expired'.
     case maps:get(<<"subject_token">>, Form, undefined) of
         <<"expired-id-token">> ->
-            R = cowboy_req:reply(400,
-                #{<<"content-type">> => <<"application/json">>},
-                json_encode(#{<<"error">> => <<"invalid_grant">>}), Req),
-            {ok, R, idp_token};
+            {400, json_ct(), json_encode(#{<<"error">> => <<"invalid_grant">>})};
         Subj when is_binary(Subj), Subj =/= <<>> ->
             %% client_secret_basic strips client_id from the body
             %% and authenticates via the Authorization header.
-            AuthHdr = cowboy_req:header(<<"authorization">>, Req0),
+            AuthHdr = barrel_mcp_test_http:header(<<"authorization">>, Req),
             true = is_binary(AuthHdr),
             <<"Basic ", _/binary>> = AuthHdr,
             ?BASE = maps:get(<<"audience">>, Form),
@@ -224,65 +198,48 @@ init(Req0, idp_token) ->
                 maps:get(<<"resource">>, Form),
             <<"urn:ietf:params:oauth:token-type:id_token">> =
                 maps:get(<<"subject_token_type">>, Form),
-            R = cowboy_req:reply(200,
-                #{<<"content-type">> => <<"application/json">>},
-                json_encode(#{<<"access_token">> => <<"id-jag.signed.jwt">>,
-                              <<"issued_token_type">> =>
-                                  <<"urn:ietf:params:oauth:token-type:id-jag">>,
-                              <<"token_type">> => <<"Bearer">>}), Req),
-            {ok, R, idp_token}
+            {200, json_ct(),
+             json_encode(#{<<"access_token">> => <<"id-jag.signed.jwt">>,
+                           <<"issued_token_type">> =>
+                               <<"urn:ietf:params:oauth:token-type:id-jag">>,
+                           <<"token_type">> => <<"Bearer">>})}
     end;
 %% Mock dynamic client registration endpoint (RFC 7591).
-init(Req0, register) ->
-    {ok, Body, Req} = cowboy_req:read_body(Req0),
+handle(#{path := <<"/oauth/register">>, body := Body} = Req) ->
     Metadata = json:decode(Body),
     Name = maps:get(<<"client_name">>, Metadata, <<"unnamed">>),
     %% Test marker: client_name="protected" requires the RFC 7591
     %% initial access token; reject without it.
-    AuthHdr = cowboy_req:header(<<"authorization">>, Req0),
+    AuthHdr = barrel_mcp_test_http:header(<<"authorization">>, Req),
     case Name of
         <<"protected">> when AuthHdr =/= <<"Bearer init-tok">> ->
-            R = cowboy_req:reply(401,
-                #{<<"content-type">> => <<"application/json">>},
-                json_encode(#{<<"error">> => <<"invalid_token">>}),
-                Req),
-            {ok, R, register};
+            {401, json_ct(), json_encode(#{<<"error">> => <<"invalid_token">>})};
         <<"protected">> ->
-            R = cowboy_req:reply(201,
-                #{<<"content-type">> => <<"application/json">>},
-                json_encode(#{
-                    <<"client_id">> => <<"protected-client-id">>,
-                    <<"client_id_issued_at">> => 1700000000,
-                    <<"client_name">> => Name
-                }), Req),
-            {ok, R, register};
+            {201, json_ct(), json_encode(#{
+                <<"client_id">> => <<"protected-client-id">>,
+                <<"client_id_issued_at">> => 1700000000,
+                <<"client_name">> => Name
+            })};
         <<"bad">> ->
-            R = cowboy_req:reply(400,
-                #{<<"content-type">> => <<"application/json">>},
-                json_encode(#{<<"error">> => <<"invalid_redirect_uri">>}),
-                Req),
-            {ok, R, register};
+            {400, json_ct(),
+             json_encode(#{<<"error">> => <<"invalid_redirect_uri">>})};
         <<"confidential">> ->
-            R = cowboy_req:reply(201,
-                #{<<"content-type">> => <<"application/json">>},
-                json_encode(#{
-                    <<"client_id">> => <<"new-client-id">>,
-                    <<"client_secret">> => <<"new-secret">>,
-                    <<"client_id_issued_at">> => 1700000000,
-                    <<"client_secret_expires_at">> => 0,
-                    <<"client_name">> => Name
-                }), Req),
-            {ok, R, register};
+            {201, json_ct(), json_encode(#{
+                <<"client_id">> => <<"new-client-id">>,
+                <<"client_secret">> => <<"new-secret">>,
+                <<"client_id_issued_at">> => 1700000000,
+                <<"client_secret_expires_at">> => 0,
+                <<"client_name">> => Name
+            })};
         _ ->
-            R = cowboy_req:reply(201,
-                #{<<"content-type">> => <<"application/json">>},
-                json_encode(#{
-                    <<"client_id">> => <<"new-client-id">>,
-                    <<"client_id_issued_at">> => 1700000000,
-                    <<"client_name">> => Name
-                }), Req),
-            {ok, R, register}
+            {201, json_ct(), json_encode(#{
+                <<"client_id">> => <<"new-client-id">>,
+                <<"client_id_issued_at">> => 1700000000,
+                <<"client_name">> => Name
+            })}
     end.
+
+json_ct() -> #{<<"content-type">> => <<"application/json">>}.
 
 json_encode(M) -> iolist_to_binary(json:encode(M)).
 

@@ -3,8 +3,9 @@
 %%%
 %%% Stands up:
 %%%
-%%% - a tiny cowboy mock that plays both an RFC 7591 registration
-%%%   endpoint and an OAuth 2.0 token endpoint;
+%%% - a tiny mock (on the project's own `h1' server) that plays both
+%%%   an RFC 7591 registration endpoint and an OAuth 2.0 token
+%%%   endpoint;
 %%% - a real `barrel_mcp_http_stream' MCP server with bearer auth
 %%%   guarded by a custom verifier that only accepts the token
 %%%   the mock AS issues to a freshly registered client.
@@ -29,7 +30,6 @@
 -export([dcr_then_client_credentials_unlocks_server/1,
          registration_error_surfaces/1]).
 
--export([init/2]).
 -export([echo_tool/1]).
 
 -define(AS_PORT, 22751).
@@ -44,17 +44,10 @@ all() ->
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_mcp),
     {ok, _} = application:ensure_all_started(hackney),
-    %% cowboy is a test-only dependency now (mock authorization
-    %% server); barrel_mcp no longer starts it.
-    {ok, _} = application:ensure_all_started(cowboy),
     ok = barrel_mcp_registry:wait_for_ready(),
 
-    Dispatch = cowboy_router:compile([{'_', [
-        {"/oauth/register", ?MODULE, register},
-        {"/oauth/token",    ?MODULE, token}
-    ]}]),
-    {ok, _} = cowboy:start_clear(?AS_LISTENER, [{port, ?AS_PORT}],
-                                  #{env => #{dispatch => Dispatch}}),
+    {ok, _} = barrel_mcp_test_http:start(?AS_LISTENER, ?AS_PORT,
+                                         fun handle/1),
 
     ok = barrel_mcp_registry:reg(tool, <<"echo">>, ?MODULE, echo_tool, #{
         description => <<"Echo">>,
@@ -78,7 +71,7 @@ init_per_suite(Config) ->
 
 end_per_suite(_Config) ->
     try barrel_mcp:stop_http_stream() catch _:_ -> ok end,
-    try cowboy:stop_listener(?AS_LISTENER) catch _:_ -> ok end,
+    try barrel_mcp_test_http:stop(?AS_LISTENER) catch _:_ -> ok end,
     try barrel_mcp_registry:unreg(tool, <<"echo">>) catch _:_ -> ok end,
     application:stop(barrel_mcp),
     ok.
@@ -148,46 +141,39 @@ registration_error_surfaces(_Config) ->
 echo_tool(#{<<"text">> := T}) -> T.
 
 %%====================================================================
-%% Cowboy mock: registration + token endpoints
+%% Mock: registration + token endpoints
 %%====================================================================
 
-init(Req0, register) ->
-    {ok, Body, Req} = cowboy_req:read_body(Req0),
+handle(#{path := <<"/oauth/register">>, body := Body}) ->
     Metadata = json:decode(Body),
     case maps:get(<<"client_name">>, Metadata, <<>>) of
         <<"reject-me">> ->
-            R = cowboy_req:reply(400,
-                #{<<"content-type">> => <<"application/json">>},
-                json_encode(#{<<"error">> => <<"invalid_redirect_uri">>}),
-                Req),
-            {ok, R, register};
+            {400, json_ct(),
+             json_encode(#{<<"error">> => <<"invalid_redirect_uri">>})};
         _ ->
-            R = cowboy_req:reply(201,
-                #{<<"content-type">> => <<"application/json">>},
-                json_encode(#{
-                    <<"client_id">> => <<"registered-client-id">>,
-                    <<"client_secret">> => <<"registered-secret">>,
-                    <<"client_id_issued_at">> => 1700000000,
-                    <<"client_secret_expires_at">> => 0
-                }), Req),
-            {ok, R, register}
+            {201, json_ct(),
+             json_encode(#{
+                 <<"client_id">> => <<"registered-client-id">>,
+                 <<"client_secret">> => <<"registered-secret">>,
+                 <<"client_id_issued_at">> => 1700000000,
+                 <<"client_secret_expires_at">> => 0
+             })}
     end;
-init(Req0, token) ->
-    {ok, Body, Req} = cowboy_req:read_urlencoded_body(Req0),
-    Form = maps:from_list(Body),
+handle(#{path := <<"/oauth/token">>} = Req) ->
+    Form = barrel_mcp_test_http:form(Req),
     <<"client_credentials">> = maps:get(<<"grant_type">>, Form),
     %% The client authenticates via HTTP Basic with the
     %% registered credentials; barrel_mcp_client_auth_oauth strips
     %% client_id from the body in that mode.
-    AuthHdr = cowboy_req:header(<<"authorization">>, Req0),
+    AuthHdr = barrel_mcp_test_http:header(<<"authorization">>, Req),
     true = is_binary(AuthHdr),
     <<"Basic ", _/binary>> = AuthHdr,
-    R = cowboy_req:reply(200,
-        #{<<"content-type">> => <<"application/json">>},
-        json_encode(#{<<"access_token">> => ?ACCESS_TOKEN,
-                      <<"token_type">> => <<"Bearer">>,
-                      <<"expires_in">> => 3600}), Req),
-    {ok, R, token}.
+    {200, json_ct(),
+     json_encode(#{<<"access_token">> => ?ACCESS_TOKEN,
+                   <<"token_type">> => <<"Bearer">>,
+                   <<"expires_in">> => 3600})}.
+
+json_ct() -> #{<<"content-type">> => <<"application/json">>}.
 
 json_encode(M) -> iolist_to_binary(json:encode(M)).
 
