@@ -336,12 +336,12 @@ Together with sampling / elicitation / roots / progress / subscribe / tasks alre
 
 ### Server-to-client `roots/list`
 
-- New `barrel_mcp:roots_list/1,2` façade. Sends `roots/list` to the connected client behind a session id and returns the host's roots. Requires the client to have declared `roots` capability in its `initialize' request and an active SSE stream.
+- New `barrel_mcp:roots_list/1,2` façade. Sends `roots/list` to the connected client behind a session id and returns the host's roots. Requires the client to have declared `roots` capability in its `initialize` request and an active SSE stream.
 - New helpers `barrel_mcp:list_sessions_with_roots/0`, `barrel_mcp_session:has_roots/1`, `barrel_mcp_session:list_roots_capable/0`.
 
 ### Server-to-client `elicitation/create`
 
-- New `barrel_mcp:elicit_create/3` façade. Sends `elicitation/create` to the client behind a session id and blocks until the client responds (or `timeout_ms` elapses, default 30s). Requires the client to have declared `elicitation` capability in its `initialize' request and an active SSE stream. Mirrors the existing `sampling_create_message/3` flow.
+- New `barrel_mcp:elicit_create/3` façade. Sends `elicitation/create` to the client behind a session id and blocks until the client responds (or `timeout_ms` elapses, default 30s). Requires the client to have declared `elicitation` capability in its `initialize` request and an active SSE stream. Mirrors the existing `sampling_create_message/3` flow.
 - New helpers `barrel_mcp:list_sessions_with_elicitation/0`, `barrel_mcp_session:has_elicitation/1`, `barrel_mcp_session:list_elicitation_capable/0`.
 - Internally, the server's pending-request map now carries the response tag, so sampling and elicitation responses route back to the correct caller without colliding.
 
@@ -373,15 +373,15 @@ Together with sampling / elicitation / roots / progress / subscribe / tasks alre
 
 ### Spec parity: protocol bump, async tools, list-changed, auth hardening
 
-- **Server protocol bumped to `2025-11-25`.** `initialize' negotiates with the client: when the client requests a version we speak, we echo it; otherwise we reply with our preferred version. Capabilities advertised in `initialize' now include `listChanged: true' on `tools', `resources', and `prompts'.
-- **Async tool execution.** `barrel_mcp_protocol:handle/2` returns `{async, AsyncPlan}` for `tools/call'; the transport invokes the spawn closure to start a worker, records the in-flight entry, and waits on its mailbox. Tool handlers may export arity 1 (legacy) or arity 2 (`(Args, Ctx)` — the new shape that receives session/progress context).
-- **`notifications/cancelled' wired end-to-end.** Inbound cancel finds the in-flight worker via `barrel_mcp_session:cancel_in_flight/2`, sends `{cancel, RequestId}' to the worker and `{cancelled, RequestId}' to the waiter. Per the MCP spec the cancelled HTTP request closes with 200 + empty body; no JSON-RPC response is emitted.
-- **`notifications/progress' emit + handler context.** New façades `barrel_mcp:notify_progress/3,4`. Arity-2 tool handlers receive `Ctx` with an `emit_progress` function bound to the session's progress token, so they can emit progress without knowing about sessions.
-- **`notifications/roots/list_changed' dispatch hook.** Configurable via `application:set_env(barrel_mcp, roots_changed_handler, {Mod, Fun}).`. No-op when unset.
-- **`resources/templates/list' real registry.** New `barrel_mcp:reg_resource_template/4`, `unreg_resource_template/1`, `list_resource_templates/0`. The protocol method now returns the registered templates instead of an empty stub.
+- **Server protocol bumped to `2025-11-25`.** `initialize` negotiates with the client: when the client requests a version we speak, we echo it; otherwise we reply with our preferred version. Capabilities advertised in `initialize` now include `listChanged: true` on `tools`, `resources`, and `prompts`.
+- **Async tool execution.** `barrel_mcp_protocol:handle/2` returns `{async, AsyncPlan}` for `tools/call`; the transport invokes the spawn closure to start a worker, records the in-flight entry, and waits on its mailbox. Tool handlers may export arity 1 (legacy) or arity 2 (`(Args, Ctx)` — the new shape that receives session/progress context).
+- **`notifications/cancelled` wired end-to-end.** Inbound cancel finds the in-flight worker via `barrel_mcp_session:cancel_in_flight/2`, sends `{cancel, RequestId}` to the worker and `{cancelled, RequestId}` to the waiter. Per the MCP spec the cancelled HTTP request closes with 200 + empty body; no JSON-RPC response is emitted.
+- **`notifications/progress` emit + handler context.** New façades `barrel_mcp:notify_progress/3,4`. Arity-2 tool handlers receive `Ctx` with an `emit_progress` function bound to the session's progress token, so they can emit progress without knowing about sessions.
+- **`notifications/roots/list_changed` dispatch hook.** Configurable via `application:set_env(barrel_mcp, roots_changed_handler, {Mod, Fun}).`. No-op when unset.
+- **`resources/templates/list` real registry.** New `barrel_mcp:reg_resource_template/4`, `unreg_resource_template/1`, `list_resource_templates/0`. The protocol method now returns the registered templates instead of an empty stub.
 - **Server-side input validation.** `reg_tool/4` accepts `validate_input => true`; the registry runs `barrel_mcp_schema:validate/2` against the tool's `input_schema` before invoking the handler. Failures surface to the client as `isError: true` content.
-- **Tool error reporting via `isError: true`.** Handlers may return `{tool_error, Content}'; the transport wraps it as `#{<<"content">> => Content, <<"isError">> => true}`.
-- **`*/list_changed' notifications.** `barrel_mcp_registry:reg/4,5` and `unreg/2` automatically broadcast the matching `notifications/<kind>/list_changed` envelope to every active SSE session. New `barrel_mcp:notify_list_changed/1` for out-of-band catalogue changes.
+- **Tool error reporting via `isError: true`.** Handlers may return `{tool_error, Content}`; the transport wraps it as `#{<<"content">> => Content, <<"isError">> => true}`.
+- **`*/list_changed` notifications.** `barrel_mcp_registry:reg/4,5` and `unreg/2` automatically broadcast the matching `notifications/<kind>/list_changed` envelope to every active SSE session. New `barrel_mcp:notify_list_changed/1` for out-of-band catalogue changes.
 - **Auth hardening.**
   - `barrel_mcp_auth_basic:hash_password/1,2` now defaults to **PBKDF2-SHA256** (100k iterations, random salt). Stored format `pbkdf2-sha256$<iters>$<b64(salt)>$<b64(hash)>`. Public `verify_password/2` accepts the new format and the legacy hex SHA-256 digest (the latter logs a deprecation warning).
   - `barrel_mcp_auth_apikey:hash_key/2` adds an **HMAC-SHA-256** keyed format (`hmac-sha256$<b64(hash)>`). Public `verify_key/2` honours both formats with constant-time comparison.
