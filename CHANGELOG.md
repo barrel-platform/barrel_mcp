@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-06-10
+
+Dependency refresh and tooling.
+
+### Changed
+
+- Update dependencies to latest: `h1` 0.2.3 -> 0.6.0, `h2` 0.6.1 ->
+  0.9.0, `hackney` 4.0.3 -> 4.2.3.
+- Drop cowboy as a test dependency. The OAuth suites now run against a
+  small mock built on the project's own `h1` server; the only test dep
+  left is `meck`.
+- Adopt erlfmt and elvis (rebar3_lint); commit `rebar.lock` so CI keys
+  its build cache on the lock hash. CI runs format, lint, xref, and
+  dialyzer as distinct jobs.
+
+### Fixed
+
+- `barrel_mcp_client_http` tracked the hackney async SSE stream handle
+  as a `reference()`, but it is a connection pid in hackney 4.x. The
+  field type and the `is_reference` guard are corrected; the guard
+  never matched, so a duplicate SSE stream could be opened.
+
 ## [2.2.0] - 2026-06-09
 
 Threads the authenticated principal into tool handlers.
