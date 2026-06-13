@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.3] - 2026-06-13
+
+### Changed
+
+- Bump dependencies to latest: `h1` 0.6.1 -> 0.6.2, `hackney` 4.2.3 ->
+  4.3.0.
+- Bump tooling: `erlfmt` 1.7.0 -> 1.8.0, `rebar3_lint` 4.1.1 -> 5.0.4
+  (elvis_core 5.x), and migrate the elvis config to the new format.
+
 ## [2.2.2] - 2026-06-10
 
 ### Changed
