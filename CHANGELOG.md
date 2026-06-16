@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Bump dependencies: `h1` 0.6.2 -> 0.7.0, `h2` 0.9.0 -> 0.10.2,
-  `hackney` 4.3.0 -> 4.4.1.
+  `hackney` 4.3.0 -> 4.4.2.
 - Pin runtime dependencies with patch-relative (`~>`) version
   constraints so they float to the latest patch within their minor
   line.
