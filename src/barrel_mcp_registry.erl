@@ -237,7 +237,13 @@ run(Type, Name, Args) ->
     case find(Type, Name) of
         {ok, #{module := M, function := F}} ->
             try
-                Result = M:F(Args),
+                %% Mirror invoke_tool_handler/5: prefer the arity-2 form so
+                %% a local invoke reaches the same handlers the wire does.
+                Result =
+                    case erlang:function_exported(M, F, 2) of
+                        true -> M:F(Args, #{tool_name => Name});
+                        false -> M:F(Args)
+                    end,
                 {ok, Result}
             catch
                 Class:Reason:Stack ->
@@ -266,7 +272,9 @@ run_completion(Key, Value, Ctx) ->
 
 %% @doc Execute a tool handler asynchronously. Spawns a worker that
 %% calls `Mod:Fun(Args, Ctx)' (when arity 2 is exported) or
-%% `Mod:Fun(Args)' otherwise. The worker reports back to
+%% `Mod:Fun(Args)' otherwise. `Ctx' carries `tool_name' — the name the
+%% tool was invoked under — so one handler can serve many registered
+%% tools (as an MCP gateway does). The worker reports back to
 %% `maps:get(reply_to, Ctx)' as either:
 %% <ul>
 %%   <li>`{tool_result, RequestId, Result}' on a normal return</li>
@@ -293,7 +301,10 @@ run_tool(Name, Args, Ctx) ->
             {error, {not_found, tool, Name}}
     end.
 
-run_tool_worker(_Name, Args, Ctx, Handler, ReplyTo, RequestId) ->
+run_tool_worker(Name, Args, Ctx0, Handler, ReplyTo, RequestId) ->
+    %% Gateways register many tools against one handler; without the name
+    %% an arity-2 handler cannot tell which tool it is serving.
+    Ctx = Ctx0#{tool_name => Name},
     %% Optional input validation against the registered input_schema.
     case validate_tool_input(Args, Handler) of
         ok ->
