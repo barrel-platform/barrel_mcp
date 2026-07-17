@@ -7,7 +7,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 %% Test handlers (exported for MCP registry)
--export([sample_handler/1]).
+-export([sample_handler/1, ctx_handler/2]).
 
 %%====================================================================
 %% Test Fixtures
@@ -20,6 +20,8 @@ registry_test_() ->
         {"Register and find prompt", fun test_register_prompt/0},
         {"Unregister handler", fun test_unregister/0},
         {"Run tool handler", fun test_run_tool/0},
+        {"Ctx carries tool_name", fun test_run_tool_ctx_tool_name/0},
+        {"One handler serves many tools", fun test_gateway_dispatch_by_tool_name/0},
         {"Run handler not found", fun test_run_not_found/0},
         {"List all handlers", fun test_all/0},
         {"List handlers by type", fun test_all_type/0},
@@ -62,6 +64,12 @@ cleanup(_) ->
 %% Sample handler function for testing
 sample_handler(Args) ->
     #{result => Args}.
+
+%% An arity-2 handler: echoes back the tool it was invoked as. This is the
+%% shape an MCP gateway uses to route one handler across many registered
+%% tool names.
+ctx_handler(Args, Ctx) ->
+    #{invoked_as => maps:get(tool_name, Ctx, undefined), args => Args}.
 
 %%====================================================================
 %% Tests
@@ -121,6 +129,51 @@ test_run_tool() ->
     {ok, Result} = barrel_mcp_registry:run(tool, Name, Args),
     ?assertEqual(#{result => Args}, Result),
     barrel_mcp_registry:unreg(tool, Name).
+
+%% Drive the real wire path: run_tool/3 spawns a worker that replies to
+%% `reply_to'. This is what barrel_mcp_http_engine does.
+run_tool_sync(Name, Args) ->
+    RequestId = erlang:unique_integer([positive]),
+    Ctx = #{reply_to => self(), request_id => RequestId},
+    {ok, _Pid} = barrel_mcp_registry:run_tool(Name, Args, Ctx),
+    receive
+        {tool_result, RequestId, Result} -> {ok, Result};
+        {tool_failed, RequestId, Reason} -> {error, Reason}
+    after 5000 -> {error, timeout}
+    end.
+
+test_run_tool_ctx_tool_name() ->
+    Name = <<"ctx_test">>,
+    ok = barrel_mcp_registry:reg(tool, Name, ?MODULE, ctx_handler, #{}),
+    Args = #{<<"key">> => <<"value">>},
+    %% wire path
+    {ok, Result} = run_tool_sync(Name, Args),
+    ?assertEqual(Name, maps:get(invoked_as, Result)),
+    ?assertEqual(Args, maps:get(args, Result)),
+    %% local-invoke path (barrel_mcp:call_tool/2) must agree
+    {ok, Local} = barrel_mcp_registry:run(tool, Name, Args),
+    ?assertEqual(Name, maps:get(invoked_as, Local)),
+    barrel_mcp_registry:unreg(tool, Name).
+
+%% The gateway contract: many tool names, one Module:Function. Each call
+%% must report the name it was invoked under, or a gateway cannot route
+%% upstream.
+test_gateway_dispatch_by_tool_name() ->
+    Names = [<<"srv_a:do_thing">>, <<"srv_b:other_thing">>],
+    [ok = barrel_mcp_registry:reg(tool, N, ?MODULE, ctx_handler, #{}) || N <- Names],
+    Seen = [
+        begin
+            {ok, R} = run_tool_sync(N, #{}),
+            maps:get(invoked_as, R)
+        end
+     || N <- Names
+    ],
+    ?assertEqual(Names, Seen),
+    %% arity-1 handlers keep working alongside arity-2 ones
+    ok = barrel_mcp_registry:reg(tool, <<"plain">>, ?MODULE, sample_handler, #{}),
+    ?assertEqual({ok, #{result => #{}}}, run_tool_sync(<<"plain">>, #{})),
+    [barrel_mcp_registry:unreg(tool, N) || N <- [<<"plain">> | Names]],
+    ok.
 
 test_run_not_found() ->
     {error, {not_found, tool, <<"nonexistent">>}} =

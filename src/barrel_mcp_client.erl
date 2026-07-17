@@ -100,7 +100,13 @@
         request_timeout => pos_integer(),
         init_timeout => pos_integer(),
         ping_interval => pos_integer() | infinity,
-        ping_failure_threshold => pos_integer()
+        ping_failure_threshold => pos_integer(),
+        %% Extra headers on every HTTP request. Servers configured with
+        %% `allow_missing_origin => false' reject requests that carry no
+        %% `Origin', so pass one here:
+        %%   `http_headers => [{<<"origin">>, <<"https://app.example">>}]'
+        %% Ignored by the stdio transport.
+        http_headers => [{binary() | string(), binary() | string()}]
     }.
 
 -export_type([connect_spec/0]).
