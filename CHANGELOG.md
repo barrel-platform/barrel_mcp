@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.5] - 2026-07-17
+
+### Changed
+
+- Bump dependencies: `h1` 0.7.0 -> 0.7.1, `h2` 0.10.2 -> 0.11.0,
+  `hackney` 4.4.2 -> 4.7.2 (HTTP/2 large-body flow-control fix),
+  `quic` 1.6.5 -> 1.7.1, `webtransport` 0.4.1 -> 0.4.3.
+
 ## [2.2.4] - 2026-06-16
 
 ### Changed
