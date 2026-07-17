@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-07-17
+
+### Added
+
+- Tool handlers can now see which tool they are serving: the handler
+  `Ctx` carries `tool_name`, so a single `Module:Function` pair can back
+  several registered tools (the shape an MCP gateway needs).
+
+### Fixed
+
+- `barrel_mcp_registry:run/3` now honors the arity-2 handlers
+  `reg_tool/4` accepts instead of always calling `M:F(Args)`, mirroring
+  the wire path.
+
 ## [2.2.5] - 2026-07-17
 
 ### Fixed
