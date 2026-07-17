@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.5] - 2026-07-17
 
+### Fixed
+
+- Recover the MCP client reconnect when a transient child spec lingers
+  after a clean exit: `start_child` now drops the dead spec on
+  `{error, already_present}` and retries, so a host can redial a server
+  that has come back up.
+
 ### Changed
 
 - Bump dependencies: `h1` 0.7.0 -> 0.7.1, `h2` 0.10.2 -> 0.11.0,
