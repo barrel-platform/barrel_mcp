@@ -28,7 +28,16 @@ start_child(ServerId, Spec) ->
         type => worker,
         modules => [barrel_mcp_client]
     },
-    supervisor:start_child(?MODULE, Child).
+    case supervisor:start_child(?MODULE, Child) of
+        {error, already_present} ->
+            %% A prior transient child exited normally (e.g. the server closed
+            %% the stream) and left its spec behind in a terminated state.
+            %% Drop the dead spec so this id can be reconnected.
+            _ = supervisor:delete_child(?MODULE, ServerId),
+            supervisor:start_child(?MODULE, Child);
+        Other ->
+            Other
+    end.
 
 init([]) ->
     SupFlags = #{strategy => one_for_one, intensity => 10, period => 60},
