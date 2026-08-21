@@ -11,7 +11,8 @@
 -export([
     simple_prompt/1,
     parameterized_prompt/1,
-    multi_message_prompt/1
+    multi_message_prompt/1,
+    crashing_prompt/1
 ]).
 
 %%====================================================================
@@ -26,6 +27,7 @@ prompts_test_() ->
         {"Get prompt with arguments", fun test_get_prompt_with_args/0},
         {"Get prompt returns multiple messages", fun test_get_prompt_multi_message/0},
         {"Get non-existent prompt returns error", fun test_get_prompt_not_found/0},
+        {"Crashed prompt handler returns internal error", fun test_get_prompt_handler_crash/0},
         {"Prompt with arguments is listed correctly", fun test_prompt_arguments/0}
     ]}.
 
@@ -46,6 +48,9 @@ cleanup(_) ->
 %%====================================================================
 %% Test Handlers
 %%====================================================================
+
+crashing_prompt(_Args) ->
+    error(deliberate_crash).
 
 simple_prompt(_Args) ->
     #{
@@ -228,7 +233,30 @@ test_get_prompt_not_found() ->
     Response = barrel_mcp_protocol:handle(Request),
     ?assert(maps:is_key(<<"error">>, Response)),
     Error = maps:get(<<"error">>, Response),
-    ?assertEqual(-32601, maps:get(<<"code">>, Error)).
+    %% An unknown prompt name is a bad parameter, not an unknown method.
+    ?assertEqual(-32602, maps:get(<<"code">>, Error)).
+
+test_get_prompt_handler_crash() ->
+    ok = barrel_mcp:reg_prompt(<<"boom">>, ?MODULE, crashing_prompt, #{
+        description => <<"Always crashes">>
+    }),
+    Request = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"prompts/get">>,
+        <<"params">> => #{
+            <<"name">> => <<"boom">>,
+            <<"arguments">> => #{}
+        }
+    },
+    Response = barrel_mcp_protocol:handle(Request),
+    ?assert(maps:is_key(<<"error">>, Response)),
+    Error = maps:get(<<"error">>, Response),
+    %% A crashed handler is an internal error. It must NOT reuse -32002,
+    %% which the spec assigns to "resource not found".
+    ?assertEqual(-32603, maps:get(<<"code">>, Error)),
+    ?assertEqual(<<"Internal prompt error">>, maps:get(<<"message">>, Error)),
+    barrel_mcp_registry:unreg(prompt, <<"boom">>).
 
 test_prompt_arguments() ->
     ok = barrel_mcp_registry:reg(prompt, <<"with_args">>, ?MODULE, parameterized_prompt, #{

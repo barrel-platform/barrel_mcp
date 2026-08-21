@@ -63,13 +63,15 @@ start(Opts) ->
                 #{port => Port, ip => Ip, ssl => normalize_ssl(Opts)},
                 maps:with([max_connections, acceptors], Opts)
             ),
-            barrel_mcp_http_listener:start(?HTTP_LISTENER, ListenOpts, EngineConfig)
+            barrel_mcp_listener_sup:start_listener(
+                ?HTTP_LISTENER, ListenOpts, EngineConfig
+            )
     end.
 
 %% @doc Stop the simple HTTP server.
 -spec stop() -> ok | {error, not_found}.
 stop() ->
-    barrel_mcp_http_listener:stop(?HTTP_LISTENER).
+    barrel_mcp_listener_sup:stop_listener(?HTTP_LISTENER).
 
 normalize_ssl(Opts) ->
     case maps:get(ssl, Opts, undefined) of

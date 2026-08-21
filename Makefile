@@ -40,11 +40,16 @@ interop-setup:
 	python3 -m venv test/interop/.venv
 	./test/interop/.venv/bin/pip install --upgrade pip
 	./test/interop/.venv/bin/pip install -r test/interop/requirements.txt
+	python3 -m venv test/interop/.venv-modern
+	./test/interop/.venv-modern/bin/pip install --upgrade pip
+	./test/interop/.venv-modern/bin/pip install -r test/interop/requirements-modern.txt
 
 interop-test: interop-setup
 	INTEROP_PYTHON=$(CURDIR)/test/interop/.venv/bin/python \
+	INTEROP_PYTHON_MODERN=$(CURDIR)/test/interop/.venv-modern/bin/python \
 	    rebar3 ct --suite=test/barrel_mcp_python_interop_SUITE
 
 clean:
 	rebar3 clean
-	rm -rf examples/*/_build examples/*/_checkouts test/interop/.venv
+	rm -rf examples/*/_build examples/*/_checkouts test/interop/.venv \
+	    test/interop/.venv-modern

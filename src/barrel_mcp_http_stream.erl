@@ -53,6 +53,14 @@
 %%   <li>`allowed_origins' — `[binary()] | any'.</li>
 %%   <li>`allow_missing_origin' — accept requests with no `Origin'
 %%       header. Defaults to `true' on loopback, `false' otherwise.</li>
+%%   <li>`subscription_keepalive_ms' — how often a quiet
+%%       `subscriptions/listen' stream emits an SSE comment so
+%%       intermediaries do not drop it. Defaults to 15000.
+%%
+%%       It doubles as the upper bound on how long a subscriber that
+%%       went away lingers: nothing reads the socket while a stream is
+%%       held open, so a client's disconnect surfaces on the next
+%%       write. Raise it and dropped subscribers are reaped later.</li>
 %% </ul>
 -spec start(Opts) -> {ok, pid()} | {error, term()} when
     Opts :: #{
@@ -63,6 +71,7 @@
         ssl => map(),
         allowed_origins => [binary()] | any,
         allow_missing_origin => boolean(),
+        subscription_keepalive_ms => pos_integer(),
         max_connections => pos_integer()
     }.
 start(Opts) ->
@@ -100,19 +109,26 @@ start(Opts) ->
                 allowed_origins => AllowedOrigins,
                 allow_missing_origin => AllowMissing,
                 sse_buffer_size => maps:get(sse_buffer_size, Opts, 256),
-                resource_metadata => ResourceMetadata
+                resource_metadata => ResourceMetadata,
+                subscription_keepalive_ms => maps:get(
+                    subscription_keepalive_ms,
+                    Opts,
+                    application:get_env(barrel_mcp, subscription_keepalive_ms, 15000)
+                )
             },
             ListenOpts = maps:merge(
                 #{port => Port, ip => Ip, ssl => normalize_ssl(Opts)},
                 maps:with([max_connections, acceptors], Opts)
             ),
-            barrel_mcp_http_listener:start(?STREAM_LISTENER, ListenOpts, EngineConfig)
+            barrel_mcp_listener_sup:start_listener(
+                ?STREAM_LISTENER, ListenOpts, EngineConfig
+            )
     end.
 
 %% @doc Stop the Streamable HTTP server.
 -spec stop() -> ok | {error, not_found}.
 stop() ->
-    barrel_mcp_http_listener:stop(?STREAM_LISTENER).
+    barrel_mcp_listener_sup:stop_listener(?STREAM_LISTENER).
 
 normalize_ssl(Opts) ->
     case maps:get(ssl, Opts, undefined) of

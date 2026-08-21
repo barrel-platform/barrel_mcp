@@ -244,23 +244,32 @@ drive_async_plan_timeout_test() ->
 %% _meta propagation on JSON-RPC envelopes and tool outcomes
 %%====================================================================
 
+%% `_meta' is a field of the result object, not a sibling of it: the
+%% MCP schema declares it on `Result', so an envelope-level `_meta'
+%% never reaches a conforming client.
+result_meta(Resp) ->
+    maps:get(<<"_meta">>, maps:get(<<"result">>, Resp)).
+
 success_response_without_meta_omits_field_test() ->
     Resp = barrel_mcp_protocol:success_response(1, #{<<"k">> => 1}),
-    ?assertNot(maps:is_key(<<"_meta">>, Resp)).
+    ?assertNot(maps:is_key(<<"_meta">>, Resp)),
+    ?assertNot(maps:is_key(<<"_meta">>, maps:get(<<"result">>, Resp))).
 
 success_response_with_meta_carries_field_test() ->
     Meta = #{<<"requestId">> => <<"abc">>},
     Resp = barrel_mcp_protocol:success_response(1, #{<<"k">> => 1}, Meta),
-    ?assertEqual(Meta, maps:get(<<"_meta">>, Resp)).
+    ?assertEqual(Meta, result_meta(Resp)),
+    ?assertNot(maps:is_key(<<"_meta">>, Resp)).
 
 success_response_with_empty_meta_omits_field_test() ->
     Resp = barrel_mcp_protocol:success_response(1, #{<<"k">> => 1}, #{}),
-    ?assertNot(maps:is_key(<<"_meta">>, Resp)).
+    ?assertNot(maps:is_key(<<"_meta">>, maps:get(<<"result">>, Resp))).
 
 error_response_with_meta_carries_field_test() ->
     Meta = #{<<"trace">> => <<"xyz">>},
     Resp = barrel_mcp_protocol:error_response(1, -32000, <<"boom">>, Meta),
-    ?assertEqual(Meta, maps:get(<<"_meta">>, Resp)).
+    ?assertEqual(Meta, maps:get(<<"_meta">>, maps:get(<<"error">>, Resp))),
+    ?assertNot(maps:is_key(<<"_meta">>, Resp)).
 
 drive_async_plan_result_meta_test() ->
     Meta = #{<<"requestId">> => <<"abc">>},
@@ -274,7 +283,7 @@ drive_async_plan_result_meta_test() ->
         end
     },
     Resp = barrel_mcp_protocol:drive_async_plan(Plan, 1000),
-    ?assertEqual(Meta, maps:get(<<"_meta">>, Resp)).
+    ?assertEqual(Meta, result_meta(Resp)).
 
 drive_async_plan_structured_meta_test() ->
     Meta = #{<<"version">> => 1},
@@ -290,7 +299,7 @@ drive_async_plan_structured_meta_test() ->
         end
     },
     Resp = barrel_mcp_protocol:drive_async_plan(Plan, 1000),
-    ?assertEqual(Meta, maps:get(<<"_meta">>, Resp)),
+    ?assertEqual(Meta, result_meta(Resp)),
     ?assertEqual(
         Data,
         maps:get(
@@ -312,6 +321,6 @@ drive_async_plan_tool_error_meta_test() ->
         end
     },
     Resp = barrel_mcp_protocol:drive_async_plan(Plan, 1000),
-    ?assertEqual(Meta, maps:get(<<"_meta">>, Resp)),
+    ?assertEqual(Meta, result_meta(Resp)),
     Result = maps:get(<<"result">>, Resp),
     ?assertEqual(true, maps:get(<<"isError">>, Result)).

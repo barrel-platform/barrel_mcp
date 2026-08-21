@@ -8,9 +8,19 @@
 %%% `tasks/cancel'. State transitions emit
 %%% `notifications/tasks/status' on the session's SSE channel.
 %%%
-%%% Tasks live in a `protected' ETS table keyed by
-%%% `{SessionId, TaskId}'. A periodic sweep evicts terminal tasks
-%%% (success / error / cancelled) older than `?TASK_TTL'.
+%%% Tasks live in a `protected' ETS table keyed by `TaskId', which is
+%%% crypto-random and so unique on its own. Who owns a task is a field
+%%% rather than part of the key: a task id is the durable handle a
+%%% client holds, and it has to be resolvable without knowing what
+%%% created it.
+%%%
+%%% The owner is opaque here, and differs by era. A legacy task is
+%%% owned by its session id; a modern one has no session, so it is
+%%% owned by the authenticated principal. Either way every lookup
+%%% matches on it, so one owner cannot reach another's tasks.
+%%%
+%%% A periodic sweep evicts terminal tasks (success / error /
+%%% cancelled) older than `?TASK_TTL'.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_tasks).
@@ -25,7 +35,8 @@
     cancel/2,
     finish/3,
     fail/3,
-    set_worker/3
+    set_worker/3,
+    update/3
 ]).
 
 -export([
@@ -44,7 +55,8 @@
 
 -record(task, {
     id :: binary(),
-    session_id :: binary() | undefined,
+    %% A session id (legacy) or `{principal, AuthInfo}' (modern).
+    owner :: term(),
     method :: binary(),
     %% Spec vocabulary (MCP 2025-11-25):
     %%   submitted | working | completed | failed | cancelled
@@ -57,7 +69,12 @@
     created_at :: integer(),
     updated_at :: integer(),
     worker_pid :: pid() | undefined,
-    request_id :: integer() | binary() | undefined
+    request_id :: integer() | binary() | undefined,
+    %% Answers a client supplied through `tasks/update'. Recorded even
+    %% when nothing is waiting on them, since the extension has the
+    %% server ignore responses it does not need rather than reject
+    %% them.
+    input_responses = #{} :: map()
 }).
 
 %%====================================================================
@@ -73,23 +90,34 @@ start_link() ->
     Method :: binary(),
     Opts :: map()
 ) -> {ok, binary()}.
-create(SessionId, Method, _Opts) ->
-    gen_server:call(?MODULE, {create, SessionId, Method}).
+create(Owner, Method, _Opts) ->
+    gen_server:call(?MODULE, {create, Owner, Method}).
 
 -spec get(SessionId :: binary() | undefined, TaskId :: binary()) ->
     {ok, map()} | {error, not_found}.
 get(SessionId, TaskId) ->
-    case ets:lookup(?TABLE, {SessionId, TaskId}) of
-        [{_, Task}] -> {ok, task_to_map(Task)};
-        [] -> {error, not_found}
+    case lookup(SessionId, TaskId) of
+        {ok, Task} -> {ok, task_to_map(Task)};
+        {error, not_found} -> {error, not_found}
+    end.
+
+%% A task is only visible to the session that owns it. Naming the right
+%% id but the wrong session is indistinguishable from naming an id that
+%% does not exist.
+lookup(Owner, TaskId) ->
+    case ets:lookup(?TABLE, TaskId) of
+        [{_, #task{owner = Owner} = Task}] -> {ok, Task};
+        _ -> {error, not_found}
     end.
 
 -spec list(SessionId :: binary() | undefined, map()) -> {ok, [map()]}.
 list(SessionId, _Opts) ->
     Tasks = ets:foldl(
         fun
-            ({{S, _}, T}, Acc) when S =:= SessionId -> [task_to_map(T) | Acc];
-            (_, Acc) -> Acc
+            ({_, #task{owner = S} = T}, Acc) when S =:= SessionId ->
+                [task_to_map(T) | Acc];
+            (_, Acc) ->
+                Acc
         end,
         [],
         ?TABLE
@@ -123,9 +151,16 @@ finish(SessionId, TaskId, Result) ->
     gen_server:call(?MODULE, {finish, SessionId, TaskId, Result}).
 
 %% @doc Record failure: store the error and emit notification.
--spec fail(binary() | undefined, binary(), term()) -> ok | {error, not_found}.
-fail(SessionId, TaskId, Reason) ->
-    gen_server:call(?MODULE, {fail, SessionId, TaskId, Reason}).
+-spec fail(term(), binary(), term()) -> ok | {error, not_found}.
+fail(Owner, TaskId, Reason) ->
+    gen_server:call(?MODULE, {fail, Owner, TaskId, Reason}).
+
+%% @doc Record answers a client supplied for a task through
+%% `tasks/update'. Merged rather than replaced, so a client answering
+%% one key at a time does not drop the others.
+-spec update(term(), binary(), map()) -> ok | {error, not_found}.
+update(Owner, TaskId, Responses) when is_map(Responses) ->
+    gen_server:call(?MODULE, {update, Owner, TaskId, Responses}).
 
 %%====================================================================
 %% gen_server
@@ -136,19 +171,19 @@ init([]) ->
     erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
     {ok, #{}}.
 
-handle_call({create, SessionId, Method}, _From, State) ->
+handle_call({create, Owner, Method}, _From, State) ->
     Now = erlang:system_time(millisecond),
     TaskId = generate_id(),
     Task = #task{
         id = TaskId,
-        session_id = SessionId,
+        owner = Owner,
         method = Method,
         status = working,
         created_at = Now,
         updated_at = Now
     },
-    true = ets:insert(?TABLE, {{SessionId, TaskId}, Task}),
-    notify_changed(SessionId, Task),
+    true = ets:insert(?TABLE, {TaskId, Task}),
+    notify_changed(Owner, Task),
     {reply, {ok, TaskId}, State};
 handle_call({cancel, SessionId, TaskId}, _From, State) ->
     %% Best-effort: send the worker a cooperative cancel signal so
@@ -157,10 +192,8 @@ handle_call({cancel, SessionId, TaskId}, _From, State) ->
     %% their result is dropped because the task is already in a
     %% terminal state.
     _ =
-        case ets:lookup(?TABLE, {SessionId, TaskId}) of
-            [{_, #task{worker_pid = Pid, request_id = ReqId}}] when
-                is_pid(Pid)
-            ->
+        case lookup(SessionId, TaskId) of
+            {ok, #task{worker_pid = Pid, request_id = ReqId}} when is_pid(Pid) ->
                 try
                     Pid ! {cancel, ReqId}
                 catch
@@ -173,15 +206,29 @@ handle_call({cancel, SessionId, TaskId}, _From, State) ->
     {reply, Reply, State};
 handle_call({set_worker, SessionId, TaskId, Info}, _From, State) ->
     Reply =
-        case ets:lookup(?TABLE, {SessionId, TaskId}) of
-            [{_, #task{} = Task}] ->
+        case lookup(SessionId, TaskId) of
+            {ok, Task} ->
                 Updated = Task#task{
                     worker_pid = maps:get(worker, Info),
                     request_id = maps:get(request_id, Info, undefined)
                 },
-                true = ets:insert(?TABLE, {{SessionId, TaskId}, Updated}),
+                true = ets:insert(?TABLE, {TaskId, Updated}),
                 ok;
-            [] ->
+            {error, not_found} ->
+                {error, not_found}
+        end,
+    {reply, Reply, State};
+handle_call({update, Owner, TaskId, Responses}, _From, State) ->
+    Reply =
+        case lookup(Owner, TaskId) of
+            {ok, #task{input_responses = Existing} = Task} ->
+                Updated = Task#task{
+                    input_responses = maps:merge(Existing, Responses),
+                    updated_at = erlang:system_time(millisecond)
+                },
+                true = ets:insert(?TABLE, {TaskId, Updated}),
+                ok;
+            {error, not_found} ->
                 {error, not_found}
         end,
     {reply, Reply, State};
@@ -199,16 +246,28 @@ handle_cast(_Msg, State) -> {noreply, State}.
 handle_info(sweep, State) ->
     Now = erlang:system_time(millisecond),
     Cutoff = Now - ?TASK_TTL,
-    Drop = ets:foldl(
+    {Drop, Stranded} = ets:foldl(
         fun
-            ({_, #task{status = working}}, Acc) -> Acc;
-            ({Key, #task{updated_at = U}}, Acc) when U < Cutoff -> [Key | Acc];
-            (_, Acc) -> Acc
+            ({TaskId, #task{status = working} = T}, {D, S}) ->
+                case stranded(T, Now) of
+                    true -> {D, [{TaskId, T} | S]};
+                    false -> {D, S}
+                end;
+            ({TaskId, #task{updated_at = U}}, {D, S}) when U < Cutoff ->
+                {[TaskId | D], S};
+            (_, Acc) ->
+                Acc
         end,
-        [],
+        {[], []},
         ?TABLE
     ),
     lists:foreach(fun(K) -> ets:delete(?TABLE, K) end, Drop),
+    lists:foreach(
+        fun({TaskId, #task{owner = Owner}}) ->
+            _ = transition(Owner, TaskId, failed, undefined, worker_died)
+        end,
+        Stranded
+    ),
     erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
     {noreply, State};
 handle_info(_, State) ->
@@ -238,27 +297,43 @@ generate_id() ->
     Hex = binary:encode_hex(Rand, lowercase),
     <<"task_", Hex/binary>>.
 
+%% A working task whose worker is gone and which nothing has reported
+%% on. The collector normally records the outcome the moment the worker
+%% dies; this only catches the case where the collector died with it,
+%% which would otherwise leave the task working forever, since the
+%% sweep never evicts a working task and a long-running one legitimately
+%% stays working for hours.
+%%
+%% The grace period is what keeps this from racing a collector that is
+%% mid-report: a worker that exited a whole sweep interval ago has had
+%% its result recorded by now if it produced one.
+stranded(#task{worker_pid = Worker, updated_at = U}, Now) when is_pid(Worker) ->
+    U < Now - ?SWEEP_INTERVAL andalso not is_process_alive(Worker);
+stranded(_Task, _Now) ->
+    false.
+
 transition(SessionId, TaskId, Status, Result, Reason) ->
-    case ets:lookup(?TABLE, {SessionId, TaskId}) of
-        [{_, #task{status = working} = Task}] ->
-            Now = erlang:system_time(millisecond),
+    case lookup(SessionId, TaskId) of
+        {ok, #task{status = working} = Task} ->
             Updated = Task#task{
                 status = Status,
                 result = Result,
                 error = Reason,
-                updated_at = Now
+                updated_at = erlang:system_time(millisecond)
             },
-            true = ets:insert(?TABLE, {{SessionId, TaskId}, Updated}),
+            true = ets:insert(?TABLE, {TaskId, Updated}),
             notify_changed(SessionId, Updated),
             ok;
-        [{_, _}] ->
+        {ok, _Terminal} ->
             %% Already terminal — idempotent.
             ok;
-        [] ->
+        {error, not_found} ->
             {error, not_found}
     end.
 
-notify_changed(undefined, _) ->
+%% Only a legacy task has a session channel to notify on. A modern
+%% client polls `tasks/get' instead.
+notify_changed(SessionId, _Task) when not is_binary(SessionId) ->
     ok;
 notify_changed(SessionId, #task{} = Task) ->
     case barrel_mcp_session:get_sse_pid(SessionId) of
@@ -276,7 +351,7 @@ notify_changed(SessionId, #task{} = Task) ->
 
 task_to_map(#task{
     id = Id,
-    session_id = Sid,
+    owner = Owner,
     method = M,
     status = St,
     result = R,
@@ -296,9 +371,9 @@ task_to_map(#task{
         <<"ttl">> => null
     },
     Base1 =
-        case Sid of
-            undefined -> Base;
-            _ -> Base#{<<"sessionId">> => Sid}
+        case Owner of
+            Sid when is_binary(Sid) -> Base#{<<"sessionId">> => Sid};
+            _ -> Base
         end,
     Base2 =
         case St =:= completed of

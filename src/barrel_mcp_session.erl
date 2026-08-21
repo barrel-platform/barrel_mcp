@@ -199,7 +199,7 @@ get_protocol_version(SessionId) ->
         [{_, #mcp_session{protocol_version = V}}] when is_binary(V) ->
             {ok, V};
         [{_, _}] ->
-            {ok, ?MCP_PROTOCOL_VERSION};
+            {ok, ?MCP_LATEST_LEGACY_VERSION};
         [] ->
             {error, not_found}
     end.

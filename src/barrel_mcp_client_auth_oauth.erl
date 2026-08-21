@@ -10,7 +10,10 @@
 %%%   <li>RFC 8414 — Authorization Server Metadata</li>
 %%%   <li>RFC 7636 — PKCE (S256)</li>
 %%%   <li>RFC 8707 — `resource' indicator on auth + token requests</li>
+%%%   <li>RFC 9207 — issuer identification on the authorization response</li>
 %%%   <li>RFC 6749 / OAuth 2.1 — authorization-code + refresh_token grants</li>
+%%%   <li>draft-ietf-oauth-client-id-metadata-document-00 — an HTTPS
+%%%       URL as the `client_id'</li>
 %%% </ul>
 %%%
 %%% == What this module does ==
@@ -74,7 +77,12 @@
     token_exchange/2,
     jwt_bearer/2,
     register_client/2,
-    register_client/3
+    register_client/3,
+    validate_callback/2,
+    registration_strategy/2,
+    client_id_metadata_document/1,
+    is_client_id_metadata_url/1,
+    check_issuer_binding/2
 ]).
 
 -export_type([config/0, handle/0]).
@@ -368,6 +376,84 @@ build_authorization_url(AuthEndpoint, Params) ->
     Url = iolist_to_binary([AuthEndpoint, $?, urlencode(Q1)]),
     {Url, Verifier, State}.
 
+%% @doc Check an authorization response before redeeming its code.
+%%
+%% `Params' is the query the authorization server sent back to the
+%% redirect URI. `Expected' carries the `state' this client generated,
+%% the `issuer' it recorded when it discovered the authorization
+%% server, and optionally that server's `as_metadata' document.
+%%
+%% `state' must match, which is what ties the response to the request
+%% this client started. `iss' is then checked per RFC 9207, which
+%% exists because a client talking to several authorization servers
+%% can otherwise be handed a code minted by one of them at another's
+%% endpoint and cannot tell:
+%%
+%% <ul>
+%%   <li>present, and the server's
+%%       `authorization_response_iss_parameter_supported' is `true':
+%%       compared</li>
+%%   <li>present, and the server says nothing or `false': compared</li>
+%%   <li>absent, and the server advertises it: rejected</li>
+%%   <li>absent, and the server says nothing or `false': accepted</li>
+%% </ul>
+%%
+%% A present `iss' is compared whatever the metadata says, to
+%% accommodate servers that emit it before advertising it. An absent
+%% one is only fatal when the server said it would send one, which
+%% makes its absence a signal rather than an omission.
+%%
+%% The comparison is exact. RFC 3986 normalisation (case folding,
+%% default-port elision, trailing slash, percent-encoding) must not be
+%% applied first, since each of those turns two distinct issuers into
+%% one.
+%%
+%% Call this for error responses too: on mismatch the `error',
+%% `error_description' and `error_uri' the response carries are not
+%% yours to act on or show, because you cannot tell who wrote them.
+-spec validate_callback(map(), map()) -> ok | {error, term()}.
+validate_callback(Params, Expected) when is_map(Params), is_map(Expected) ->
+    case check_state(Params, Expected) of
+        ok -> check_issuer(Params, Expected);
+        {error, _} = Err -> Err
+    end.
+
+check_state(Params, Expected) ->
+    case {param(<<"state">>, Params), maps:get(state, Expected, undefined)} of
+        {_, undefined} -> {error, no_expected_state};
+        {Same, Same} -> ok;
+        {Got, Want} -> {error, {state_mismatch, Got, Want}}
+    end.
+
+check_issuer(Params, Expected) ->
+    case {param(<<"iss">>, Params), iss_promised(Expected)} of
+        {undefined, true} -> {error, missing_iss};
+        {undefined, _} -> ok;
+        {Issuer, _} -> compare_issuer(Issuer, Expected)
+    end.
+
+compare_issuer(Issuer, Expected) ->
+    case maps:get(issuer, Expected, undefined) of
+        undefined -> {error, no_expected_issuer};
+        Issuer -> ok;
+        Want -> {error, {issuer_mismatch, Issuer, Want}}
+    end.
+
+%% Whether the authorization server's own metadata says it sends `iss'.
+%% Only a literal `true' promises anything; anything else, including
+%% metadata we were not given, leaves absence tolerated.
+iss_promised(#{as_metadata := Md}) when is_map(Md) ->
+    maps:get(<<"authorization_response_iss_parameter_supported">>, Md, false);
+iss_promised(_Expected) ->
+    false.
+
+%% Callback parameters reach us as whatever the host parsed them into.
+param(Key, Params) ->
+    case maps:get(Key, Params, undefined) of
+        undefined -> maps:get(binary_to_atom(Key, utf8), Params, undefined);
+        Value -> Value
+    end.
+
 %% @doc Exchange an authorization code for tokens.
 -spec exchange_code(binary(), map()) ->
     {ok, map()} | {error, term()}.
@@ -563,9 +649,18 @@ jwt_bearer(TokenEndpoint, Params) ->
         maps:get(client_id, Params, undefined)
     ).
 
-%% @doc Dynamic Client Registration ([RFC 7591][rfc7591]). Posts
-%% the supplied client metadata to the AS's `registration_endpoint'
-%% and returns the AS's response unchanged: typically including
+%% @doc Dynamic Client Registration ([RFC 7591][rfc7591]).
+%%
+%% Deprecated by MCP `2026-07-28' in favour of Client ID Metadata
+%% Documents, and kept for authorization servers that do not support
+%% them. It is the only registration mechanism that mints a credential
+%% you then have to store and bind to an issuer. Let
+%% {@link registration_strategy/2} choose rather than reaching for this
+%% directly; see {@link client_id_metadata_document/1}.
+%%
+%% Posts the supplied client metadata to the AS's
+%% `registration_endpoint' and returns the AS's response unchanged:
+%% typically including
 %% `client_id', optionally `client_secret',
 %% `client_id_issued_at', `client_secret_expires_at', plus any
 %% client-metadata echo the AS chose to include.
@@ -599,9 +694,10 @@ register_client(RegistrationEndpoint, Metadata) ->
     }
 ) ->
     {ok, ClientInfo :: map()} | {error, term()}.
-register_client(RegistrationEndpoint, Metadata, Opts) when
-    is_map(Metadata), is_map(Opts)
+register_client(RegistrationEndpoint, Metadata0, Opts) when
+    is_map(Metadata0), is_map(Opts)
 ->
+    Metadata = with_application_type(Metadata0),
     Base = [
         {<<"content-type">>, <<"application/json">>},
         {<<"accept">>, <<"application/json">>}
@@ -638,6 +734,224 @@ register_client(RegistrationEndpoint, Metadata, Opts) when
             {error, {http_error, Status, Resp}};
         {error, _} = Err ->
             Err
+    end.
+
+%% An OIDC authorization server that also does dynamic registration
+%% applies redirect-URI rules by `application_type', and omitting it
+%% defaults to `web', which rejects the loopback URIs a local client
+%% needs. Non-OIDC servers ignore the field, so naming it always is
+%% safe and saves a registration that fails for a reason the error
+%% rarely explains.
+with_application_type(Metadata) ->
+    case maps:is_key(<<"application_type">>, Metadata) of
+        true -> Metadata;
+        false -> Metadata#{<<"application_type">> => infer_application_type(Metadata)}
+    end.
+
+%% A client redirecting to loopback or a private scheme is native by
+%% definition; only one reachable at a remote https URL is a web app.
+infer_application_type(Metadata) ->
+    case maps:get(<<"redirect_uris">>, Metadata, []) of
+        Uris when is_list(Uris), Uris =/= [] ->
+            case lists:all(fun is_web_redirect/1, Uris) of
+                true -> <<"web">>;
+                false -> <<"native">>
+            end;
+        _ ->
+            <<"native">>
+    end.
+
+is_web_redirect(<<"https://localhost", _/binary>>) -> false;
+is_web_redirect(<<"https://127.0.0.1", _/binary>>) -> false;
+is_web_redirect(<<"https://", _/binary>>) -> true;
+is_web_redirect(_Other) -> false.
+
+%%====================================================================
+%% Choosing a registration mechanism
+%%====================================================================
+
+%% @doc Decide how to obtain a `client_id' for an authorization server.
+%%
+%% `AsMetadata' is the document from {@link
+%% discover_authorization_server/1}. `Opts' says what this client
+%% already has:
+%%
+%% ```
+%% #{client_id              => binary(),   %% pre-registered
+%%   client_id_metadata_url => binary()}   %% a CIMD document you host
+%% '''
+%%
+%% The order is the specification's, and the reasons are worth
+%% keeping in mind when overriding it:
+%%
+%% <ol>
+%%   <li>`{pre_registered, ClientId}' when you already have one. It
+%%       names a relationship that exists; nothing discovered can
+%%       improve on that.</li>
+%%   <li>`{client_id_metadata_document, Url}' when the server
+%%       advertises `client_id_metadata_document_supported' and you
+%%       host a document. The `client_id' is the URL itself, so there
+%%       is no credential to store and none to go stale.</li>
+%%   <li>`{dynamic_registration, Endpoint}' when the server offers
+%%       one. Deprecated, kept for servers without CIMD, and the only
+%%       branch that mints a credential you then have to keep.</li>
+%%   <li>`prompt_user' when none of the above applies: the client
+%%       cannot invent an identity, so a person has to supply one.</li>
+%% </ol>
+-spec registration_strategy(map(), map()) ->
+    {pre_registered, binary()}
+    | {client_id_metadata_document, binary()}
+    | {dynamic_registration, binary()}
+    | prompt_user.
+registration_strategy(AsMetadata, Opts) when is_map(AsMetadata), is_map(Opts) ->
+    Cimd = maps:get(client_id_metadata_url, Opts, undefined),
+    case maps:get(client_id, Opts, undefined) of
+        ClientId when is_binary(ClientId), ClientId =/= <<>> ->
+            {pre_registered, ClientId};
+        _ when is_binary(Cimd), Cimd =/= <<>> ->
+            case maps:get(<<"client_id_metadata_document_supported">>, AsMetadata, false) of
+                true -> {client_id_metadata_document, Cimd};
+                _ -> fallback_strategy(AsMetadata)
+            end;
+        _ ->
+            fallback_strategy(AsMetadata)
+    end.
+
+fallback_strategy(AsMetadata) ->
+    case maps:get(<<"registration_endpoint">>, AsMetadata, undefined) of
+        Endpoint when is_binary(Endpoint), Endpoint =/= <<>> ->
+            {dynamic_registration, Endpoint};
+        _ ->
+            prompt_user
+    end.
+
+%%====================================================================
+%% Client ID Metadata Documents
+%%====================================================================
+
+%% @doc Build the metadata document a client serves at its own
+%% `client_id' URL.
+%%
+%% With CIMD the `client_id' is an HTTPS URL, and the authorization
+%% server fetches this document from it at authorization time. That
+%% removes the registration round trip, and with it the credential a
+%% client would otherwise have to store per authorization server: the
+%% same URL works everywhere, because whoever needs the metadata goes
+%% and reads it.
+%%
+%% `Metadata' is binary-keyed, like {@link register_client/2}, and
+%% must carry `client_id', `client_name' and `redirect_uris'. The
+%% `client_id' must be the exact URL you serve the document from,
+%% https, with a path: servers compare the two and reject a document
+%% that names a different identity than the one they fetched.
+%%
+%% `grant_types', `response_types' and `token_endpoint_auth_method'
+%% default to the public-client-with-PKCE shape. Set them yourself for
+%% anything else, including `refresh_token' in `grant_types' if you
+%% want refresh tokens.
+-spec client_id_metadata_document(map()) -> {ok, map()} | {error, term()}.
+client_id_metadata_document(Metadata) when is_map(Metadata) ->
+    case validate_cimd(Metadata) of
+        ok ->
+            {ok, maps:merge(cimd_defaults(), Metadata)};
+        {error, _} = Err ->
+            Err
+    end.
+
+cimd_defaults() ->
+    #{
+        <<"grant_types">> => [<<"authorization_code">>],
+        <<"response_types">> => [<<"code">>],
+        <<"token_endpoint_auth_method">> => <<"none">>
+    }.
+
+validate_cimd(Metadata) ->
+    case maps:get(<<"client_id">>, Metadata, undefined) of
+        ClientId when is_binary(ClientId) ->
+            case is_client_id_metadata_url(ClientId) of
+                true -> validate_cimd_rest(Metadata);
+                false -> {error, {invalid_client_id, ClientId}}
+            end;
+        _ ->
+            {error, {missing, <<"client_id">>}}
+    end.
+
+validate_cimd_rest(Metadata) ->
+    case maps:get(<<"client_name">>, Metadata, undefined) of
+        Name when is_binary(Name), Name =/= <<>> ->
+            validate_cimd_redirects(Metadata);
+        _ ->
+            {error, {missing, <<"client_name">>}}
+    end.
+
+validate_cimd_redirects(Metadata) ->
+    case maps:get(<<"redirect_uris">>, Metadata, undefined) of
+        Uris when is_list(Uris), Uris =/= [] ->
+            case lists:all(fun(U) -> is_binary(U) andalso U =/= <<>> end, Uris) of
+                true -> ok;
+                false -> {error, {invalid, <<"redirect_uris">>}}
+            end;
+        _ ->
+            {error, {missing, <<"redirect_uris">>}}
+    end.
+
+%% @doc Whether a `client_id' is a Client ID Metadata Document URL.
+%%
+%% Https with a path. The path is what the draft requires and what
+%% keeps a bare origin from being read as an identity.
+-spec is_client_id_metadata_url(term()) -> boolean().
+is_client_id_metadata_url(<<"https://", Rest/binary>>) when Rest =/= <<>> ->
+    case binary:split(Rest, <<"/">>) of
+        [Authority, Path] -> Authority =/= <<>> andalso Path =/= <<>>;
+        [_Authority] -> false
+    end;
+is_client_id_metadata_url(_Other) ->
+    false.
+
+%%====================================================================
+%% Authorization server binding
+%%====================================================================
+
+%% @doc Check credentials against the authorization server about to be
+%% used.
+%%
+%% A `client_id' from pre-registration or dynamic registration belongs
+%% to the server that issued it and means nothing at another. The
+%% server can change under a client without warning, since it comes
+%% from the resource's metadata and that is refetched; sending the old
+%% credentials to the new one leaks a client identity to a party that
+%% was never given it, and fails in a way that reads like a bad token.
+%%
+%% `Credentials' is whatever you persisted, and must record the
+%% `issuer' it was obtained from, binary- or atom-keyed. `Issuer' is
+%% the one from the metadata you are about to use.
+%%
+%% A CIMD `client_id' passes against any issuer: it is a URL the
+%% server resolves itself, so it is not bound to one and needs no
+%% re-registration when the server changes.
+-spec check_issuer_binding(map(), binary()) -> ok | {error, term()}.
+check_issuer_binding(Credentials, Issuer) when is_map(Credentials), is_binary(Issuer) ->
+    case cred(client_id, Credentials) of
+        ClientId when is_binary(ClientId) ->
+            case is_client_id_metadata_url(ClientId) of
+                true -> ok;
+                false -> compare_binding(Credentials, Issuer)
+            end;
+        _ ->
+            compare_binding(Credentials, Issuer)
+    end.
+
+compare_binding(Credentials, Issuer) ->
+    case cred(issuer, Credentials) of
+        undefined -> {error, unbound_credentials};
+        Issuer -> ok;
+        Other -> {error, {issuer_changed, Other, Issuer}}
+    end.
+
+cred(Key, Credentials) ->
+    case maps:get(Key, Credentials, undefined) of
+        undefined -> maps:get(atom_to_binary(Key, utf8), Credentials, undefined);
+        Value -> Value
     end.
 
 %%====================================================================

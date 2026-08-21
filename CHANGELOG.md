@@ -7,6 +7,149 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-08-15
+
+MCP `2026-07-28` support. That revision is a stateless rewrite: no
+`initialize` handshake, no session id, no server-initiated requests.
+It keeps `2025-11-25` and earlier valid as the "legacy" era, and this
+release serves both on one endpoint, decided per request rather than
+per deployment.
+
+### Upgrading from 2.3.0
+
+Nothing to do. No legacy code path was removed or rewritten, no option
+gates the new era, and the default client behaviour still reaches a
+handshake-era server. Read on only if one of these applies to you:
+
+- **Your server calls back into a client** through
+  `sampling_create_message/3`, `elicit_create/3` or `roots_list/1,2`.
+  Those need a session to send the request down, and a modern
+  connection has none, so `list_sessions_with_*` comes back empty
+  against a client that probed into the modern era. Either pin that
+  client to `<<"2025-11-25">>`, or port the handler to
+  `{input_required, _, _}`, which works in both eras. This is the one
+  change that can bite a host that touched nothing: the client
+  `protocol_version` default is now `auto`.
+- **You pinned `protocol_version` on a client.** Pinning still works and
+  `<<"2025-11-25">>` reproduces 2.3.0 exactly. `auto` probes
+  `server/discover` and falls back to the handshake.
+- **You run more than one node and want multi round-trip requests.**
+  Set `request_state_key`. Without it each node signs with its own
+  ephemeral key, so a retry landing elsewhere is rejected. A warning is
+  logged at start.
+- **You read `application:get_env(barrel_mcp, protocol_version)`.** It
+  was never used by the library and is gone.
+- **You subscribe over stdio.** `barrel_mcp_client:subscribe/2` returns
+  `{error, {unsupported, <<"subscriptions/listen">>}}` on a modern stdio
+  connection, which has no second channel to hold a stream open. Legacy
+  stdio is unaffected.
+
+Embedders driving `barrel_mcp_http_engine:handle/6` from their own HTTP
+stack need no change: `mode => stream` already declares the transport can
+hold a response open, which is what `subscriptions/listen` requires.
+
+### Added
+
+- Serve and speak every revision from `2024-11-05` to `2026-07-28`. A
+  request is modern when its `params._meta` carries
+  `io.modelcontextprotocol/protocolVersion`. New guide:
+  `guides/protocol-versions.md`.
+- `server/discover`, answered in both eras so it doubles as the stdio
+  probe target.
+- `subscriptions/listen`: a long-lived POST stream replacing the GET
+  SSE stream and `resources/subscribe` for modern clients.
+  `barrel_mcp:notify_list_changed/1` and `notify_resource_updated/2`
+  keep their signatures and fan out to both eras.
+- Multi round-trip requests. A tool returns
+  `{input_required, Requests, State}` instead of blocking on a
+  server-to-client call; read the answers with `barrel_mcp:input/2` and
+  `request_state/1`, and check `client_supports/2` before asking.
+  `State` is sealed with HMAC-SHA256 and bound to the principal, method
+  and salient params (`barrel_mcp_request_state`).
+- Request metadata headers `Mcp-Method`, `Mcp-Name` and
+  `Mcp-Param-{Name}`, with `=?base64?...?=` for values that are not
+  header-safe. Tools opt arguments in with `x-mcp-header` in their
+  `inputSchema`, validated at registration.
+- Tasks extension `io.modelcontextprotocol/tasks`: `resultType: "task"`,
+  `tasks/get` polling, `tasks/update`. A modern client that did not
+  declare it gets a synchronous run rather than a task id it could not
+  poll.
+- Freshness hints (`ttlMs`, `cacheScope`) on cacheable results.
+- Resource and prompt handlers may be arity 2. The second argument is
+  the request context, so `prompts/get` and `resources/read` can return
+  `{input_required, _, _}` like a tool.
+- Error codes `-32020` HeaderMismatch, `-32021`
+  MissingRequiredClientCapability, `-32022` UnsupportedProtocolVersion.
+  `advertise_versions` (`modern` by default, or `all`) decides what
+  `-32022` offers a client to retry with.
+- Client: `protocol_version => auto` (the new default) probes and falls
+  back; `probe_timeout` and `max_input_rounds` join the connect spec.
+  `subscribe/2` and `unsubscribe/2` keep their signatures over
+  `subscriptions/listen`.
+- `barrel_mcp_version` for comparing revisions. Nothing else in the
+  library orders version binaries; neither should your code.
+- OAuth: `validate_callback/2` (RFC 9207 `iss` and `state`),
+  `registration_strategy/2`, `client_id_metadata_document/1` and
+  `check_issuer_binding/2`. Dynamic registration now always sends
+  `application_type`.
+- Interop tests against the reference Python SDK v2 in both directions:
+  the discovery probe, result stamping and freshness hints, multi
+  round-trip requests on all three verbs and in both directions,
+  `subscriptions/listen`, `x-mcp-header` mirroring, and the
+  capability and retry-round refusals.
+
+### Fixed
+
+Bugs found while building this, all present in 2.3.0:
+
+- `subscriptions/listen` crashed stdio and the plain HTTP transport.
+  Both were handed a stream handle they cannot serve and passed it to
+  the JSON encoder; on stdio that took the server down, and reaching it
+  needed no authentication.
+- The client abandoned a modern server on `-32022`, falling back to a
+  handshake that server does not have and discarding the revisions it
+  offered. It now retries once with one of them.
+- HTTP listeners were not supervised: a crashed acceptor pool stayed
+  down, and stopping the application left the port held.
+- Orphaned stream handlers. A monitored-but-unlinked handler outlived
+  its owner.
+- `stdio` ignored `long_running`, driving every tool synchronously and
+  blocking up to 60 seconds. The decision moved into the protocol, so
+  both transports honour it.
+- The client treated any 4xx as a dead connection, discarding a
+  JSON-RPC error body it could have surfaced.
+- A long-running tool whose worker died without reporting left its task
+  `working` forever, with the collector blocked on a message that never
+  came. The sweep did not evict it, since a task that legitimately runs
+  for hours looks the same.
+- `-32002` was used for prompt handler crashes. It has meant "resource
+  not found" since `2024-11-05`; crashes are now `-32603`. `resources/read`
+  and `prompts/get` not-found also returned `-32601`.
+- `_meta` was emitted beside `result` on the JSON-RPC envelope. The
+  schema declares it a field of `Result`, where a conforming client
+  looks for it.
+
+### Changed
+
+- `barrel_mcp_tasks` is keyed by task id, with the owner as a field. A
+  legacy task belongs to its session; a modern one has no session, so it
+  belongs to the authenticated principal.
+- The `protocol_version` application env is removed. It was never read.
+
+### Deprecated
+
+Deprecated by the specification, still served for legacy clients, and
+not scheduled for removal:
+
+- Sampling, elicitation and roots as server-to-client requests
+  (`barrel_mcp:sampling_create_message/3`, `elicit_create/3`,
+  `roots_list/1,2`). Modern servers use `{input_required, _, _}`.
+- Logging (`barrel_mcp:notify_log/3,4`, `logging/setLevel`). Modern
+  clients opt in per request through `_meta`.
+- Dynamic Client Registration
+  (`barrel_mcp_client_auth_oauth:register_client/2,3`), in favour of
+  Client ID Metadata Documents.
+
 ## [2.3.0] - 2026-07-17
 
 ### Added

@@ -42,6 +42,13 @@ run(Port) ->
     Url = iolist_to_binary(io_lib:format("http://127.0.0.1:~B/mcp", [Port])),
     {ok, Client} = barrel_mcp_client:start(#{
         transport => {http, Url},
+        %% Sampling as a server-to-client request needs a session to
+        %% send down, and 2026-07-28 has none: a modern server answers
+        %% the call with what it needs and the client retries. This
+        %% example demonstrates the handshake-era shape, so it pins that
+        %% era rather than letting `auto' probe past it. See
+        %% `guides/tools-resources-prompts.md' for the modern form.
+        protocol_version => <<"2025-11-25">>,
         capabilities => #{sampling => true},
         handler => {?MODULE, #{reply => <<"a canned reply">>}}
     }),

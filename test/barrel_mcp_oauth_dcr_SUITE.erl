@@ -29,7 +29,8 @@
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([
     dcr_then_client_credentials_unlocks_server/1,
-    registration_error_surfaces/1
+    registration_error_surfaces/1,
+    registration_names_an_application_type/1
 ]).
 
 -export([echo_tool/1]).
@@ -42,7 +43,8 @@
 all() ->
     [
         dcr_then_client_credentials_unlocks_server,
-        registration_error_surfaces
+        registration_error_surfaces,
+        registration_names_an_application_type
     ].
 
 init_per_suite(Config) ->
@@ -183,12 +185,62 @@ registration_error_surfaces(_Config) ->
 
 echo_tool(#{<<"text">> := T}) -> T.
 
+%% An OIDC server doing dynamic registration applies redirect-URI
+%% rules by application_type, and omitting it defaults to web, which
+%% rejects the loopback URIs a local client needs. So it is always
+%% sent, inferred from the redirect URIs when the caller says nothing.
+registration_names_an_application_type(_Config) ->
+    AsBase = list_to_binary(io_lib:format("http://127.0.0.1:~B", [?AS_PORT])),
+    Endpoint = <<AsBase/binary, "/oauth/register">>,
+
+    {ok, _} = barrel_mcp_client_auth_oauth:register_client(Endpoint, #{
+        <<"client_name">> => <<"local-cli">>,
+        <<"redirect_uris">> => [<<"http://127.0.0.1:3000/callback">>]
+    }),
+    ?assertEqual(
+        <<"native">>,
+        maps:get(<<"application_type">>, persistent_term:get(dcr_last_registration))
+    ),
+
+    {ok, _} = barrel_mcp_client_auth_oauth:register_client(Endpoint, #{
+        <<"client_name">> => <<"hosted">>,
+        <<"redirect_uris">> => [<<"https://app.example/callback">>]
+    }),
+    ?assertEqual(
+        <<"web">>,
+        maps:get(<<"application_type">>, persistent_term:get(dcr_last_registration))
+    ),
+
+    %% An https loopback URI is still a local client.
+    {ok, _} = barrel_mcp_client_auth_oauth:register_client(Endpoint, #{
+        <<"client_name">> => <<"tls-loopback">>,
+        <<"redirect_uris">> => [<<"https://localhost:3000/callback">>]
+    }),
+    ?assertEqual(
+        <<"native">>,
+        maps:get(<<"application_type">>, persistent_term:get(dcr_last_registration))
+    ),
+
+    %% A caller that knows better is never overridden.
+    {ok, _} = barrel_mcp_client_auth_oauth:register_client(Endpoint, #{
+        <<"client_name">> => <<"explicit">>,
+        <<"redirect_uris">> => [<<"http://127.0.0.1:3000/callback">>],
+        <<"application_type">> => <<"web">>
+    }),
+    ?assertEqual(
+        <<"web">>,
+        maps:get(<<"application_type">>, persistent_term:get(dcr_last_registration))
+    ),
+    ok.
+
 %%====================================================================
 %% Mock: registration + token endpoints
 %%====================================================================
 
 handle(#{path := <<"/oauth/register">>, body := Body}) ->
     Metadata = json:decode(Body),
+    %% Echoed back so a test can see what the client actually sent.
+    _ = persistent_term:put(dcr_last_registration, Metadata),
     case maps:get(<<"client_name">>, Metadata, <<>>) of
         <<"reject-me">> ->
             {400, json_ct(), json_encode(#{<<"error">> => <<"invalid_redirect_uri">>})};

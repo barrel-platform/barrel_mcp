@@ -134,6 +134,10 @@ start_client() ->
     Spec = #{
         transport => {http, ?URL},
         capabilities => #{},
+        %% These cases exercise the handshake era: version downgrade,
+        %% ping, tasks/list. Pinned so the default probe does not move
+        %% them onto a revision where those do not exist.
+        protocol_version => <<"2025-11-25">>,
         handler => {barrel_mcp_client_handler_default, []}
     },
     {ok, Pid} = barrel_mcp_client:start(Spec),

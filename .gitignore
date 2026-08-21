@@ -9,6 +9,7 @@ examples/*/_checkouts/
 
 # Python interop venv created by `make interop-setup'
 test/interop/.venv/
+test/interop/.venv-modern/
 test/interop/__pycache__/
 
 # Claude Code scratch
@@ -16,6 +17,10 @@ test/interop/__pycache__/
 
 # Rebar3
 rebar3.crashdump
+erl_crash.dump
+
+# Runtime state written by a dev shell.
+data/
 
 # IDE/Editor
 .idea/

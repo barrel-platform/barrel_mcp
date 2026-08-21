@@ -75,11 +75,13 @@ Every key is documented below.
 | Key | Type | Default | Effect |
 | --- | --- | --- | --- |
 | `transport` | `{http, Url}` \| `{stdio, #{command, args}}` | required | Which transport to open. |
-| `client_info` | `#{name, version}` | `#{name => <<"barrel_mcp_client">>, version => <<"2.2.0">>}` | Sent in `initialize`. |
+| `client_info` | `#{name, version}` | `#{name => <<"barrel_mcp_client">>, version => <<"3.0.0">>}` | Sent in `initialize`, and in modern `_meta`. |
 | `capabilities` | map | `#{}` | Client capabilities to declare. Booleans become spec-shape objects on the wire (e.g. `#{sampling => true}` becomes `#{<<"sampling">> => #{}}`). |
 | `handler` | `{Mod, Args}` | `{barrel_mcp_client_handler_default, []}` | Module implementing `barrel_mcp_client_handler` to handle server-initiated requests and notifications. |
 | `auth` | `none` \| `{bearer, Token}` \| `{oauth, Config}` | `none` | Authentication. See section 14. |
-| `protocol_version` | binary | `?MCP_CLIENT_PROTOCOL_VERSION` (`<<"2025-11-25">>`) | Target protocol version. The client negotiates downward if the server reports an older one. |
+| `protocol_version` | `auto` \| binary | `auto` | Which revision to speak. `auto` probes with `server/discover` and falls back to the `initialize` handshake. Pin a binary to skip the probe. See section 5. |
+| `probe_timeout` | pos_integer | `5000` | How long `auto` waits for the probe before deciding the server is a handshake-era one. Unused when pinned. |
+| `max_input_rounds` | pos_integer | `5` | How many times a request may be re-issued to satisfy a server's input requests before the client gives up. See section 10. |
 | `request_timeout` | pos_integer | `30000` | Default per-request timeout in ms. |
 | `init_timeout` | pos_integer | `30000` | Time allowed for the `initialize` round-trip. |
 | `ping_interval` | pos_integer \| `infinity` | `infinity` | If set, the client sends `ping` every N ms while in `ready`. |
@@ -118,7 +120,58 @@ wait_ready(Pid, N) ->
 
 ---
 
-## 5. Capability negotiation and version downgrade
+## 5. Protocol era, capabilities, and version
+
+MCP has two eras and the client speaks both. Legacy revisions
+(`2025-11-25` and earlier) open with an `initialize` handshake; modern
+ones (`2026-07-28`) have no handshake and put the protocol version,
+capabilities and identity in every request's `_meta`. The
+[Protocol Versions guide](protocol-versions.md) covers the model.
+
+`protocol_version` decides which:
+
+```erlang
+%% Default. Probe with server/discover, fall back to initialize.
+#{protocol_version => auto, probe_timeout => 5000}
+
+%% Modern only. No probe.
+#{protocol_version => <<"2026-07-28">>}
+
+%% Legacy only. Straight to the handshake, byte-identical to 2.3.0.
+#{protocol_version => <<"2025-11-25">>}
+```
+
+Under `auto` the client sends `server/discover` on either transport. A
+`DiscoverResult` means modern. A `-32022` also means modern, since the
+server understood the probe, so the client retries with a revision from
+`data.supported` rather than falling back to a handshake that server may
+not have. That retry happens once: a server rejecting the revision it
+just advertised has nothing left to offer. Anything else, an offer with
+no revision in common, or silence past `probe_timeout`, falls back to
+the handshake.
+
+Pin a revision when you know the server. The probe costs a round trip
+against a legacy one.
+
+Read back what was settled:
+
+```erlang
+{ok, Version} = barrel_mcp_client:protocol_version(Pid).
+```
+
+Methods that a revision removed are answered locally rather than sent
+and rejected:
+
+```erlang
+{error, {unsupported, <<"ping">>}} = barrel_mcp_client:ping(Pid).
+```
+
+That covers `ping/1`, `set_log_level/2`, `tasks_list/1` and
+`tasks_result/2` in modern mode, and `subscriptions/listen` in legacy
+mode. `subscribe/2` and `unsubscribe/2` keep working in both, over
+whichever mechanism the era provides. Ping keepalive turns itself off in
+modern mode, so a configured `ping_interval` is ignored rather than
+producing method-not-found on a timer.
 
 The client declares what it can answer (sampling, roots, elicitation)
 and the server replies with what it can serve (tools, resources,
@@ -293,6 +346,13 @@ The subscription stays in the client's state until you call
 identified by their pid; multiple processes can subscribe to the same
 URI on the same client.
 
+The mechanism underneath differs by era and the API does not. In legacy
+mode this is `resources/subscribe` plus the session's GET stream. In
+modern mode there is no such method: the client keeps one
+`subscriptions/listen` stream open and re-opens it with a new filter as
+you subscribe and unsubscribe. Either way you get
+`{mcp_resource_updated, Uri, Params}`.
+
 ---
 
 ### Logging
@@ -409,6 +469,31 @@ The `sampling_host` example in
 [`examples/sampling_host/src/sampling_host.erl`](https://github.com/barrel-platform/barrel_mcp/tree/main/examples/sampling_host/src/sampling_host.erl)
 shows the full server-to-client round-trip end to end.
 
+### The same handler in modern mode
+
+`2026-07-28` removed server-to-client requests. A server that needs
+something answers the call with what it needs instead, and the client
+re-issues the call carrying the answers. This is a multi round-trip
+request (MRTR).
+
+**Your handler does not change.** The client invokes it from the retry
+loop rather than from an inbound request, with the same methods, the
+same arguments and the same three return shapes, `{async, Tag, State}`
+included. One `call_tool/3` still looks like one call to your code;
+underneath it is two requests with different ids.
+
+What does change:
+
+- `notify_roots_list_changed/1` is dropped, Roots having gone with the
+  rest. It stays callable so the same code compiles.
+- Rounds are bounded by `max_input_rounds` (default 5). A server that
+  keeps asking gets an error rather than an unbounded exchange.
+- The whole exchange shares the original call's deadline. Retries do not
+  each get a fresh `request_timeout`.
+- A server must not ask for a capability you did not declare, so declare
+  what your handler answers. Ours refuses to send such a request
+  (`-32021`) rather than let a handler be surprised.
+
 ---
 
 ## 11. Asynchronous handler replies
@@ -489,6 +574,22 @@ subscribing to `notifications/tasks/status` in the handler over
 busy-polling `tasks_get/2`, then fetch the payload once with
 `tasks_result/2` when the status reaches `completed`.
 
+In modern mode tasks are an extension. Declare it to be given task
+handles at all:
+
+```erl
+%% Spec snippet: a key on barrel_mcp_client:start_link/1's input map.
+#{capabilities => #{<<"extensions">> =>
+                      #{<<"io.modelcontextprotocol/tasks">> => #{}}}}
+```
+
+Without it a `long_running` tool runs synchronously and you get its
+result, rather than a task id you would not know how to poll. The method
+set also shifts: `tasks_list/1` and `tasks_result/2` are legacy and
+answer `{error, {unsupported, _}}`, `tasks_update/3` is modern, and
+`tasks_get/2` and `tasks_cancel/2` work in both. Poll `tasks_get/2` and
+read the result off the task.
+
 ---
 
 ## 13. Cancel, time out, ping
@@ -513,6 +614,11 @@ Periodic ping is opt-in:
 
 After three consecutive ping failures (default), the connection
 closes with reason `ping_failed` and the linked owner sees the exit.
+
+`2026-07-28` removed `ping`, so in modern mode the cadence turns itself
+off however you configure it, and `ping/1` answers
+`{error, {unsupported, <<"ping">>}}` rather than being sent. Use a cheap
+real request if you need a liveness check there.
 
 ---
 
@@ -572,8 +678,22 @@ first_request_returns_401(_) ->
                    <<"Bearer resource_metadata=\"https://srv/.well-known/oauth-protected-resource\"">>}]}.
 ```
 
-After the user authorizes and you capture the `code` from the
-redirect, exchange it:
+Record the `state` and the AS `issuer` alongside the verifier. When the
+redirect comes back, check them **before** sending the code anywhere:
+
+```erl
+ok = barrel_mcp_client_auth_oauth:validate_callback(
+       QueryParams,
+       #{state => State, issuer => Issuer, as_metadata => AS}).
+```
+
+Without this a client talking to more than one authorization server can
+be handed a code minted by one of them at another's endpoint and cannot
+tell. Check error responses the same way: on a mismatch the `error` and
+`error_description` are not yours to act on or display, because you
+cannot tell who wrote them.
+
+Then exchange the code:
 
 ```erl
 {ok, Tokens} = barrel_mcp_client_auth_oauth:exchange_code(
@@ -586,6 +706,10 @@ redirect, exchange it:
 ```
 
 Then start the client with the tokens above.
+
+Where the `client_id` comes from is its own decision, and dynamic
+registration is no longer the default answer. See
+[Client registration](authentication.md#client-registration).
 
 ---
 
@@ -636,13 +760,25 @@ catalogue to an LLM.
 
 | Return | Cause |
 | --- | --- |
-| `{error, not_ready}` | Call made before the `initialize` handshake completed. Wait for `ready`. |
-| `{error, {unsupported, Method}}` | Server didn't advertise the capability the call requires. |
+| `{error, not_ready}` | Call made before the connection settled (a handshake or a probe). Wait for `ready`. |
+| `{error, {unsupported, Method}}` | Server didn't advertise the capability the call requires, or the negotiated revision does not have the method. |
 | `{error, {Code, Message}}` | Server returned a JSON-RPC error. |
 | `{error, cancelled}` | Caller invoked `cancel/2`. |
-| `{error, timeout}` | The per-request timeout fired. |
+| `{error, timeout}` | The per-request timeout fired. Under MRTR this is the deadline for the whole exchange, not per round. |
+| `{error, {too_many_input_rounds, Max}}` | The server kept asking for input past `max_input_rounds`. |
+| `{error, {input_failed, Code, Message}}` | Your handler returned an error for one of the server's input requests. |
 | `{error, unauthorized}` | 401 with no usable refresh path. |
 | `{error, {protocol_version, Server, Supported}}` | Server's version is outside the client's supported list. Init failed. |
+
+Errors that arrive as `{error, {Code, Message}}` and are worth matching
+on: `-32020` (a request's headers disagreed with its body; the tool's
+annotations changed, so re-fetch `tools/list` and retry once), `-32021`
+(the server needs a capability you did not declare) and `-32022` (the
+revision you named is not served).
+
+Start-up failures stop the process rather than returning: `{probe_failed,
+Why}` when a pinned modern connection could not be established, and
+`{init_failed, _}` when the handshake was refused.
 
 ---
 

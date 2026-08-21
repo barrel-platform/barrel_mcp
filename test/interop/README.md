@@ -1,34 +1,66 @@
 # Python interop tests
 
-Smoke-tests `barrel_mcp` against the official MCP Python SDK
-(`pip install mcp`) in both directions:
+Smoke-tests `barrel_mcp` against the official MCP Python SDK in both
+directions and both protocol eras.
 
-- **Direction A** — Python client → Erlang server. The Erlang
-  side stands up a Streamable HTTP listener; `client.py`
-  connects, lists / calls the registered tool, reads a
-  resource, lists prompts, sets the log level.
-- **Direction B** — Erlang client → Python server. `server.py`
-  runs `FastMCP` over stdio with one `echo` tool;
-  `barrel_mcp_client` spawns it and round-trips a `tools/call`.
+The two SDK generations need separate virtualenvs. v1 speaks the
+handshake era, v2 speaks `2026-07-28` and replaced `FastMCP` with
+`MCPServer`, so neither interpreter can run the other's scripts.
 
-The corresponding CT cases in
-`test/barrel_mcp_python_interop_SUITE` skip when no Python
-interpreter is available, so the default `rebar3 ct` keeps
-working without Python on the path.
+| venv | SDK | Era | Scripts |
+|---|---|---|---|
+| `.venv` | `mcp ~= 1.27.0` | handshake (`2025-11-25`) | `client.py`, `server.py` |
+| `.venv-modern` | `mcp == 2.0.0` | modern (`2026-07-28`) | `client_modern.py`, `server_modern.py` |
+
+- **Direction A**: Python client → Erlang server. The Erlang
+  side stands up a Streamable HTTP listener; the client connects,
+  lists / calls the registered tool, reads a resource, lists prompts.
+  The handshake-era script also sets the log level and drives
+  sampling, elicitation and roots. The modern one additionally covers:
+  - the `server/discover` probe and the `_meta` serverInfo stamp
+  - `resultType` on every result and the freshness hints on a
+    cacheable one
+  - multi round-trip requests on `tools/call`, `prompts/get` and
+    `resources/read`
+  - `-32021` when the server asks for a capability the client never
+    declared, and the client's own cap on retry rounds
+  - `subscriptions/listen`: the acknowledged filter, a resource update
+    arriving on the stream, and no delivery of a type nobody asked for
+  - `x-mcp-header` mirroring, including values that need the base64
+    sentinel. The server rejects a header that disagrees with the body,
+    so a call that succeeds is the assertion.
+- **Direction B**: Erlang client → Python server over stdio.
+  `barrel_mcp_client` spawns the script and round-trips a
+  `tools/call`. The handshake-era case leaves `protocol_version`
+  unset, so it also covers the probe falling back against an SDK that
+  has never heard of `server/discover`. The modern cases add the probe
+  landing on `2026-07-28` over stdio, and a multi round-trip request
+  the reference implementation produced, so our client's retry loop is
+  driven by an envelope it had no hand in building.
+
+The corresponding CT cases skip when their interpreter is not
+configured, so the default `rebar3 ct` keeps working without Python.
 
 ## Run locally
 
 ```sh
-make interop-setup   # creates .venv and installs mcp
-make interop-test    # runs both directions
+make interop-setup   # creates both venvs
+make interop-test    # runs all four cases
 ```
 
-`interop-setup` lives at `test/interop/.venv/`; remove that
-directory if you need to re-create it.
+The venvs live at `test/interop/.venv/` and
+`test/interop/.venv-modern/`; remove a directory if you need to
+re-create it.
+
+## Expected output
+
+The handshake-era direction B logs a validation error from the Python
+server: our client probes `server/discover` and that SDK does not know
+the method. That is the fallback working, not a failure.
 
 ## CI
 
-The `interop` job in `.github/workflows/ci.yml` runs both
-cases on Linux with Python 3.12 + OTP 28. We pin
-`mcp ~= 1.27.0` (PEP 440 compatible release) for reproducibility;
-bump it intentionally when validating against a newer SDK.
+The `interop` job in `.github/workflows/ci.yml` runs all four cases on
+Linux with Python 3.12 + OTP 28. Both SDK versions are pinned for
+reproducibility; bump them intentionally when validating against a
+newer SDK.

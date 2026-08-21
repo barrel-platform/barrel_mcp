@@ -29,11 +29,15 @@
 -behaviour(gen_server).
 -behaviour(barrel_mcp_client_transport).
 
+-include("barrel_mcp.hrl").
+
 %% Transport API
 -export([connect/2, send/2, close/1]).
 
 %% Public helpers
 -export([set_session_id/2, set_protocol_version/2, open_event_stream/1]).
+-export([open_subscription/2, close_subscription/1]).
+-export([set_tool_headers/2]).
 
 %% gen_server callbacks
 -export([
@@ -74,7 +78,16 @@
     sse_ref :: pid() | undefined,
     sse_buffer = <<>> :: binary(),
     sse_last_event_id :: binary() | undefined,
-    sse_enabled = false :: boolean()
+    sse_enabled = false :: boolean(),
+    %% How the long-lived stream is opened. Legacy servers hand it out
+    %% on a GET; 2026-07-28 removed that endpoint, so a modern one
+    %% delivers the same traffic on the response to a
+    %% `subscriptions/listen' POST.
+    sse_mode = get :: get | {post, binary()},
+    %% Per-tool `x-mcp-header' bindings, learned from `tools/list'.
+    %% Held here rather than passed per send: the headers are derived
+    %% from the body about to go out, and this is where that happens.
+    tool_headers = #{} :: #{binary() => [barrel_mcp_headers:param_binding()]}
 }).
 
 %%====================================================================
@@ -108,6 +121,28 @@ set_protocol_version(Pid, Version) when is_binary(Version) ->
 %% Idempotent: a second call while the stream is open is a no-op.
 open_event_stream(Pid) ->
     gen_server:cast(Pid, open_event_stream).
+
+%% @doc Open (or replace) the long-lived stream as a
+%% `subscriptions/listen' POST carrying `Body'.
+%%
+%% Replacing rather than adding: one stream whose filter covers
+%% everything subscribed is simpler to reason about than several, and
+%% the spec's multiple-subscription support is not needed to express
+%% it.
+-spec open_subscription(pid(), binary()) -> ok.
+open_subscription(Pid, Body) when is_binary(Body) ->
+    gen_server:cast(Pid, {open_subscription, Body}).
+
+%% @doc Close the long-lived stream and stop reopening it.
+-spec close_subscription(pid()) -> ok.
+close_subscription(Pid) ->
+    gen_server:cast(Pid, close_subscription).
+
+%% @doc Record which tool arguments each tool wants mirrored into
+%% headers, as learned from `tools/list'.
+-spec set_tool_headers(pid(), map()) -> ok.
+set_tool_headers(Pid, Bindings) when is_map(Bindings) ->
+    gen_server:cast(Pid, {set_tool_headers, Bindings}).
 
 %%====================================================================
 %% gen_server
@@ -146,10 +181,21 @@ handle_cast({set_session_id, SessionId}, State) ->
     {noreply, State#state{session_id = SessionId}};
 handle_cast({set_protocol_version, Version}, State) ->
     {noreply, State#state{protocol_version = Version}};
+handle_cast({set_tool_headers, Bindings}, State) ->
+    {noreply, State#state{tool_headers = Bindings}};
+handle_cast({open_subscription, Body}, State) ->
+    State1 = stop_stream(State),
+    {noreply,
+        start_stream(State1#state{
+            sse_enabled = true,
+            sse_mode = {post, Body}
+        })};
+handle_cast(close_subscription, State) ->
+    {noreply, (stop_stream(State))#state{sse_enabled = false, sse_mode = get}};
 handle_cast(open_event_stream, #state{sse_ref = Ref} = State) when is_pid(Ref) ->
     {noreply, State};
 handle_cast(open_event_stream, State) ->
-    {noreply, start_get_sse(State)};
+    {noreply, start_stream(State)};
 handle_cast(close, State) ->
     _ = send_delete(State),
     {stop, normal, State};
@@ -245,7 +291,7 @@ handle_info(
             {noreply, State}
     end;
 handle_info(reopen_sse, #state{sse_enabled = true, sse_ref = undefined} = State) ->
-    {noreply, start_get_sse(State)};
+    {noreply, start_stream(State)};
 handle_info(_Msg, State) ->
     {noreply, State}.
 
@@ -262,7 +308,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%====================================================================
 
 start_post(Body, Retried, State) ->
-    Headers = build_headers(State),
+    Headers = build_headers(State) ++ metadata_headers(Body, State#state.tool_headers),
     case
         hackney:request(
             post,
@@ -321,34 +367,68 @@ finalize_request(
             ok
     end,
     State#state{requests = maps:remove(Ref, Reqs)};
+%% A 4xx is not necessarily a transport failure. The 2026-07-28 binding
+%% pins several ordinary JSON-RPC errors to a status: an unimplemented
+%% method is 404, and a malformed or unservable request is 400. Those
+%% are answers, and the spec has the client inspect the body before
+%% concluding anything about the connection. Only a body that is not a
+%% JSON-RPC message means the peer stopped talking to us.
 finalize_request(
     Ref,
     #req{status = Status, buffer = Buf},
     #state{requests = Reqs, owner = Owner} = State
 ) ->
-    Owner ! {mcp_closed, self(), {http_error, Status, Buf}},
+    _ =
+        case is_jsonrpc(Buf) of
+            true -> Owner ! {mcp_in, self(), Buf};
+            false -> Owner ! {mcp_closed, self(), {http_error, Status, Buf}}
+        end,
     State#state{requests = maps:remove(Ref, Reqs)}.
+
+is_jsonrpc(<<>>) ->
+    false;
+is_jsonrpc(Body) ->
+    try json:decode(Body) of
+        #{<<"jsonrpc">> := <<"2.0">>} = Msg ->
+            maps:is_key(<<"error">>, Msg) orelse maps:is_key(<<"result">>, Msg);
+        _ ->
+            false
+    catch
+        _:_ -> false
+    end.
 
 %%====================================================================
 %% SSE GET stream (unsolicited server-to-client)
 %%====================================================================
 
-start_get_sse(#state{sse_enabled = false} = State) ->
+start_stream(#state{sse_enabled = false} = State) ->
     State;
-start_get_sse(State) ->
+start_stream(#state{sse_mode = get} = State) ->
     Headers0 = build_headers(State),
     Headers =
         case State#state.sse_last_event_id of
             undefined -> Headers0;
             Id -> [{<<"last-event-id">>, Id} | Headers0]
         end,
+    open_stream(get, Headers, <<>>, State);
+start_stream(#state{sse_mode = {post, Body}} = State) ->
+    %% A modern stream is a response, so it needs the same metadata
+    %% headers any other request carries, derived from the same body
+    %% the server will compare them against.
+    Headers = build_headers(State) ++ metadata_headers(Body, State#state.tool_headers),
+    open_stream(post, Headers, Body, State).
+
+open_stream(Method, Headers, Body, State) ->
     case
         hackney:request(
-            get,
+            Method,
             State#state.url,
             Headers,
-            <<>>,
-            [async, {recv_timeout, infinity}]
+            Body,
+            %% A dedicated socket: this response never completes, so
+            %% returning it to the shared pool would block later
+            %% checkouts and leave the server's end open after close.
+            [async, {pool, false}, {recv_timeout, infinity}]
         )
     of
         {ok, Ref} ->
@@ -356,6 +436,16 @@ start_get_sse(State) ->
         {error, _} ->
             State
     end.
+
+stop_stream(#state{sse_ref = undefined} = State) ->
+    State;
+stop_stream(#state{sse_ref = Ref} = State) ->
+    try
+        hackney:close(Ref)
+    catch
+        _:_ -> ok
+    end,
+    State#state{sse_ref = undefined, sse_buffer = <<>>}.
 
 handle_sse_status(_Ref, Status, State) when Status >= 200, Status < 300 ->
     {noreply, State};
@@ -483,6 +573,59 @@ build_headers(#state{
             _ -> H2
         end,
     H3 ++ Extra.
+
+%% The metadata headers mirror fields of the body, so they are derived
+%% from the envelope about to be sent rather than from connection
+%% state. A legacy server ignores them; a modern one requires them and
+%% rejects a request whose headers disagree with its body.
+metadata_headers(Body, ToolHeaders) ->
+    try json:decode(iolist_to_binary(Body)) of
+        #{<<"method">> := Method, <<"params">> := Params} when is_map(Params) ->
+            Standard = barrel_mcp_headers:standard(Method, Params),
+            modern_only(Params, Standard ++ param_headers(Method, Params, ToolHeaders));
+        _ ->
+            []
+    catch
+        _:_ -> []
+    end.
+
+%% A tool may ask for some of its arguments to be mirrored, so that an
+%% intermediary can route on them. The server checks these against the
+%% body, so they are built from the same body.
+param_headers(<<"tools/call">>, Params, ToolHeaders) ->
+    Name = maps:get(<<"name">>, Params, <<>>),
+    case maps:get(Name, ToolHeaders, []) of
+        [] ->
+            [];
+        Bindings ->
+            Arguments =
+                case maps:get(<<"arguments">>, Params, #{}) of
+                    A when is_map(A) -> A;
+                    _ -> #{}
+                end,
+            barrel_mcp_headers:param_headers(Arguments, Bindings)
+    end;
+param_headers(_Method, _Params, _ToolHeaders) ->
+    [].
+
+%% Only a modern request carries them. Adding them to a legacy one
+%% would be harmless but misleading to an intermediary reading them.
+%%
+%% The version header comes from the same `_meta' the server compares
+%% it against, rather than from connection state: a modern connection
+%% negotiates nothing, so there is no state to have set.
+modern_only(Params, Headers) ->
+    Meta =
+        case maps:get(<<"_meta">>, Params, #{}) of
+            M when is_map(M) -> M;
+            _ -> #{}
+        end,
+    case maps:get(?MCP_META_PROTOCOL_VERSION, Meta, undefined) of
+        Version when is_binary(Version) ->
+            [{<<"mcp-protocol-version">>, Version} | Headers];
+        _ ->
+            []
+    end.
 
 detect_format(Headers) ->
     case header_value(<<"content-type">>, Headers) of
