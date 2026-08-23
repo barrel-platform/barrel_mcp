@@ -393,3 +393,45 @@ handle_bad_method_with_bad_id_test() ->
         <<"method">> => 42
     }),
     ?assertEqual(null, maps:get(<<"id">>, Resp)).
+
+%%====================================================================
+%% Decode limits
+%%
+%% The cap has to stop the document before the term exists. A check on
+%% the finished term is too late: building it is the attack.
+%%====================================================================
+
+nested(0, Inner) -> Inner;
+nested(N, Inner) -> nested(N - 1, <<"[", Inner/binary, "]">>).
+
+decode_rejects_deep_nesting_test() ->
+    ?assertEqual({error, too_deep}, barrel_mcp_protocol:decode(nested(500, <<"1">>))),
+    %% And the process is still alive to say so.
+    ?assertEqual({ok, [[1]]}, barrel_mcp_protocol:decode(nested(2, <<"1">>))).
+
+decode_allows_realistic_nesting_test() ->
+    %% Deeper than any MCP message, still accepted.
+    ?assertMatch({ok, _}, barrel_mcp_protocol:decode(nested(32, <<"1">>))).
+
+%% Replacing the default decoder must not change what a document means.
+%% Duplicate keys are the case that differs if the accumulator is
+%% reversed: the default keeps the first occurrence.
+decode_matches_default_decoder_test() ->
+    lists:foreach(
+        fun(Bin) ->
+            ?assertEqual({ok, json:decode(Bin)}, barrel_mcp_protocol:decode(Bin))
+        end,
+        [
+            <<"{}">>,
+            <<"[]">>,
+            <<"{\"a\":1,\"a\":2}">>,
+            <<"{\"a\":{\"b\":[1,{\"c\":null}]}}">>,
+            <<"{\"n\":1.5,\"e\":1e3,\"neg\":-0.5}">>,
+            <<"{\"s\":\"a\\\"b\",\"u\":\"\\u00e9\"}">>,
+            <<"[true,false,null]">>,
+            <<"{\"big\":123456789012345678901234567890}">>
+        ]
+    ).
+
+decode_rejects_trailing_data_test() ->
+    ?assertEqual({error, parse_error}, barrel_mcp_protocol:decode(<<"{} {}">>)).

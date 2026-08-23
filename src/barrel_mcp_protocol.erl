@@ -40,6 +40,10 @@
     drive_async_plan/3
 ]).
 
+%% Deepest JSON nesting accepted from a peer. Well past anything MCP
+%% defines, and far below what would trouble the stack.
+-define(DEFAULT_MAX_JSON_DEPTH, 64).
+
 %%====================================================================
 %% API
 %%====================================================================
@@ -49,12 +53,54 @@
 %% JSON-RPC batches.
 -spec decode(binary()) -> {ok, map() | list()} | {error, term()}.
 decode(Binary) ->
-    try
-        {ok, json:decode(Binary)}
+    Max = application:get_env(barrel_mcp, max_json_depth, ?DEFAULT_MAX_JSON_DEPTH),
+    Depth = counters:new(1, []),
+    try json:decode(Binary, ok, depth_counting_decoders(Depth, Max)) of
+        {Term, _Acc, <<>>} -> {ok, Term};
+        {_Term, _Acc, _Trailing} -> {error, parse_error}
     catch
-        _:_ ->
-            {error, parse_error}
+        throw:too_deep -> {error, too_deep};
+        _:_ -> {error, parse_error}
     end.
+
+%% Nesting is bounded by the parser itself rather than by a scan of our
+%% own, so the limit cannot disagree with what is actually built. A
+%% document deep enough to exhaust the stack is rejected before the term
+%% exists, which a check on the finished term could not do.
+depth_counting_decoders(Depth, Max) ->
+    Enter = fun() ->
+        counters:add(Depth, 1, 1),
+        case counters:get(Depth, 1) > Max of
+            true -> throw(too_deep);
+            false -> ok
+        end
+    end,
+    Leave = fun() -> counters:sub(Depth, 1, 1) end,
+    #{
+        object_start => fun(_Acc) ->
+            Enter(),
+            []
+        end,
+        object_push => fun(Key, Value, Acc) -> [{Key, Value} | Acc] end,
+        %% Not reversed: `maps:from_list/1' keeps the rightmost of any
+        %% duplicate key, and the accumulator is in reverse document
+        %% order, so the first occurrence wins. That is what the default
+        %% decoder does, and a batch of duplicate keys must not decode
+        %% differently here than it would there.
+        object_finish => fun(Acc, OldAcc) ->
+            Leave(),
+            {maps:from_list(Acc), OldAcc}
+        end,
+        array_start => fun(_Acc) ->
+            Enter(),
+            []
+        end,
+        array_push => fun(Value, Acc) -> [Value | Acc] end,
+        array_finish => fun(Acc, OldAcc) ->
+            Leave(),
+            {lists:reverse(Acc), OldAcc}
+        end
+    }.
 
 %% @doc Encode a JSON-RPC response.
 -spec encode(map()) -> binary().

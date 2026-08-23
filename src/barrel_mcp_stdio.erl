@@ -96,7 +96,12 @@
 -behaviour(gen_server).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
--record(state, {}).
+%% Largest single stdio frame accepted from a peer, and the chunk the
+%% reader pulls at a time.
+-define(DEFAULT_MAX_FRAME_BYTES, 16 * 1024 * 1024).
+-define(READ_CHUNK_BYTES, 65536).
+
+-record(state, {buf = <<>> :: binary()}).
 
 %%====================================================================
 %% API
@@ -188,15 +193,26 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info(read_line, State) ->
-    case io:get_line(standard_io, '') of
+    case read_frame(State#state.buf) of
         eof ->
             {stop, normal, State};
         {error, _} ->
             {stop, normal, State};
-        Line ->
+        {too_large, _Rest} ->
+            %% A frame past the cap cannot be answered in place: the
+            %% newline that would end it may never arrive, and skipping
+            %% to the next one is the same unbounded read again. Report
+            %% and close.
+            send_response(
+                barrel_mcp_protocol:error_response(
+                    null, -32600, <<"Request exceeds the maximum frame size">>
+                )
+            ),
+            {stop, normal, State};
+        {ok, Line, Rest} ->
             handle_line(Line),
             self() ! read_line,
-            {noreply, State}
+            {noreply, State#state{buf = Rest}}
     end;
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -209,14 +225,59 @@ terminate(_Reason, _State) ->
 %%====================================================================
 
 loop() ->
-    case io:get_line(standard_io, '') of
+    loop(<<>>).
+
+loop(Buf) ->
+    case read_frame(Buf) of
         eof ->
             ok;
         {error, _} ->
             ok;
-        Line ->
+        {too_large, _Rest} ->
+            send_response(
+                barrel_mcp_protocol:error_response(
+                    null, -32600, <<"Request exceeds the maximum frame size">>
+                )
+            ),
+            ok;
+        {ok, Line, Rest} ->
             handle_line(Line),
-            loop()
+            loop(Rest)
+    end.
+
+%% Read one newline-delimited frame without ever holding more than the
+%% cap in memory. `io:get_line/2' cannot do this: it returns the whole
+%% line, however long, so a cap applied to its result is applied after
+%% the allocation it was meant to prevent. Reading in chunks means the
+%% buffer can also span a message boundary, so the remainder is carried
+%% to the next call.
+read_frame(Buf) ->
+    Max = application:get_env(barrel_mcp, stdio_max_frame_bytes, ?DEFAULT_MAX_FRAME_BYTES),
+    read_frame(Buf, Max).
+
+read_frame(Buf, Max) ->
+    case binary:match(Buf, <<"\n">>) of
+        %% The length of the frame itself, not merely of what has
+        %% accumulated without a newline. Checking only the latter would
+        %% let anything shorter than one read through unmeasured.
+        {Pos, 1} when Pos > Max ->
+            {too_large, Buf};
+        {Pos, 1} ->
+            <<Line:Pos/binary, _Nl:1/binary, Rest/binary>> = Buf,
+            {ok, Line, Rest};
+        nomatch when byte_size(Buf) > Max ->
+            {too_large, Buf};
+        nomatch ->
+            %% Never pull more than the cap allows, so a small cap is
+            %% honoured rather than rounded up to the chunk size.
+            Chunk = min(?READ_CHUNK_BYTES, Max - byte_size(Buf) + 1),
+            case io:get_chars(standard_io, '', Chunk) of
+                eof when Buf =:= <<>> -> eof;
+                %% Trailing frame with no newline before EOF.
+                eof -> {ok, Buf, <<>>};
+                {error, _} = Err -> Err;
+                Data -> read_frame(<<Buf/binary, Data/binary>>, Max)
+            end
     end.
 
 handle_line(Line) when is_binary(Line) ->
