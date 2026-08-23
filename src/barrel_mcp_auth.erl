@@ -68,7 +68,8 @@
     extract_bearer_token/1,
     extract_api_key/2,
     extract_basic_auth/1,
-    auth_headers/1
+    auth_headers/1,
+    principal/2
 ]).
 
 %% Types
@@ -88,6 +89,9 @@
 
 -type auth_info() :: #{
     subject => binary(),
+    %% Set by `authenticate/3' after the provider returns; the stable
+    %% identity that owns tasks, sealed state and elicitations.
+    principal => term(),
     issuer => binary(),
     audience => binary() | [binary()],
     scopes => [binary()],
@@ -113,6 +117,9 @@
     provider_opts => map(),
     provider_state => term(),
     realm => binary(),
+    %% Distinguishes deployments that share a provider but not a user
+    %% population, e.g. two listeners serving different tenants.
+    namespace => binary(),
     required_scopes => [binary()]
 }.
 %% Authentication configuration for the HTTP server.
@@ -140,7 +147,15 @@
 %% the empty list means "no auth header" (e.g. cookie-based, or none).
 -callback auth_headers(State :: term()) -> [binary()].
 
--optional_callbacks([init/1, auth_headers/1]).
+%% Optional: the canonical identity behind a credential, for providers
+%% whose subject is not a stable binary or that namespace their users
+%% themselves. Returning `{error, no_subject}' fails authentication.
+%% Without this callback the identity is derived as
+%% `{ProviderModule, Namespace, Subject}'.
+-callback principal(AuthInfo :: auth_info(), State :: term()) ->
+    {ok, term()} | {error, no_subject}.
+
+-optional_callbacks([init/1, auth_headers/1, principal/2]).
 
 %%====================================================================
 %% API
@@ -164,12 +179,63 @@ authenticate(#{provider := Provider} = Config, Request, State) ->
             %% Check required scopes if configured
             case maps:get(required_scopes, Config, []) of
                 [] ->
-                    {ok, AuthInfo};
+                    with_principal(Config, ProviderState, AuthInfo);
                 RequiredScopes ->
-                    check_scopes(RequiredScopes, AuthInfo)
+                    case check_scopes(RequiredScopes, AuthInfo) of
+                        {ok, Checked} -> with_principal(Config, ProviderState, Checked);
+                        {error, _} = Err -> Err
+                    end
             end;
         {error, _} = Error ->
             Error
+    end.
+
+%% @doc The identity a task, a sealed request state or an elicitation
+%% belongs to.
+%%
+%% Not the `auth_info()' map: that carries the whole token, so a
+%% refreshed credential with a new `exp' or `jti' would look like a
+%% different caller and orphan the work started under the old one.
+%%
+%% Not the subject alone either. Two providers, two issuers or two
+%% tenants can each mint the same subject, and the stores these key are
+%% node-wide, so the provider and a namespace are part of the identity.
+-spec principal(auth_config(), auth_info()) ->
+    {ok, term()} | {error, no_subject}.
+principal(#{provider := Provider} = Config, AuthInfo) ->
+    Namespace = namespace_of(Config, AuthInfo),
+    case subject_of(AuthInfo) of
+        undefined -> {error, no_subject};
+        Subject -> {ok, {Provider, Namespace, Subject}}
+    end.
+
+%% A provider that authenticates something without a stable subject has
+%% to say what identity it means; there is no partial principal and no
+%% silent fallback to anonymous.
+with_principal(#{provider := Provider} = Config, ProviderState, AuthInfo) ->
+    Derived =
+        case erlang:function_exported(Provider, principal, 2) of
+            true -> Provider:principal(AuthInfo, ProviderState);
+            false -> principal(Config, AuthInfo)
+        end,
+    case Derived of
+        {ok, Principal} -> {ok, AuthInfo#{principal => Principal}};
+        {error, no_subject} -> {error, unauthorized}
+    end.
+
+subject_of(AuthInfo) ->
+    case maps:get(subject, AuthInfo, undefined) of
+        S when is_binary(S), S =/= <<>> -> S;
+        _ -> undefined
+    end.
+
+%% The issuer when the credential names one, otherwise whatever the
+%% deployment configured. Two listeners serving different tenants with
+%% the same provider must not share a namespace.
+namespace_of(Config, AuthInfo) ->
+    case maps:get(issuer, AuthInfo, undefined) of
+        Iss when is_binary(Iss), Iss =/= <<>> -> Iss;
+        _ -> maps:get(namespace, Config, undefined)
     end.
 
 %% @doc Generate a challenge response for failed authentication.

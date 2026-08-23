@@ -188,7 +188,9 @@ drive_returns_task() ->
     TaskId = maps:get(<<"taskId">>, Result),
     ?assertEqual(<<"working">>, maps:get(<<"status">>, Result)),
     %% The worker reports into the task rather than back to the caller.
-    Owner = {principal, undefined},
+    %% No credential on the request, so the owner is the anonymous
+    %% principal rather than the raw auth_info that used to be used.
+    Owner = {principal, anonymous},
     wait_for_status(Owner, TaskId, <<"completed">>, 40),
     {ok, Task} = barrel_mcp_tasks:get(Owner, TaskId),
     [Block] = maps:get(<<"content">>, maps:get(<<"result">>, Task)),
@@ -213,7 +215,9 @@ killed_worker_fails_task() ->
     Resp = drive(call_request(<<"killable">>, modern_meta(Caps))),
     Result = maps:get(<<"result">>, Resp),
     TaskId = maps:get(<<"taskId">>, Result),
-    Owner = {principal, undefined},
+    %% No credential on the request, so the owner is the anonymous
+    %% principal rather than the raw auth_info that used to be used.
+    Owner = {principal, anonymous},
     Worker = wait_for_worker(40),
     true = exit(Worker, kill),
     wait_for_status(Owner, TaskId, <<"failed">>, 40),

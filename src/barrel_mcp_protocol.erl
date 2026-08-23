@@ -585,7 +585,7 @@ mrtr_unavailable(RequestId, Why) ->
 -spec task_owner(barrel_mcp_ctx:ctx()) -> term().
 task_owner(Ctx) ->
     case barrel_mcp_ctx:is_modern(Ctx) of
-        true -> {principal, barrel_mcp_ctx:auth_info(Ctx)};
+        true -> {principal, barrel_mcp_ctx:principal(Ctx)};
         false -> barrel_mcp_ctx:session_id(Ctx)
     end.
 
@@ -748,7 +748,7 @@ with_mrtr(Method, Params, Id, Ctx, Fun) ->
 
 mrtr_binding(Method, Params, Ctx) ->
     barrel_mcp_request_state:binding(
-        barrel_mcp_ctx:auth_info(Ctx),
+        barrel_mcp_ctx:principal(Ctx),
         Method,
         Params
     ).

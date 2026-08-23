@@ -47,6 +47,7 @@
     request_state/1,
     session_id/1,
     auth_info/1,
+    principal/1,
     streaming/1,
     meta/1
 ]).
@@ -235,6 +236,21 @@ session_id(#{session_id := S}) -> S.
 %% @doc The authenticated principal, as returned by the auth provider.
 -spec auth_info(ctx()) -> term().
 auth_info(#{auth_info := A}) -> A.
+
+%% @doc The stable identity behind the credential, as
+%% `barrel_mcp_auth:authenticate/3' derived it.
+%%
+%% This is what owns a task, a sealed request state or an elicitation,
+%% never the whole `auth_info()' map: that carries `exp' and `jti', so a
+%% refreshed token would read as a different caller and orphan whatever
+%% was started under the old one.
+%%
+%% `anonymous' when the request carried no credential at all.
+-spec principal(ctx()) -> term().
+principal(#{auth_info := A}) when is_map(A) ->
+    maps:get(principal, A, anonymous);
+principal(_Ctx) ->
+    anonymous.
 
 %% @doc Whether the transport can hold a response stream open.
 %%
