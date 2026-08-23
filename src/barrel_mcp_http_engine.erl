@@ -391,16 +391,23 @@ validate_request_headers(Headers, Request) ->
 check_protocol_version_header(Headers, Params) ->
     Meta = maps:get(<<"_meta">>, Params, #{}),
     Declared = maps:get(?MCP_META_PROTOCOL_VERSION, Meta, undefined),
-    case header(<<"mcp-protocol-version">>, Headers, undefined) of
-        undefined ->
-            {error, <<"Header mismatch: MCP-Protocol-Version header is required">>};
-        Declared ->
-            ok;
-        Other ->
-            {error,
-                <<"Header mismatch: MCP-Protocol-Version header value '", Other/binary,
-                    "' does not match body value '", Declared/binary, "'">>}
-    end.
+    Header = header(<<"mcp-protocol-version">>, Headers, undefined),
+    check_protocol_version_header(Header, Declared, is_binary(Declared)).
+
+%% The declared version reaches us from a peer's `_meta' and is
+%% interpolated into the mismatch message. A number or a null there
+%% would raise `badarg' instead of returning an error, so it is
+%% confirmed to be a string before any message is built.
+check_protocol_version_header(_Header, _Declared, false) ->
+    {error, <<"Header mismatch: protocol version in _meta must be a string">>};
+check_protocol_version_header(undefined, _Declared, true) ->
+    {error, <<"Header mismatch: MCP-Protocol-Version header is required">>};
+check_protocol_version_header(Declared, Declared, true) ->
+    ok;
+check_protocol_version_header(Other, Declared, true) ->
+    {error,
+        <<"Header mismatch: MCP-Protocol-Version header value '", Other/binary,
+            "' does not match body value '", Declared/binary, "'">>}.
 
 %% Only a tool call mirrors parameters, and only the ones its schema
 %% opted into. The bindings were validated and stored at registration.

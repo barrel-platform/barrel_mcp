@@ -42,6 +42,7 @@
     discover_over_http/1,
     missing_protocol_version_header/1,
     protocol_version_header_mismatch/1,
+    non_binary_protocol_version/1,
     method_header_mismatch/1,
     name_header_mismatch/1,
     param_header_mirrored/1,
@@ -76,6 +77,7 @@ all() ->
         discover_over_http,
         missing_protocol_version_header,
         protocol_version_header_mismatch,
+        non_binary_protocol_version,
         method_header_mismatch,
         name_header_mismatch,
         param_header_mirrored,
@@ -364,6 +366,36 @@ protocol_version_header_mismatch(Config) ->
     ],
     {400, _, Body} = post(Port, modern_request(1, <<"tools/list">>, #{}), Hdrs),
     ?assertEqual(?MCP_HEADER_MISMATCH, maps:get(<<"code">>, error_of(Body))),
+    ok.
+
+%% The declared version comes from a peer's _meta and is interpolated
+%% into the mismatch message. A number or a null there used to be a
+%% badarg while building that message, not an error response.
+non_binary_protocol_version(Config) ->
+    Port = ?config(port, Config),
+    Hdrs = [
+        {<<"mcp-protocol-version">>, ?MODERN},
+        {<<"mcp-method">>, <<"tools/list">>}
+    ],
+    lists:foreach(
+        fun(Version) ->
+            Body0 = #{
+                <<"jsonrpc">> => <<"2.0">>,
+                <<"id">> => 1,
+                <<"method">> => <<"tools/list">>,
+                <<"params">> => #{
+                    <<"_meta">> => #{
+                        ?MCP_META_PROTOCOL_VERSION => Version,
+                        ?MCP_META_CLIENT_CAPABILITIES => #{}
+                    }
+                }
+            },
+            {Status, _, Body} = post(Port, iolist_to_binary(json:encode(Body0)), Hdrs),
+            ?assertEqual(400, Status),
+            ?assertEqual(?MCP_HEADER_MISMATCH, maps:get(<<"code">>, error_of(Body)))
+        end,
+        [42, null, #{<<"a">> => 1}, [?MODERN]]
+    ),
     ok.
 
 method_header_mismatch(Config) ->

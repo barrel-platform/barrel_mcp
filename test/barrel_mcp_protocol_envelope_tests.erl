@@ -324,3 +324,72 @@ drive_async_plan_tool_error_meta_test() ->
     ?assertEqual(Meta, result_meta(Resp)),
     Result = maps:get(<<"result">>, Resp),
     ?assertEqual(true, maps:get(<<"isError">>, Result)).
+
+%%====================================================================
+%% Peer-controlled envelope shapes
+%%
+%% The method is interpolated into binaries and the params are read
+%% with maps:get/3 several frames deeper, so a wrong shape here used to
+%% be a badarg rather than an error response. Over stdio that ended the
+%% server, and reaching it needed no authentication.
+%%====================================================================
+
+handle_non_binary_method_test() ->
+    lists:foreach(
+        fun(Method) ->
+            Resp = barrel_mcp_protocol:handle(#{
+                <<"jsonrpc">> => <<"2.0">>,
+                <<"id">> => 1,
+                <<"method">> => Method
+            }),
+            ?assertMatch(#{<<"error">> := #{<<"code">> := -32600}}, Resp),
+            %% And the envelope is something a transport can write.
+            ?assert(is_binary(barrel_mcp_protocol:encode(Resp)))
+        end,
+        [42, null, #{<<"a">> => 1}, [<<"tools/list">>], true]
+    ).
+
+handle_non_map_params_test() ->
+    lists:foreach(
+        fun(Params) ->
+            Resp = barrel_mcp_protocol:handle(#{
+                <<"jsonrpc">> => <<"2.0">>,
+                <<"id">> => 1,
+                <<"method">> => <<"tools/call">>,
+                <<"params">> => Params
+            }),
+            ?assertMatch(#{<<"error">> := #{<<"code">> := -32600}}, Resp),
+            ?assert(is_binary(barrel_mcp_protocol:encode(Resp)))
+        end,
+        [42, null, <<"a string">>, [#{}], true]
+    ).
+
+%% A notification carries no id, so a malformed one cannot be answered.
+%% It must still not crash the caller.
+handle_malformed_notification_test() ->
+    ?assertEqual(
+        no_response,
+        barrel_mcp_protocol:handle(#{
+            <<"jsonrpc">> => <<"2.0">>,
+            <<"method">> => <<"notifications/cancelled">>,
+            <<"params">> => 42
+        })
+    ).
+
+%% Absent params stays valid: the field is optional.
+handle_absent_params_ok_test() ->
+    Resp = barrel_mcp_protocol:handle(#{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"ping">>
+    }),
+    ?assertMatch(#{<<"result">> := _}, Resp).
+
+%% A malformed id cannot be echoed, so the error carries null.
+handle_bad_method_with_bad_id_test() ->
+    Resp = barrel_mcp_protocol:handle(#{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => #{<<"not">> => <<"an id">>},
+        <<"method">> => 42
+    }),
+    ?assertEqual(null, maps:get(<<"id">>, Resp)).

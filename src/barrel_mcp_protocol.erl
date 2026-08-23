@@ -92,11 +92,53 @@ handle(L, _State) when is_list(L) ->
         <<"Batch requests are not supported">>
     );
 handle(#{<<"jsonrpc">> := <<"2.0">>, <<"method">> := Method} = Request, State) ->
+    %% A peer controls both fields. The method is interpolated into
+    %% binaries and the params are read with `maps:get/3', so a method
+    %% that is not a string, or params that are not an object, raise
+    %% `badarg' several frames deeper. Over stdio that ends the server.
+    %% Reject here, where there is still an id to answer with.
+    case {validate_envelope(Method, Request), maps:is_key(<<"id">>, Request)} of
+        {{error, _Reason}, false} ->
+            %% A notification, and JSON-RPC forbids replying to one even
+            %% when it is malformed. Drop it.
+            no_response;
+        {{error, Reason}, true} ->
+            error_response(id_or_null(Request), ?JSONRPC_INVALID_REQUEST, Reason);
+        {ok, _} ->
+            dispatch_envelope(Method, Request, State)
+    end;
+handle(#{<<"id">> := Id}, _State) when is_binary(Id); is_integer(Id) ->
+    error_response(Id, ?JSONRPC_INVALID_REQUEST, <<"Invalid Request">>);
+handle(_, _State) ->
+    error_response(null, ?JSONRPC_INVALID_REQUEST, <<"Invalid Request">>).
+
+%% The method must be a string and `params', when present, an object.
+%% Checked before anything reads either field. `params' itself stays
+%% optional.
+validate_envelope(Method, _Request) when not is_binary(Method) ->
+    {error, <<"Invalid Request: method must be a string">>};
+validate_envelope(_Method, Request) ->
+    case maps:find(<<"params">>, Request) of
+        {ok, P} when not is_map(P) ->
+            {error, <<"Invalid Request: params must be an object">>};
+        _ ->
+            ok
+    end.
+
+%% An id worth echoing, or `null'. A malformed id is not echoed back:
+%% JSON-RPC wants `null' when the id cannot be determined.
+id_or_null(Request) ->
+    case maps:get(<<"id">>, Request, undefined) of
+        Id when is_binary(Id); is_integer(Id) -> Id;
+        _ -> null
+    end.
+
+dispatch_envelope(Method, Request, State) ->
     Params = maps:get(<<"params">>, Request, #{}),
     Ctx = barrel_mcp_ctx:from_request(Request, State),
     case maps:find(<<"id">>, Request) of
         error ->
-            %% No id: this is a notification — no response.
+            %% No id: this is a notification, so no response.
             handle_notification(Method, Params, Ctx),
             no_response;
         {ok, Id} when is_binary(Id); is_integer(Id) ->
@@ -109,11 +151,7 @@ handle(#{<<"jsonrpc">> := <<"2.0">>, <<"method">> := Method} = Request, State) -
                 ?JSONRPC_INVALID_REQUEST,
                 <<"Invalid Request: id must be a string or integer">>
             )
-    end;
-handle(#{<<"id">> := Id}, _State) when is_binary(Id); is_integer(Id) ->
-    error_response(Id, ?JSONRPC_INVALID_REQUEST, <<"Invalid Request">>);
-handle(_, _State) ->
-    error_response(null, ?JSONRPC_INVALID_REQUEST, <<"Invalid Request">>).
+    end.
 
 %% @doc Create an error response.
 -spec error_response(term(), integer(), binary()) -> map().

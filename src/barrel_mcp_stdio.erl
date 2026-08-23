@@ -226,7 +226,24 @@ handle_line(Line) when is_binary(Line) ->
         <<>> ->
             ok;
         _ ->
-            process_request(TrimmedLine)
+            %% One malformed message must not take the transport down
+            %% with it: stdio has a single process serving every
+            %% request, so an uncaught throw here ends the server and
+            %% every in-flight call with it.
+            try
+                process_request(TrimmedLine)
+            catch
+                Class:Reason:Stack ->
+                    logger:error(
+                        "barrel_mcp stdio: request crashed: ~p:~p~n~p",
+                        [Class, Reason, Stack]
+                    ),
+                    send_response(
+                        barrel_mcp_protocol:error_response(
+                            null, -32603, <<"Internal error">>
+                        )
+                    )
+            end
     end;
 handle_line(Line) when is_list(Line) ->
     handle_line(list_to_binary(Line)).
