@@ -21,7 +21,7 @@
 
 -include("barrel_mcp.hrl").
 
--export([is_known/1, is_at_least/2, era/1, all/0]).
+-export([is_known/1, is_at_least/2, era/1, all/0, feature/2]).
 
 %% @doc Whether this is a revision the library knows about at all.
 -spec is_known(binary()) -> boolean().
@@ -75,3 +75,33 @@ index_of(Version) ->
 index_of(Version, [Version | _Rest], N) -> N;
 index_of(Version, [_Other | Rest], N) -> index_of(Version, Rest, N + 1);
 index_of(_Version, [], _N) -> -1.
+
+%%====================================================================
+%% Feature gating
+%%====================================================================
+
+%% @doc Whether a revision has a feature.
+%%
+%% Not every feature is monotonic, so this cannot be a threshold on
+%% `is_at_least/2'. Batching is required at 2025-03-26 and removed at
+%% 2025-06-18; tasks move from the core protocol into an extension.
+%% A table states each one exactly.
+%%
+%% `compatibility' means the revision does not require the feature and
+%% does not forbid it either, and we choose to accept it. `undefined'
+%% for a revision that has not been negotiated yet answers `disabled':
+%% we cannot know what the peer speaks, and guessing wrong on the
+%% permissive side is what a limit exists to prevent.
+-spec feature(atom(), binary() | undefined) -> enabled | compatibility | disabled.
+feature(_Feature, undefined) ->
+    disabled;
+%% JSON-RPC batches. 2024-11-05 says nothing about them, so accepting
+%% them there is our choice rather than a requirement.
+feature(batch_receive, <<"2024-11-05">>) ->
+    compatibility;
+feature(batch_receive, <<"2025-03-26">>) ->
+    enabled;
+feature(batch_receive, _Revision) ->
+    disabled;
+feature(_Feature, _Revision) ->
+    disabled.

@@ -40,6 +40,10 @@
     drive_async_plan/3
 ]).
 
+%% How long one element of a batch may take. A batch is answered as a
+%% whole, so a slow element holds the rest.
+-define(BATCH_ELEMENT_TIMEOUT, 60000).
+
 %% Deepest JSON nesting accepted from a peer. Well past anything MCP
 %% defines, and far below what would trouble the stack.
 -define(DEFAULT_MAX_JSON_DEPTH, 64).
@@ -131,12 +135,18 @@ handle(Request) ->
 %% same error as the HTTP transport.
 -spec handle(map() | list(), map()) ->
     map() | no_response | {async, map()} | {subscribe, map()}.
-handle(L, _State) when is_list(L) ->
-    error_response(
-        null,
-        ?JSONRPC_INVALID_REQUEST,
-        <<"Batch requests are not supported">>
-    );
+handle(L, State) when is_list(L) ->
+    Revision = maps:get(protocol_version, State, undefined),
+    case barrel_mcp_version:feature(batch_receive, Revision) of
+        disabled ->
+            error_response(
+                null,
+                ?JSONRPC_INVALID_REQUEST,
+                <<"Batch requests are not supported">>
+            );
+        _Accepted ->
+            handle_batch(L, State)
+    end;
 handle(#{<<"jsonrpc">> := <<"2.0">>, <<"method">> := Method} = Request, State) ->
     %% A peer controls both fields. The method is interpolated into
     %% binaries and the params are read with `maps:get/3', so a method
@@ -156,6 +166,90 @@ handle(#{<<"jsonrpc">> := <<"2.0">>, <<"method">> := Method} = Request, State) -
 handle(#{<<"id">> := Id}, _State) when is_binary(Id); is_integer(Id) ->
     error_response(Id, ?JSONRPC_INVALID_REQUEST, <<"Invalid Request">>);
 handle(_, _State) ->
+    error_response(null, ?JSONRPC_INVALID_REQUEST, <<"Invalid Request">>).
+
+%%====================================================================
+%% Batches
+%%
+%% JSON-RPC allows an array of requests and/or notifications, or an
+%% array of responses. It does not allow the two mixed, and the two are
+%% answered differently: a malformed request can be told so, a
+%% malformed response cannot, because a response is not something one
+%% replies to.
+%%====================================================================
+
+handle_batch([], _State) ->
+    error_response(null, ?JSONRPC_INVALID_REQUEST, <<"Invalid Request: empty batch">>);
+handle_batch(Elements, State) ->
+    case batch_category(Elements) of
+        mixed ->
+            error_response(
+                null,
+                ?JSONRPC_INVALID_REQUEST,
+                <<"Invalid Request: a batch may not mix requests and responses">>
+            );
+        responses ->
+            %% Nothing to answer. The transport reports acceptance by
+            %% status alone, and a malformed element is dropped rather
+            %% than described, since there is no request to describe it
+            %% against.
+            no_response;
+        calls ->
+            Answers = [batch_element(E, State) || E <- Elements],
+            case [R || R <- Answers, R =/= no_response] of
+                [] -> no_response;
+                Responses -> Responses
+            end
+    end.
+
+%% An array is one kind or the other. An element that is neither counts
+%% as a call, so it earns an individual error rather than silence.
+batch_category(Elements) ->
+    Kinds = lists:usort([element_kind(E) || E <- Elements]),
+    case Kinds of
+        [response] ->
+            responses;
+        _ ->
+            case lists:member(response, Kinds) of
+                true -> mixed;
+                false -> calls
+            end
+    end.
+
+element_kind(E) when is_map(E) ->
+    case
+        {maps:is_key(<<"method">>, E), maps:is_key(<<"result">>, E), maps:is_key(<<"error">>, E)}
+    of
+        {true, _, _} -> call;
+        {false, true, _} -> response;
+        {false, _, true} -> response;
+        _ -> call
+    end;
+element_kind(_E) ->
+    call.
+
+%% One element of a call batch. A tool call yields an async plan that
+%% nobody else will drive, so it is driven here: a batch is a legacy
+%% compatibility path and the caller is waiting on the whole array.
+batch_element(Element, State) when is_map(Element) ->
+    case handle(Element, State) of
+        {async, Plan} ->
+            drive_async_plan(Plan, ?BATCH_ELEMENT_TIMEOUT);
+        no_response ->
+            no_response;
+        Response when is_map(Response) ->
+            Response;
+        _Stream ->
+            %% Only a held-open stream is neither, and no revision that
+            %% accepts batches has one. Refusing beats encoding a
+            %% handle into an array.
+            error_response(
+                id_or_null(Element),
+                ?JSONRPC_INTERNAL_ERROR,
+                <<"Internal error">>
+            )
+    end;
+batch_element(_Element, _State) ->
     error_response(null, ?JSONRPC_INVALID_REQUEST, <<"Invalid Request">>).
 
 %% The method must be a string and `params', when present, an object.
