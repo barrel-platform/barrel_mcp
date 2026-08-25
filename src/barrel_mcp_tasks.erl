@@ -40,6 +40,7 @@
     await_input/5,
     params/2,
     owned/2,
+    await_result/3,
     update/3
 ]).
 
@@ -218,6 +219,29 @@ fail(Owner, TaskId, Reason) ->
 update(Owner, TaskId, Responses) when is_map(Responses) ->
     gen_server:call(?MODULE, {update, Owner, TaskId, Responses}).
 
+%% @doc Block until a task reaches a terminal state, then return what
+%% the underlying request would have returned.
+%%
+%% The wait happens in the calling process, never in the tasks server:
+%% that same process has to accept the transition that ends the wait,
+%% so blocking it would deadlock. The server only records who to tell.
+-spec await_result(term(), binary(), timeout()) ->
+    {ok, map()} | {error, not_found} | {error, timeout}.
+await_result(Owner, TaskId, Timeout) ->
+    case gen_server:call(?MODULE, {await_result, Owner, TaskId}) of
+        {ready, Task} ->
+            {ok, Task};
+        {error, not_found} ->
+            {error, not_found};
+        waiting ->
+            receive
+                {task_terminal, TaskId, Task} -> {ok, Task}
+            after Timeout ->
+                gen_server:cast(?MODULE, {stop_waiting, TaskId, self()}),
+                {error, timeout}
+            end
+    end.
+
 %% @doc Which of these task ids the owner actually holds.
 %%
 %% An id naming no task and an id belonging to someone else give the
@@ -254,7 +278,7 @@ await_input(Owner, TaskId, Requests, HandlerState, Params) ->
 init([]) ->
     _ = ensure_table(),
     erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
-    {ok, #{}}.
+    {ok, #{waiters => #{}}}.
 
 %% What the requestor asked for, clamped to what this server is willing
 %% to hold. Reporting the granted value is required; reporting the
@@ -394,6 +418,50 @@ do_update(Owner, TaskId, Responses) ->
             end
     end.
 
+%% After a transition, tell anyone parked on this task if it has now
+%% reached a terminal state.
+maybe_wake(Owner, TaskId, State) ->
+    case lookup(Owner, TaskId) of
+        {ok, #task{status = St} = Task} when
+            St =:= completed; St =:= failed; St =:= cancelled
+        ->
+            wake_waiters(TaskId, task_to_map(Task, legacy), State);
+        _ ->
+            State
+    end.
+
+drop_waiter(TaskId, Caller, State) ->
+    Waiters = maps:get(waiters, State, #{}),
+    case maps:get(TaskId, Waiters, []) of
+        [] ->
+            State;
+        List ->
+            _ = [demonitor(R, [flush]) || {C, R} <- List, C =:= Caller],
+            case [W || {C, _} = W <- List, C =/= Caller] of
+                [] -> State#{waiters => maps:remove(TaskId, Waiters)};
+                Kept -> State#{waiters => Waiters#{TaskId => Kept}}
+            end
+    end.
+
+%% Everyone waiting on this task, told once and then forgotten. Called
+%% from the server process, which is why the wait itself lives in the
+%% caller: this is the transition a blocked server could never make.
+wake_waiters(TaskId, Task, State) ->
+    Waiters = maps:get(waiters, State, #{}),
+    case maps:take(TaskId, Waiters) of
+        {List, Rest} ->
+            lists:foreach(
+                fun({Caller, Ref}) ->
+                    demonitor(Ref, [flush]),
+                    Caller ! {task_terminal, TaskId, Task}
+                end,
+                List
+            ),
+            State#{waiters => Rest};
+        error ->
+            State
+    end.
+
 %% Refuse at admission rather than evict later. An unexpired record is
 %% the retention we advertised, so dropping one to make room would break
 %% the promise the ttl made; refusing the new task does not.
@@ -464,7 +532,7 @@ handle_call({cancel, SessionId, TaskId}, _From, State) ->
                 ok
         end,
     Reply = transition(SessionId, TaskId, cancelled, undefined, undefined),
-    {reply, Reply, State};
+    {reply, Reply, maybe_wake(SessionId, TaskId, State)};
 handle_call({set_worker, SessionId, TaskId, Info}, _From, State) ->
     Reply =
         case lookup(SessionId, TaskId) of
@@ -479,21 +547,54 @@ handle_call({set_worker, SessionId, TaskId, Info}, _From, State) ->
                 {error, not_found}
         end,
     {reply, Reply, State};
+handle_call({await_result, Owner, TaskId}, {Caller, _Tag}, State) ->
+    case lookup(Owner, TaskId) of
+        {error, not_found} ->
+            {reply, {error, not_found}, State};
+        {ok, #task{status = St} = Task} when
+            St =:= completed; St =:= failed; St =:= cancelled
+        ->
+            {reply, {ready, task_to_map(Task, legacy)}, State};
+        {ok, _Task} ->
+            %% Monitored so a caller that goes away does not leave an
+            %% entry behind for a task that may run for hours.
+            Ref = monitor(process, Caller),
+            Waiters = maps:get(waiters, State, #{}),
+            Existing = maps:get(TaskId, Waiters, []),
+            {reply, waiting, State#{
+                waiters => Waiters#{TaskId => [{Caller, Ref} | Existing]}
+            }}
+    end;
 handle_call({await_input, Owner, TaskId, Requests, HandlerState, Params}, _From, State) ->
     {reply, do_await_input(Owner, TaskId, Requests, HandlerState, Params), State};
 handle_call({update, Owner, TaskId, Responses}, _From, State) ->
     {reply, do_update(Owner, TaskId, Responses), State};
 handle_call({finish, SessionId, TaskId, Result}, _From, State) ->
     Reply = transition(SessionId, TaskId, completed, Result, undefined),
-    {reply, Reply, State};
+    {reply, Reply, maybe_wake(SessionId, TaskId, State)};
 handle_call({fail, SessionId, TaskId, Reason}, _From, State) ->
     Reply = transition(SessionId, TaskId, failed, undefined, Reason),
-    {reply, Reply, State};
+    {reply, Reply, maybe_wake(SessionId, TaskId, State)};
 handle_call(_, _, State) ->
     {reply, {error, unknown_request}, State}.
 
-handle_cast(_Msg, State) -> {noreply, State}.
+handle_cast({stop_waiting, TaskId, Caller}, State) ->
+    {noreply, drop_waiter(TaskId, Caller, State)};
+handle_cast(_Msg, State) ->
+    {noreply, State}.
 
+handle_info({'DOWN', Ref, process, Pid, _Reason}, State) ->
+    Waiters = maps:get(waiters, State, #{}),
+    Pruned = maps:filtermap(
+        fun(_TaskId, List) ->
+            case [W || {C, R} = W <- List, C =/= Pid orelse R =/= Ref] of
+                [] -> false;
+                Kept -> {true, Kept}
+            end
+        end,
+        Waiters
+    ),
+    {noreply, State#{waiters => Pruned}};
 handle_info(sweep, State) ->
     Now = erlang:system_time(millisecond),
     {Expired, Stranded, Reapable} = ets:foldl(

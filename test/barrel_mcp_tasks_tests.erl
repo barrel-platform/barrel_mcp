@@ -561,3 +561,76 @@ task_ids_need_the_extension_test() ->
     ),
     %% Declared, so it opens; the unknown id is simply not honoured.
     ?assertMatch({subscribe, #{filter := #{task_ids := []}}}, Request(tasks_caps())).
+
+%%====================================================================
+%% Blocking tasks/result
+%%
+%% The spec makes this block until terminal. The wait cannot live in the
+%% tasks server, which is the process that must accept the transition
+%% that ends it.
+%%====================================================================
+
+await_in_background(Owner, TaskId, Timeout) ->
+    Self = self(),
+    spawn(fun() ->
+        Self ! {awaited, barrel_mcp_tasks:await_result(Owner, TaskId, Timeout)}
+    end),
+    ok.
+
+collect_awaited(Timeout) ->
+    receive
+        {awaited, R} -> R
+    after Timeout -> no_reply
+    end.
+
+%% A task already terminal answers at once, without parking anything.
+await_returns_terminal_immediately_test() ->
+    Owner = <<"await-a">>,
+    {ok, TaskId} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+    ok = barrel_mcp_tasks:finish(Owner, TaskId, #{<<"content">> => []}),
+    ?assertMatch(
+        {ok, #{<<"status">> := <<"completed">>}},
+        barrel_mcp_tasks:await_result(Owner, TaskId, 1000)
+    ).
+
+%% The point of the method: it does not return while the task runs.
+await_blocks_until_finished_test() ->
+    Owner = <<"await-b">>,
+    {ok, TaskId} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+    ok = await_in_background(Owner, TaskId, 5000),
+    %% Still working, so nothing has been answered.
+    ?assertEqual(no_reply, collect_awaited(200)),
+    ok = barrel_mcp_tasks:finish(Owner, TaskId, #{<<"content">> => []}),
+    ?assertMatch({ok, #{<<"status">> := <<"completed">>}}, collect_awaited(2000)).
+
+%% Every terminal route has to wake a waiter, not just success.
+await_woken_by_failure_test() ->
+    Owner = <<"await-c">>,
+    {ok, TaskId} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+    ok = await_in_background(Owner, TaskId, 5000),
+    ?assertEqual(no_reply, collect_awaited(100)),
+    ok = barrel_mcp_tasks:fail(Owner, TaskId, boom),
+    ?assertMatch({ok, #{<<"status">> := <<"failed">>}}, collect_awaited(2000)).
+
+await_woken_by_cancel_test() ->
+    Owner = <<"await-d">>,
+    {ok, TaskId} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+    ok = await_in_background(Owner, TaskId, 5000),
+    ?assertEqual(no_reply, collect_awaited(100)),
+    ok = barrel_mcp_tasks:cancel(Owner, TaskId),
+    ?assertMatch({ok, #{<<"status">> := <<"cancelled">>}}, collect_awaited(2000)).
+
+await_unknown_task_test() ->
+    ?assertEqual(
+        {error, not_found},
+        barrel_mcp_tasks:await_result(<<"await-e">>, <<"task_nope">>, 100)
+    ).
+
+%% A waiter that gives up leaves nothing behind, and the tasks server
+%% keeps serving.
+await_timeout_cleans_up_test() ->
+    Owner = <<"await-f">>,
+    {ok, TaskId} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+    ?assertEqual({error, timeout}, barrel_mcp_tasks:await_result(Owner, TaskId, 100)),
+    ok = barrel_mcp_tasks:finish(Owner, TaskId, #{<<"content">> => []}),
+    ?assertMatch({ok, _}, barrel_mcp_tasks:get(Owner, TaskId)).

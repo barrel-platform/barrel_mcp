@@ -40,6 +40,9 @@
     drive_async_plan/3
 ]).
 
+%% How long `tasks/result' waits for a task to finish before giving up.
+-define(TASK_RESULT_TIMEOUT, 300000).
+
 %% How long one element of a batch may take. A batch is answered as a
 %% whole, so a slow element holds the rest.
 -define(BATCH_ELEMENT_TIMEOUT, 60000).
@@ -846,6 +849,26 @@ resume_task(Owner, TaskId, Info, Ctx) ->
         end
     end).
 
+%% Exactly what the underlying request would have returned, which is
+%% the whole point of the method: a successful result or its error.
+task_result_response(#{<<"status">> := <<"completed">>} = Task, Id) ->
+    success_response(Id, maps:get(<<"result">>, Task, #{}));
+task_result_response(#{<<"status">> := <<"failed">>} = Task, Id) ->
+    case maps:get(<<"error">>, Task, undefined) of
+        #{<<"code">> := Code, <<"message">> := Message} ->
+            error_response(Id, Code, Message);
+        Other ->
+            error_response(Id, ?MCP_TOOL_ERROR, format_task_error(Other))
+    end;
+task_result_response(#{<<"status">> := <<"cancelled">>}, Id) ->
+    error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task cancelled">>);
+task_result_response(_Task, Id) ->
+    error_response(Id, ?JSONRPC_INTERNAL_ERROR, <<"Task not terminal">>).
+
+format_task_error(undefined) -> <<"Task failed">>;
+format_task_error(B) when is_binary(B) -> B;
+format_task_error(Other) -> iolist_to_binary(io_lib:format("~p", [Other])).
+
 %% The params of the call this task was created for, so the handler can
 %% be re-invoked once its questions are answered.
 task_params(TaskId, Owner) ->
@@ -1392,27 +1415,14 @@ handle_request(<<"tasks/cancel">>, Params, Id, Ctx) ->
 handle_request(<<"tasks/result">>, Params, Id, Ctx) ->
     SessionId = barrel_mcp_ctx:session_id(Ctx),
     TaskId = maps:get(<<"taskId">>, Params, <<>>),
-    case barrel_mcp_tasks:get(SessionId, TaskId) of
-        {ok, #{<<"status">> := <<"completed">>} = T} ->
-            Result = maps:get(<<"result">>, T, #{}),
-            success_response(Id, Result);
-        {ok, #{<<"status">> := <<"failed">>} = T} ->
-            Err = maps:get(<<"error">>, T, <<"Task failed">>),
-            error_response(Id, ?MCP_TOOL_ERROR, Err);
-        {ok, #{<<"status">> := <<"cancelled">>}} ->
-            error_response(
-                Id,
-                ?JSONRPC_INVALID_PARAMS,
-                <<"Task cancelled">>
-            );
-        {ok, #{<<"status">> := _}} ->
-            error_response(
-                Id,
-                ?JSONRPC_INVALID_PARAMS,
-                <<"Task not yet complete">>
-            );
-        {error, not_found} ->
-            error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
+    %% Blocks until the task is terminal, which is what the requestor
+    %% asked for by calling this rather than polling tasks/get. The wait
+    %% is in this process, not the tasks server: that server has to
+    %% accept the very transition that ends the wait.
+    case barrel_mcp_tasks:await_result(SessionId, TaskId, ?TASK_RESULT_TIMEOUT) of
+        {ok, Task} -> task_result_response(Task, Id);
+        {error, timeout} -> error_response(Id, ?JSONRPC_INTERNAL_ERROR, <<"Task timed out">>);
+        {error, not_found} -> error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
     end;
 %% Completions
 handle_request(<<"completion/complete">>, Params, Id, _State) ->
