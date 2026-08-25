@@ -788,19 +788,7 @@ task_collector_loop(Owner, TaskId) ->
         {tool_validation_failed, _ReqId, Errors} ->
             barrel_mcp_tasks:fail(Owner, TaskId, {validation_failed, Errors});
         {tool_input_required, _ReqId, Requests, HandlerState} ->
-            %% The handler needs something before it can finish. Park
-            %% the task on those questions; the client answers through
-            %% `tasks/update' and the handler runs again from the top.
-            case
-                barrel_mcp_tasks:await_input(
-                    Owner, TaskId, Requests, HandlerState, task_params(TaskId, Owner)
-                )
-            of
-                ok ->
-                    ok;
-                {error, Reason} ->
-                    barrel_mcp_tasks:fail(Owner, TaskId, input_error(Reason))
-            end;
+            task_input_round(Owner, TaskId, Requests, HandlerState);
         {cancelled, _ReqId} ->
             barrel_mcp_tasks:cancel(Owner, TaskId);
         %% The worker died without reporting. A result sent before it
@@ -868,6 +856,99 @@ task_result_response(_Task, Id) ->
 format_task_error(undefined) -> <<"Task failed">>;
 format_task_error(B) when is_binary(B) -> B;
 format_task_error(Other) -> iolist_to_binary(io_lib:format("~p", [Other])).
+
+%% The eras ask completely differently, though the status is the same.
+%%
+%% A legacy task has a session and a stream to send down, so the server
+%% issues real requests and waits for the answers, exactly as a
+%% non-task handler does. A modern one has no back-channel, so the task
+%% parks and publishes what it wants; the client answers through
+%% `tasks/update'.
+task_input_round(Owner, TaskId, Requests, HandlerState) when is_binary(Owner) ->
+    case legacy_input_answers(Owner, TaskId, Requests) of
+        {ok, Responses} ->
+            resume_legacy_task(Owner, TaskId, Responses, HandlerState);
+        {error, Reason} ->
+            barrel_mcp_tasks:fail(Owner, TaskId, input_error(Reason))
+    end;
+task_input_round(Owner, TaskId, Requests, HandlerState) ->
+    case
+        barrel_mcp_tasks:await_input(
+            Owner, TaskId, Requests, HandlerState, task_params(TaskId, Owner)
+        )
+    of
+        ok ->
+            ok;
+        {error, Reason} ->
+            barrel_mcp_tasks:fail(Owner, TaskId, input_error(Reason))
+    end.
+
+%% Issued through the session's own pending-request registry, the same
+%% one sampling, elicitation and roots already use, so an id is never
+%% allocated twice for one session and a response routes back the usual
+%% way. Every message carries the related-task metadata the legacy
+%% specification requires.
+legacy_input_answers(SessionId, TaskId, Requests) ->
+    Meta = #{?MCP_META_RELATED_TASK => #{<<"taskId">> => TaskId}},
+    maps:fold(
+        fun
+            (_Key, _Request, {error, _} = Err) ->
+                Err;
+            (Key, Request, {ok, Acc}) ->
+                case legacy_input_answer(SessionId, Request, Meta) of
+                    {ok, Response} -> {ok, Acc#{Key => Response}};
+                    {error, _} = Err -> Err
+                end
+        end,
+        {ok, #{}},
+        Requests
+    ).
+
+legacy_input_answer(SessionId, Request, Meta) ->
+    Params = with_related_task(request_params(Request), Meta),
+    case request_method(Request) of
+        <<"elicitation/create">> ->
+            barrel_mcp_session:elicit_create(SessionId, Params, #{});
+        <<"sampling/createMessage">> ->
+            case barrel_mcp_session:sampling_create_message(SessionId, Params, #{}) of
+                {ok, Result, _Usage} -> {ok, Result};
+                {error, _} = Err -> Err
+            end;
+        <<"roots/list">> ->
+            case barrel_mcp_session:roots_list(SessionId, #{}) of
+                {ok, Roots} -> {ok, #{<<"roots">> => Roots}};
+                {error, _} = Err -> Err
+            end;
+        Other ->
+            {error, {unsupported_input_request, Other}}
+    end.
+
+with_related_task(Params, Meta) when is_map(Params) ->
+    Existing = maps:get(<<"_meta">>, Params, #{}),
+    Params#{<<"_meta">> => maps:merge(Existing, Meta)};
+with_related_task(_Params, Meta) ->
+    #{<<"_meta">> => Meta}.
+
+%% Answered, so the handler runs again reporting into the same task.
+resume_legacy_task(Owner, TaskId, Responses, HandlerState) ->
+    case barrel_mcp_tasks:params(Owner, TaskId) of
+        {ok, Params} ->
+            Info = #{
+                params => Params,
+                responses => Responses,
+                methods => #{},
+                state => HandlerState
+            },
+            _ = resume_task(Owner, TaskId, Info, legacy_ctx(Owner)),
+            ok;
+        {error, not_found} ->
+            ok
+    end.
+
+legacy_ctx(SessionId) ->
+    barrel_mcp_ctx:from_request(#{<<"method">> => <<"tools/call">>}, #{
+        session_id => SessionId
+    }).
 
 %% The params of the call this task was created for, so the handler can
 %% be re-invoked once its questions are answered.

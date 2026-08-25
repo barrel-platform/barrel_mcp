@@ -97,6 +97,10 @@
 -define(MCP_META_LOG_LEVEL, <<"io.modelcontextprotocol/logLevel">>).
 -define(MCP_META_SERVER_INFO, <<"io.modelcontextprotocol/serverInfo">>).
 -define(MCP_META_SUBSCRIPTION_ID, <<"io.modelcontextprotocol/subscriptionId">>).
+%% Ties a message to the task it belongs to (2025-11-25). Required on
+%% requests, notifications and responses related to a task, but not on
+%% the task-management methods themselves, whose params already name it.
+-define(MCP_META_RELATED_TASK, <<"io.modelcontextprotocol/related-task">>).
 
 %% Official extension identifiers, negotiated through the `extensions'
 %% field of client and server capabilities.
