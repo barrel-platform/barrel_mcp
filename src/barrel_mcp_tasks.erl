@@ -31,6 +31,7 @@
     start_link/0,
     create/3,
     get/2,
+    get/3,
     list/2,
     cancel/2,
     finish/3,
@@ -52,6 +53,9 @@
 -define(TASK_TTL, 3600 * 1000).
 %% 1 minute
 -define(SWEEP_INTERVAL, 60 * 1000).
+%% How long a terminal record outlives its ttl, so a late poll sees the
+%% outcome rather than a bare not-found.
+-define(TERMINAL_RETENTION, 60 * 1000).
 
 -record(task, {
     id :: binary(),
@@ -63,11 +67,22 @@
     %% We don't model `submitted' today (workers start immediately),
     %% so the initial state is `working' and terminal states are
     %% `completed', `failed', `cancelled'.
-    status :: working | completed | failed | cancelled,
+    %% `input_required' is 2025-11-25 core, not something the 2026
+    %% extension added: both eras have it, and reach it differently.
+    status :: working | input_required | completed | failed | cancelled,
     result :: term(),
     error :: term(),
     created_at :: integer(),
     updated_at :: integer(),
+    %% Retention this task was actually granted, which is what a
+    %% requestor is told and what expiry is computed from. A requested
+    %% value may be clamped, and the answer must report what was
+    %% granted rather than what was asked for.
+    ttl_ms :: pos_integer() | undefined,
+    %% Bumped whenever the task is re-driven, so a result from a worker
+    %% that has been superseded or expired can be told apart from the
+    %% current one and discarded.
+    generation = 0 :: non_neg_integer(),
     worker_pid :: pid() | undefined,
     request_id :: integer() | binary() | undefined,
     %% Answers a client supplied through `tasks/update'. Recorded even
@@ -90,14 +105,22 @@ start_link() ->
     Method :: binary(),
     Opts :: map()
 ) -> {ok, binary()}.
-create(Owner, Method, _Opts) ->
-    gen_server:call(?MODULE, {create, Owner, Method}).
+create(Owner, Method, Opts) ->
+    gen_server:call(?MODULE, {create, Owner, Method, Opts}).
 
+%% @doc Read a task, rendered for the handshake era.
 -spec get(SessionId :: binary() | undefined, TaskId :: binary()) ->
     {ok, map()} | {error, not_found}.
 get(SessionId, TaskId) ->
+    get(SessionId, TaskId, legacy).
+
+%% @doc Read a task rendered for a given era. The retention field is
+%% named `ttl' through 2025-11-25 and `ttlMs' in the extension.
+-spec get(binary() | undefined, binary(), legacy | modern) ->
+    {ok, map()} | {error, not_found}.
+get(SessionId, TaskId, Era) ->
     case lookup(SessionId, TaskId) of
-        {ok, Task} -> {ok, task_to_map(Task)};
+        {ok, Task} -> {ok, task_to_map(Task, Era)};
         {error, not_found} -> {error, not_found}
     end.
 
@@ -171,7 +194,21 @@ init([]) ->
     erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
     {ok, #{}}.
 
-handle_call({create, Owner, Method}, _From, State) ->
+%% What the requestor asked for, clamped to what this server is willing
+%% to hold. Reporting the granted value is required; reporting the
+%% request back would be a lie whenever it was clamped.
+granted_ttl(Opts) ->
+    Default = application:get_env(barrel_mcp, task_ttl_ms, ?TASK_TTL),
+    Max = application:get_env(barrel_mcp, task_max_ttl_ms, ?TASK_TTL),
+    case maps:get(ttl, Opts, undefined) of
+        Requested when is_integer(Requested), Requested > 0 -> min(Requested, Max);
+        _ -> min(Default, Max)
+    end.
+
+ttl_or_null(undefined) -> null;
+ttl_or_null(Ttl) -> Ttl.
+
+handle_call({create, Owner, Method, Opts}, _From, State) ->
     Now = erlang:system_time(millisecond),
     TaskId = generate_id(),
     Task = #task{
@@ -179,6 +216,7 @@ handle_call({create, Owner, Method}, _From, State) ->
         owner = Owner,
         method = Method,
         status = working,
+        ttl_ms = granted_ttl(Opts),
         created_at = Now,
         updated_at = Now
     },
@@ -245,29 +283,25 @@ handle_cast(_Msg, State) -> {noreply, State}.
 
 handle_info(sweep, State) ->
     Now = erlang:system_time(millisecond),
-    Cutoff = Now - ?TASK_TTL,
-    {Drop, Stranded} = ets:foldl(
-        fun
-            ({TaskId, #task{status = working} = T}, {D, S}) ->
-                case stranded(T, Now) of
-                    true -> {D, [{TaskId, T} | S]};
-                    false -> {D, S}
-                end;
-            ({TaskId, #task{updated_at = U}}, {D, S}) when U < Cutoff ->
-                {[TaskId | D], S};
-            (_, Acc) ->
-                Acc
+    {Expired, Stranded, Reapable} = ets:foldl(
+        fun({TaskId, T}, {E, S, R}) ->
+            classify_for_sweep(TaskId, T, Now, {E, S, R})
         end,
-        {[], []},
+        {[], [], []},
         ?TABLE
     ),
-    lists:foreach(fun(K) -> ets:delete(?TABLE, K) end, Drop),
+    %% Expiry applies in every state. A working or input_required task
+    %% past its ttl would otherwise hold its worker and continuation
+    %% for the life of the node, since a task that legitimately runs for
+    %% hours looks exactly the same.
+    lists:foreach(fun(T) -> expire(T) end, Expired),
     lists:foreach(
         fun({TaskId, #task{owner = Owner}}) ->
             _ = transition(Owner, TaskId, failed, undefined, worker_died)
         end,
         Stranded
     ),
+    lists:foreach(fun(K) -> ets:delete(?TABLE, K) end, Reapable),
     erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
     {noreply, State};
 handle_info(_, State) ->
@@ -296,6 +330,61 @@ generate_id() ->
     Rand = crypto:strong_rand_bytes(16),
     Hex = binary:encode_hex(Rand, lowercase),
     <<"task_", Hex/binary>>.
+
+%% Three outcomes: past its ttl in any state, working with a dead worker
+%% and nothing reported, or a terminal record whose retention window has
+%% also elapsed.
+classify_for_sweep(TaskId, #task{status = St} = T, Now, {E, S, R}) ->
+    case {expired(T, Now), St} of
+        {true, _} ->
+            {[T | E], S, R};
+        {false, working} ->
+            case stranded(T, Now) of
+                true -> {E, [{TaskId, T} | S], R};
+                false -> {E, S, R}
+            end;
+        {false, input_required} ->
+            {E, S, R};
+        {false, _Terminal} ->
+            case reapable(T, Now) of
+                true -> {E, S, [TaskId | R]};
+                false -> {E, S, R}
+            end
+    end.
+
+%% From creation, not from the last update: ttl is the retention this
+%% task was granted, and touching it must not extend that.
+expired(#task{ttl_ms = undefined}, _Now) ->
+    false;
+expired(#task{created_at = C, ttl_ms = Ttl}, Now) ->
+    Now > C + Ttl.
+
+%% A terminal record is kept a little past expiry so a late poll sees
+%% the outcome rather than a bare not-found.
+reapable(#task{created_at = C, ttl_ms = Ttl}, Now) when is_integer(Ttl) ->
+    Now > C + Ttl + ?TERMINAL_RETENTION;
+reapable(#task{updated_at = U}, Now) ->
+    Now > U + ?TASK_TTL.
+
+%% An expired task stops whatever it was doing and is fenced, so a
+%% result arriving from the worker afterwards cannot revive it.
+expire(#task{id = TaskId, owner = Owner, worker_pid = Worker, generation = G}) ->
+    _ =
+        case is_pid(Worker) andalso is_process_alive(Worker) of
+            true -> exit(Worker, kill);
+            false -> ok
+        end,
+    case lookup(Owner, TaskId) of
+        {ok, Current} ->
+            true = ets:insert(?TABLE, {TaskId, Current#task{generation = G + 1}}),
+            _ = transition(Owner, TaskId, failed, undefined, expired_error()),
+            ok;
+        {error, not_found} ->
+            ok
+    end.
+
+expired_error() ->
+    #{<<"code">> => -32603, <<"message">> => <<"Task expired">>}.
 
 %% A working task whose worker is gone and which nothing has reported
 %% on. The collector normally records the outcome the moment the worker
@@ -349,26 +438,38 @@ notify_changed(SessionId, #task{} = Task) ->
             ok
     end.
 
-task_to_map(#task{
-    id = Id,
-    owner = Owner,
-    method = M,
-    status = St,
-    result = R,
-    error = E,
-    created_at = C,
-    updated_at = U
-}) ->
+task_to_map(Task) ->
+    task_to_map(Task, legacy).
+
+%% The two eras name the retention field differently: `ttl' through
+%% 2025-11-25, `ttlMs' in the extension. Both report what was granted,
+%% not what was asked for, and both require it.
+task_to_map(
+    #task{
+        id = Id,
+        owner = Owner,
+        method = M,
+        status = St,
+        result = R,
+        error = E,
+        created_at = C,
+        updated_at = U,
+        ttl_ms = Ttl
+    },
+    Era
+) ->
+    TtlKey =
+        case Era of
+            modern -> <<"ttlMs">>;
+            _ -> <<"ttl">>
+        end,
     Base = #{
         <<"taskId">> => Id,
         <<"method">> => M,
         <<"status">> => atom_to_binary(St, utf8),
         <<"createdAt">> => to_rfc3339(C),
         <<"lastUpdatedAt">> => to_rfc3339(U),
-        %% `ttl' is the requested retention duration in milliseconds,
-        %% null when unlimited. We don't yet honour a client-supplied
-        %% TTL, so we report null.
-        <<"ttl">> => null
+        TtlKey => ttl_or_null(Ttl)
     },
     Base1 =
         case Owner of

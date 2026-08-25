@@ -918,7 +918,7 @@ handle_long_running_call(
         #{worker => Worker, request_id => RequestId}
     ),
     Task =
-        case barrel_mcp_tasks:get(Owner, TaskId) of
+        case barrel_mcp_tasks:get(Owner, TaskId, barrel_mcp_ctx:era(RequestCtx)) of
             {ok, T} -> T;
             _ -> #{<<"taskId">> => TaskId, <<"status">> => <<"working">>}
         end,

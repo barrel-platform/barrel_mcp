@@ -771,24 +771,37 @@ task_collector_loop(Owner, TaskId) ->
             task_collector_loop(Owner, TaskId)
     end.
 
+%% Rendered for the era that asked, since the retention field is named
+%% `ttl' before the extension and `ttlMs' in it.
+read_task_for(Owner, TaskId, Ctx) ->
+    Era = barrel_mcp_ctx:era(Ctx),
+    case barrel_mcp_tasks:get(Owner, TaskId, Era) of
+        {ok, T} -> T;
+        _ -> #{<<"taskId">> => TaskId, <<"status">> => <<"working">>}
+    end.
+
 %% @doc The result that hands a client a task instead of a value.
 %%
 %% `pollIntervalMs' is a hint at how often to come back; `ttlMs' is how
 %% long the handle stays resolvable.
 -spec create_task_result(binary(), map(), barrel_mcp_ctx:ctx()) -> map().
-create_task_result(TaskId, Task, Ctx) ->
-    Base = #{
-        <<"taskId">> => TaskId,
-        <<"status">> => maps:get(<<"status">>, Task, <<"working">>),
-        <<"ttlMs">> => application:get_env(barrel_mcp, task_ttl_ms, 3600000),
-        <<"pollIntervalMs">> =>
-            application:get_env(barrel_mcp, task_poll_interval_ms, 1000)
-    },
+create_task_result(_TaskId, Task, Ctx) ->
     case barrel_mcp_ctx:is_modern(Ctx) of
         %% Legacy clients negotiated the core task methods and expect
         %% the handle wrapped, not a polymorphic result type.
-        false -> #{<<"task">> => Task};
-        true -> Base#{<<"resultType">> => <<"task">>}
+        false ->
+            #{<<"task">> => Task};
+        true ->
+            %% `CreateTaskResult = Result & Task': the task's fields are
+            %% spread into the result rather than nested, and taskId,
+            %% status, createdAt, lastUpdatedAt and ttlMs are all
+            %% required. Building a handle by hand left the timestamps
+            %% out, so the stored task is the source here.
+            Task#{
+                <<"resultType">> => <<"task">>,
+                <<"pollIntervalMs">> =>
+                    application:get_env(barrel_mcp, task_poll_interval_ms, 1000)
+            }
     end.
 
 %%====================================================================
@@ -1217,7 +1230,7 @@ handle_request(<<"tasks/list">>, Params, Id, Ctx) ->
     success_response(Id, with_next_cursor(#{<<"tasks">> => Page}, Next));
 handle_request(<<"tasks/get">>, Params, Id, Ctx) ->
     TaskId = maps:get(<<"taskId">>, Params, <<>>),
-    case barrel_mcp_tasks:get(task_owner(Ctx), TaskId) of
+    case barrel_mcp_tasks:get(task_owner(Ctx), TaskId, barrel_mcp_ctx:era(Ctx)) of
         {ok, Task} -> success_response(Id, Task);
         {error, not_found} -> error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
     end;
@@ -1240,11 +1253,17 @@ handle_request(<<"tasks/cancel">>, Params, Id, Ctx) ->
     TaskId = maps:get(<<"taskId">>, Params, <<>>),
     case barrel_mcp_tasks:cancel(Owner, TaskId) of
         ok ->
-            %% Spec / reference SDK expect the cancelled Task back,
-            %% not an empty object.
-            case barrel_mcp_tasks:get(Owner, TaskId) of
-                {ok, Task} -> success_response(Id, Task);
-                {error, not_found} -> success_response(Id, #{})
+            %% The eras disagree. 2025-11-25 returns the cancelled task;
+            %% the extension returns an acknowledgement, which still
+            %% carries resultType like every modern result.
+            case barrel_mcp_ctx:is_modern(Ctx) of
+                true ->
+                    success_response(Id, #{<<"resultType">> => <<"complete">>});
+                false ->
+                    case barrel_mcp_tasks:get(Owner, TaskId) of
+                        {ok, Task} -> success_response(Id, Task);
+                        {error, not_found} -> success_response(Id, #{})
+                    end
             end;
         {error, not_found} ->
             error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
@@ -1488,11 +1507,7 @@ drive_as_task(Plan, ToolName, Ctx, AuthInfo) ->
         TaskId,
         #{worker => Worker, request_id => RequestId}
     ),
-    Task =
-        case barrel_mcp_tasks:get(Owner, TaskId) of
-            {ok, T} -> T;
-            _ -> #{<<"taskId">> => TaskId, <<"status">> => <<"working">>}
-        end,
+    Task = read_task_for(Owner, TaskId, Ctx),
     success_response(RequestId, create_task_result(TaskId, Task, Ctx)).
 
 run_async_plan(Plan, Timeout, AuthInfo) ->

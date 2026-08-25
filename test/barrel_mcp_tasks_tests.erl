@@ -134,7 +134,10 @@ drive_async_plan_test_() ->
         {"A modern caller gets a task", fun drive_returns_task/0},
         {"Without the extension it runs inline", fun drive_runs_inline/0},
         {"A legacy caller gets the wrapped shape", fun drive_legacy_shape/0},
-        {"A killed worker fails its task", fun killed_worker_fails_task/0}
+        {"A killed worker fails its task", fun killed_worker_fails_task/0},
+        {"Modern create carries every required field", fun modern_create_shape/0},
+        {"Legacy create keeps the wrapped shape", fun legacy_create_shape/0},
+        {"The granted ttl is reported, not the request", fun granted_ttl_reported/0}
     ]}.
 
 setup_slow() ->
@@ -253,3 +256,48 @@ wait_for_status(Owner, TaskId, Status, N) ->
             timer:sleep(25),
             wait_for_status(Owner, TaskId, Status, N - 1)
     end.
+
+%%====================================================================
+%% Wire shapes, which differ by era
+%%
+%% `CreateTaskResult = Result & Task' in the extension: the fields are
+%% spread, and taskId, status, createdAt, lastUpdatedAt and ttlMs are
+%% all required. Through 2025-11-25 the handle is wrapped instead and
+%% the retention field is `ttl'.
+%%====================================================================
+
+modern_create_shape() ->
+    Caps = #{<<"extensions">> => #{<<"io.modelcontextprotocol/tasks">> => #{}}},
+    Resp = drive(call_request(modern_meta(Caps))),
+    Result = maps:get(<<"result">>, Resp),
+    ?assertEqual(<<"task">>, maps:get(<<"resultType">>, Result)),
+    lists:foreach(
+        fun(Key) ->
+            ?assert(maps:is_key(Key, Result), {missing, Key})
+        end,
+        [<<"taskId">>, <<"status">>, <<"createdAt">>, <<"lastUpdatedAt">>, <<"ttlMs">>]
+    ),
+    %% Flat, not nested under a task key.
+    ?assertNot(maps:is_key(<<"task">>, Result)),
+    %% And the legacy spelling is gone.
+    ?assertNot(maps:is_key(<<"ttl">>, Result)).
+
+legacy_create_shape() ->
+    Resp = drive(call_request(#{})),
+    Result = maps:get(<<"result">>, Resp),
+    Task = maps:get(<<"task">>, Result),
+    ?assert(maps:is_key(<<"ttl">>, Task)),
+    ?assertNot(maps:is_key(<<"ttlMs">>, Task)),
+    ?assertNot(maps:is_key(<<"resultType">>, Result)).
+
+%% A requested ttl may be clamped, and the answer must say what was
+%% granted rather than repeat the request.
+granted_ttl_reported() ->
+    Max = application:get_env(barrel_mcp, task_max_ttl_ms, 3600000),
+    {ok, TaskId} = barrel_mcp_tasks:create(<<"ttl-sess">>, <<"tools/call">>, #{
+        ttl => Max * 10
+    }),
+    {ok, Task} = barrel_mcp_tasks:get(<<"ttl-sess">>, TaskId),
+    ?assertEqual(Max, maps:get(<<"ttl">>, Task)),
+    {ok, Modern} = barrel_mcp_tasks:get(<<"ttl-sess">>, TaskId, modern),
+    ?assertEqual(Max, maps:get(<<"ttlMs">>, Modern)).
