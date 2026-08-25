@@ -140,7 +140,9 @@ drive_async_plan_test_() ->
         {"The granted ttl is reported, not the request", fun granted_ttl_reported/0},
         {"Task methods need the extension declared", fun task_methods_need_extension/0},
         {"Legacy task methods are ungated", fun legacy_task_methods_ungated/0},
-        {"A tool error completes the task", fun tool_error_completes_task/0}
+        {"A tool error completes the task", fun tool_error_completes_task/0},
+        {"Admission refuses past the per-principal cap", fun per_principal_cap/0},
+        {"An unexpired task is never evicted to make room", fun no_eviction_of_live_tasks/0}
     ]}.
 
 setup_slow() ->
@@ -360,3 +362,56 @@ tool_error_completes_task() ->
     {ok, Task} = barrel_mcp_tasks:get(Owner, TaskId),
     ?assertEqual(<<"completed">>, maps:get(<<"status">>, Task)),
     ?assertEqual(true, maps:get(<<"isError">>, maps:get(<<"result">>, Task))).
+
+%%====================================================================
+%% Admission limits
+%%
+%% A ttl bounds how long a task is kept, not how many a peer may open,
+%% so a caller could exhaust memory well inside the retention window.
+%%====================================================================
+
+with_task_cap(N, Fun) ->
+    Old = application:get_env(barrel_mcp, max_tasks_per_principal),
+    application:set_env(barrel_mcp, max_tasks_per_principal, N),
+    try
+        Fun()
+    after
+        case Old of
+            {ok, V} -> application:set_env(barrel_mcp, max_tasks_per_principal, V);
+            undefined -> application:unset_env(barrel_mcp, max_tasks_per_principal)
+        end
+    end.
+
+per_principal_cap() ->
+    with_task_cap(3, fun() ->
+        Owner = <<"cap-sess">>,
+        Ids = [
+            begin
+                {ok, Id} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+                Id
+            end
+         || _ <- lists:seq(1, 3)
+        ],
+        ?assertEqual(3, length(Ids)),
+        ?assertEqual(
+            {error, too_many_tasks},
+            barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{})
+        ),
+        %% Another principal is unaffected: the cap is per identity.
+        ?assertMatch({ok, _}, barrel_mcp_tasks:create(<<"other-sess">>, <<"tools/call">>, #{}))
+    end).
+
+%% Evicting a live record to make room would break the retention the
+%% ttl promised, so admission is refused instead.
+no_eviction_of_live_tasks() ->
+    with_task_cap(2, fun() ->
+        Owner = <<"evict-sess">>,
+        {ok, First} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+        {ok, _Second} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+        ?assertEqual(
+            {error, too_many_tasks},
+            barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{})
+        ),
+        %% The first is still there, and still readable.
+        ?assertMatch({ok, _}, barrel_mcp_tasks:get(Owner, First))
+    end).

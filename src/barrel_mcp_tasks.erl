@@ -57,6 +57,12 @@
 %% outcome rather than a bare not-found.
 -define(TERMINAL_RETENTION, 60 * 1000).
 
+%% Admission limits. A ttl bounds how long a task is kept, not how many
+%% a peer may open, so both are needed: without a count, a caller can
+%% exhaust memory well inside the retention window.
+-define(DEFAULT_MAX_TASKS_PER_PRINCIPAL, 100).
+-define(DEFAULT_MAX_TASKS_TOTAL, 10000).
+
 -record(task, {
     id :: binary(),
     %% A session id (legacy) or `{principal, AuthInfo}' (modern).
@@ -104,7 +110,7 @@ start_link() ->
     SessionId :: binary() | undefined,
     Method :: binary(),
     Opts :: map()
-) -> {ok, binary()}.
+) -> {ok, binary()} | {error, too_many_tasks}.
 create(Owner, Method, Opts) ->
     gen_server:call(?MODULE, {create, Owner, Method, Opts}).
 
@@ -208,7 +214,35 @@ granted_ttl(Opts) ->
 ttl_or_null(undefined) -> null;
 ttl_or_null(Ttl) -> Ttl.
 
-handle_call({create, Owner, Method, Opts}, _From, State) ->
+%% Refuse at admission rather than evict later. An unexpired record is
+%% the retention we advertised, so dropping one to make room would break
+%% the promise the ttl made; refusing the new task does not.
+admit(Owner) ->
+    PerPrincipal = application:get_env(
+        barrel_mcp, max_tasks_per_principal, ?DEFAULT_MAX_TASKS_PER_PRINCIPAL
+    ),
+    Total = application:get_env(barrel_mcp, max_tasks_total, ?DEFAULT_MAX_TASKS_TOTAL),
+    case ets:info(?TABLE, size) of
+        Size when is_integer(Size), Size >= Total ->
+            {error, too_many_tasks};
+        _ ->
+            case count_owned(Owner) >= PerPrincipal of
+                true -> {error, too_many_tasks};
+                false -> ok
+            end
+    end.
+
+count_owned(Owner) ->
+    ets:foldl(
+        fun
+            ({_, #task{owner = O}}, N) when O =:= Owner -> N + 1;
+            (_, N) -> N
+        end,
+        0,
+        ?TABLE
+    ).
+
+do_create(Owner, Method, Opts) ->
     Now = erlang:system_time(millisecond),
     TaskId = generate_id(),
     Task = #task{
@@ -222,7 +256,15 @@ handle_call({create, Owner, Method, Opts}, _From, State) ->
     },
     true = ets:insert(?TABLE, {TaskId, Task}),
     notify_changed(Owner, Task),
-    {reply, {ok, TaskId}, State};
+    {ok, TaskId}.
+
+handle_call({create, Owner, Method, Opts}, _From, State) ->
+    case admit(Owner) of
+        {error, Reason} ->
+            {reply, {error, Reason}, State};
+        ok ->
+            {reply, do_create(Owner, Method, Opts), State}
+    end;
 handle_call({cancel, SessionId, TaskId}, _From, State) ->
     %% Best-effort: send the worker a cooperative cancel signal so
     %% arity-2 tool handlers can short-circuit. Then transition

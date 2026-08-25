@@ -1522,9 +1522,24 @@ long_running_plan(Plan, Ctx) ->
 %% the task. The caller is not waiting on it.
 drive_as_task(Plan, ToolName, Ctx, AuthInfo) ->
     RequestId = maps:get(request_id, Plan),
+    case barrel_mcp_tasks:create(task_owner(Ctx), ToolName, #{}) of
+        {error, too_many_tasks} ->
+            %% Refused at admission, so there is still a request to
+            %% answer. Running the tool anyway would produce a result
+            %% with nowhere to put it.
+            error_response(
+                RequestId,
+                ?JSONRPC_INTERNAL_ERROR,
+                <<"Too many concurrent tasks">>
+            );
+        {ok, TaskId} ->
+            drive_as_task(Plan, ToolName, Ctx, AuthInfo, TaskId)
+    end.
+
+drive_as_task(Plan, _ToolName, Ctx, AuthInfo, TaskId) ->
+    RequestId = maps:get(request_id, Plan),
     Spawn = maps:get(spawn, Plan),
     Owner = task_owner(Ctx),
-    {ok, TaskId} = barrel_mcp_tasks:create(Owner, ToolName, #{}),
     {_Collector, Worker} = spawn_task_collector(Owner, TaskId, fun(Collector) ->
         Spawn(#{
             request_id => RequestId,

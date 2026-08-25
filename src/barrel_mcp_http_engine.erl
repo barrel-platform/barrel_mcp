@@ -893,10 +893,56 @@ handle_long_running_call(
     Spawn,
     AuthInfo
 ) ->
-    SessionId = maps:get(session_id, Reply),
     RequestCtx = maps:get(ctx, Reply),
     Owner = task_owner(RequestCtx),
-    {ok, TaskId} = barrel_mcp_tasks:create(Owner, ToolName, #{}),
+    case barrel_mcp_tasks:create(Owner, ToolName, #{}) of
+        {error, too_many_tasks} ->
+            %% Refused at admission, and the caller is still waiting,
+            %% so it is told rather than left to poll a task that was
+            %% never created.
+            reply_json(
+                Headers,
+                Responder,
+                Config,
+                200,
+                barrel_mcp_protocol:error_response(
+                    RequestId,
+                    ?JSONRPC_INTERNAL_ERROR,
+                    <<"Too many concurrent tasks">>
+                )
+            );
+        {ok, TaskId} ->
+            start_task_worker(
+                Headers,
+                Responder,
+                Config,
+                Reply,
+                RequestId,
+                ProgressToken,
+                Meta,
+                Spawn,
+                AuthInfo,
+                Owner,
+                TaskId,
+                RequestCtx
+            )
+    end.
+
+start_task_worker(
+    Headers,
+    Responder,
+    Config,
+    Reply,
+    RequestId,
+    ProgressToken,
+    Meta,
+    Spawn,
+    AuthInfo,
+    Owner,
+    TaskId,
+    RequestCtx
+) ->
+    SessionId = maps:get(session_id, Reply),
     {_Collector, Worker} = barrel_mcp_protocol:spawn_task_collector(
         Owner,
         TaskId,
