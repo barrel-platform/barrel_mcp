@@ -372,9 +372,8 @@ check_round(#mrtr{rounds = Rounds, issued = Issued}, Requests, HandlerState) ->
         {StateBytes > MaxState, task_state_too_large}
     ]).
 
-%% The first limit a round trips, in the order the checks are listed:
-%% a handler that broke two of them should hear about the same one on
-%% every run.
+%% Ordered, so a round that breaks two limits names the same one every
+%% run.
 first_error([]) -> ok;
 first_error([{true, Reason} | _]) -> {error, Reason};
 first_error([{false, _} | Rest]) -> first_error(Rest).

@@ -107,6 +107,9 @@
     sampling_create_message/3,
     list_sessions_with_sampling/0,
     elicit_create/3,
+    elicit_form/2,
+    elicit_url/3,
+    elicit_complete/2,
     list_sessions_with_elicitation/0,
     roots_list/1,
     roots_list/2,
@@ -773,6 +776,36 @@ list_sessions_with_sampling() ->
 elicit_create(SessionId, Params, Opts) ->
     barrel_mcp_session:elicit_create(SessionId, Params, Opts).
 
+%% @doc Build the params for a form-mode `elicitation/create'. Pass the
+%% result as an `{input_required, Requests, State}' entry, or as the
+%% `Params' of {@link elicit_create/3}.
+%%
+%% Never for secrets; use {@link elicit_url/3}.
+-spec elicit_form(binary(), map()) -> map().
+elicit_form(Message, Schema) ->
+    barrel_mcp_elicitation:form(Message, Schema).
+
+%% @doc Build the params for a URL-mode `elicitation/create', the mode
+%% for anything the client must not see. `Ctx' is the tool handler's
+%% context. See {@link barrel_mcp_elicitation:url/4} for what is
+%% checked and what stays yours to honour.
+-spec elicit_url(binary(), binary(), map()) -> {ok, map()} | {error, term()}.
+elicit_url(Message, Url, Ctx) ->
+    case maps:get(mcp_ctx, Ctx, undefined) of
+        undefined -> {error, no_request_context};
+        McpCtx -> barrel_mcp_elicitation:url(Message, Url, McpCtx)
+    end.
+
+%% @doc Mark a URL-mode elicitation complete, notifying the client that
+%% started it. Call it from whatever handles your redirect; completion
+%% is authorised against the owning principal.
+%%
+%% 2025-11-25 only.
+-spec elicit_complete(binary(), map() | term()) ->
+    ok | {error, not_found | already_complete}.
+elicit_complete(ElicitationId, Ctx) ->
+    barrel_mcp_elicitation:complete(ElicitationId, Ctx).
+
 %% @doc Return the ids of currently connected sessions whose client
 %% declared elicitation capability.
 -spec list_sessions_with_elicitation() -> [binary()].
@@ -964,23 +997,12 @@ decode_input(_Method, Response) ->
     {ok, Response}.
 
 %% @doc Emit `notifications/message' for the request this tool is
-%% serving. `Logger' is an optional component name; pass `undefined' to
-%% omit it. `Data' is the structured payload, typically a string or a
-%% map.
+%% serving. `Logger' is optional; pass `undefined' to omit it.
 %%
-%% Where it goes, and whether it goes at all, depends on the era:
-%%
-%% <ul>
-%%   <li>modern — on this request's own response stream, and only when
-%%       the request named `io.modelcontextprotocol/logLevel' in its
-%%       `_meta'. A request that did not opt in gets nothing, and
-%%       anything below the level it asked for is dropped.</li>
-%%   <li>legacy — on the session's SSE channel, filtered by whatever
-%%       `logging/setLevel' last set.</li>
-%% </ul>
-%%
-%% Silently does nothing when there is nowhere to deliver, so a handler
-%% never has to ask first.
+%% Modern: on this request's own response stream, and only if it named
+%% `io.modelcontextprotocol/logLevel' in its `_meta'. Legacy: on the
+%% session's SSE channel, filtered by `logging/setLevel'. Silent when
+%% there is nowhere to deliver.
 -spec log(map(), atom() | binary(), term()) -> ok.
 log(Ctx, Level, Data) ->
     log(Ctx, Level, undefined, Data).

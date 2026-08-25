@@ -494,11 +494,9 @@ spawn_handler(Proto, Conn, StreamId, Method, Path, Headers, Handler) ->
     %% orphaned, holding its subscription forever.
     spawn_opt(
         fun() ->
-            %% Trapping turns that link into a message. It has to: what
-            %% a lost connection means is revision-dependent, since
-            %% 2026-07-28 reads it as cancellation while every earlier
-            %% revision says it is not, and only the engine knows which
-            %% one is being served. Dying here would decide it for both.
+            %% Trapping turns that link into a message. What a lost
+            %% connection means is revision-dependent, and only the
+            %% engine knows which revision is being served.
             process_flag(trap_exit, true),
             try
                 Handler(Proto, Conn, StreamId, Method, Path, Headers)

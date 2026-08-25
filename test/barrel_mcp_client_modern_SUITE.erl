@@ -53,12 +53,17 @@
     task_result_only_on_tools_call/1,
     legacy_result_needs_no_type/1,
     modern_timeout_closes_the_stream/1,
-    legacy_timeout_sends_cancelled/1
+    legacy_timeout_sends_cancelled/1,
+    url_elicitation_goes_to_its_own_callback/1,
+    url_elicitation_without_a_callback_declines/1,
+    url_mode_needs_the_url_capability/1,
+    unusable_elicitation_url_never_reaches_the_handler/1
 ]).
 
 -export([echo_tool/1, a_resource/1, a_prompt/1, legacy_only_server/1]).
 -export([version_error_server/1, result_type_server/1, slow_server/1]).
--export([confirm_tool/2, insatiable_tool/2, region_tool/1]).
+-export([confirm_tool/2, insatiable_tool/2, region_tool/1, connect_tool/2]).
+-export([bad_url_server/1]).
 
 -define(BASE_PORT, 22000).
 -define(MODERN, <<"2026-07-28">>).
@@ -97,7 +102,11 @@ all() ->
         task_result_only_on_tools_call,
         legacy_result_needs_no_type,
         modern_timeout_closes_the_stream,
-        legacy_timeout_sends_cancelled
+        legacy_timeout_sends_cancelled,
+        url_elicitation_goes_to_its_own_callback,
+        url_elicitation_without_a_callback_declines,
+        url_mode_needs_the_url_capability,
+        unusable_elicitation_url_never_reaches_the_handler
     ].
 
 init_per_suite(Config) ->
@@ -112,6 +121,9 @@ init_per_suite(Config) ->
     }),
     ok = barrel_mcp:reg_tool(<<"insatiable">>, ?MODULE, insatiable_tool, #{
         description => <<"Never satisfied">>
+    }),
+    ok = barrel_mcp:reg_tool(<<"connect">>, ?MODULE, connect_tool, #{
+        description => <<"Sends the user out of band to authorise">>
     }),
     ok = barrel_mcp:reg_tool(<<"regional">>, ?MODULE, region_tool, #{
         description => <<"Mirrors its region argument into a header">>,
@@ -138,6 +150,7 @@ end_per_suite(_Config) ->
     barrel_mcp_registry:unreg(tool, <<"echo">>),
     barrel_mcp_registry:unreg(tool, <<"confirm">>),
     barrel_mcp_registry:unreg(tool, <<"insatiable">>),
+    barrel_mcp_registry:unreg(tool, <<"connect">>),
     barrel_mcp_registry:unreg(tool, <<"regional">>),
     barrel_mcp_registry:unreg(resource, <<"res">>),
     barrel_mcp_registry:unreg(prompt, <<"greet">>),
@@ -203,6 +216,33 @@ insatiable_tool(_Args, _Ctx) ->
             }
         },
         asked}.
+
+%% Sends the user out of band, then reads back whether they consented.
+connect_tool(_Args, Ctx) ->
+    case barrel_mcp:input(Ctx, <<"auth">>) of
+        {ok, #{<<"action">> := <<"accept">>}} ->
+            <<"connected">>;
+        {ok, #{<<"action">> := Action}} ->
+            {tool_error, <<"not authorised: ", Action/binary>>};
+        none ->
+            case
+                barrel_mcp:elicit_url(
+                    <<"Authorise access">>, <<"https://auth.example.com/start">>, Ctx
+                )
+            of
+                {ok, Params} ->
+                    {input_required,
+                        #{
+                            <<"auth">> => #{
+                                method => <<"elicitation/create">>,
+                                params => Params
+                            }
+                        },
+                        asked};
+                {error, Reason} ->
+                    {tool_error, iolist_to_binary(io_lib:format("~p", [Reason]))}
+            end
+    end.
 
 a_prompt(_Args) ->
     #{
@@ -785,9 +825,7 @@ excludes_tools_with_bad_annotations(Config) ->
 %% Result discriminator
 %%====================================================================
 
-%% `resultType' tells the client how to parse the result, so a value it
-%% does not understand cannot be handed to the caller as a success: it
-%% would act on a shape it never checked.
+%% A value the client cannot parse must not reach the caller as success.
 unknown_result_type_is_refused(Config) ->
     with_result_body(Config, #{<<"resultType">> => <<"weird">>}, #{}, fun(Client) ->
         ?assertEqual(
@@ -797,9 +835,7 @@ unknown_result_type_is_refused(Config) ->
     end).
 
 %% "Servers implementing this protocol version MUST include this field"
-%% (schema/2026-07-28/schema.ts:227). A modern connection has already
-%% established the server implements it, so absence is a broken server
-%% rather than an older one.
+%% (schema/2026-07-28/schema.ts:227).
 missing_result_type_is_refused(Config) ->
     with_result_body(Config, #{<<"content">> => []}, #{}, fun(Client) ->
         ?assertEqual(
@@ -820,9 +856,8 @@ task_result_needs_the_extension(Config) ->
         )
     end).
 
-%% `tools/call' is the only task-augmentable method the extension
-%% defines, and a task handle for anything else "MUST" be read as an
-%% invalid response (tasks.md:59).
+%% A task handle for any other method "MUST" read as invalid
+%% (tasks.md:59).
 task_result_only_on_tools_call(Config) ->
     Body = #{<<"resultType">> => <<"task">>, <<"taskId">> => <<"t1">>},
     Caps = #{
@@ -831,8 +866,7 @@ task_result_only_on_tools_call(Config) ->
         }
     },
     with_result_body(Config, Body, Caps, fun(Client) ->
-        %% The same handle is accepted for tools/call and refused for
-        %% resources/read, so the method is what decides it.
+        %% Same handle, two methods: the method is what decides it.
         ?assertMatch({ok, _}, barrel_mcp_client:call_tool(Client, <<"echo">>, #{})),
         ?assertEqual(
             {error, {invalid_result, {task_not_allowed_for, <<"resources/read">>}}},
@@ -840,8 +874,7 @@ task_result_only_on_tools_call(Config) ->
         )
     end).
 
-%% A legacy result has no discriminator to check, so its absence is
-%% completion rather than a defect.
+%% No discriminator to check, so absence is completion.
 legacy_result_needs_no_type(Config) ->
     Client = connect(Config, <<"2025-11-25">>),
     {ok, Result} = barrel_mcp_client:call_tool(Client, <<"echo">>, #{
@@ -850,9 +883,7 @@ legacy_result_needs_no_type(Config) ->
     ?assertEqual(error, maps:find(<<"resultType">>, Result)),
     close(Client).
 
-%% A modern server that answers every call with one configured result
-%% body, so a case can put anything on the wire the client has to
-%% survive.
+%% Answers every call with one configured result body.
 result_type_server(#{body := Body}) ->
     Request = json:decode(Body),
     Id = maps:get(<<"id">>, Request, null),
@@ -913,12 +944,9 @@ with_result_body(Config, ResultBody, Extra, Fun) ->
 %% Cancellation by transport
 %%====================================================================
 
-%% On Streamable HTTP "closing the SSE response stream is itself the
-%% cancellation signal ... No notifications/cancelled message is
-%% required or expected"
-%% (2026-07-28/basic/patterns/cancellation.mdx:38). Sending one anyway
-%% would be a second, uncorrelated request: the era has no session to
-%% tie it to the first.
+%% "Closing the SSE response stream is itself the cancellation signal
+%% ... No notifications/cancelled message is required or expected"
+%% (2026-07-28/basic/patterns/cancellation.mdx:38).
 modern_timeout_closes_the_stream(Config) ->
     with_slow_server(Config, ?MODERN, fun(Client, Counter) ->
         ?assertEqual(
@@ -929,8 +957,7 @@ modern_timeout_closes_the_stream(Config) ->
         ?assertEqual(0, counters:get(Counter, 1))
     end).
 
-%% Legacy is the other way round: there a disconnect is explicitly not
-%% cancellation, so the notification is the only signal that works.
+%% Legacy runs the other way: a disconnect is not cancellation there.
 legacy_timeout_sends_cancelled(Config) ->
     with_slow_server(Config, <<"2025-11-25">>, fun(Client, Counter) ->
         ?assertEqual(
@@ -941,8 +968,7 @@ legacy_timeout_sends_cancelled(Config) ->
         ?assertEqual(1, counters:get(Counter, 1))
     end).
 
-%% Answers discovery and the handshake at once, stalls on `tools/call',
-%% and counts every `notifications/cancelled' it is sent.
+%% Stalls on `tools/call' and counts every cancellation it is sent.
 slow_server(#{body := Body}) ->
     Request = json:decode(Body),
     Id = maps:get(<<"id">>, Request, null),
@@ -1024,6 +1050,160 @@ with_slow_server(Config, Version, Fun) ->
     end.
 
 %%====================================================================
+%% URL-mode elicitation
+%%====================================================================
+
+%% The two modes reach the handler through different callbacks.
+url_elicitation_goes_to_its_own_callback(Config) ->
+    Client = connect_with(
+        Config,
+        #{mode => sync, owner => self(), url_action => accept},
+        #{capabilities => #{elicitation => #{form => true, url => true}}}
+    ),
+    {ok, Result} = barrel_mcp_client:call_tool(Client, <<"connect">>, #{}),
+    Request =
+        receive
+            {url_elicitation, R} -> R
+        after 5000 -> error(handler_never_asked)
+        end,
+    ?assertEqual(<<"https://auth.example.com/start">>, maps:get(url, Request)),
+    ?assertEqual(<<"auth.example.com">>, maps:get(host, Request)),
+    ?assertEqual(<<"Authorise access">>, maps:get(message, Request)),
+    %% 2026-07-28 removed elicitationId.
+    ?assertNot(maps:is_key(elicitation_id, Request)),
+    [Block] = maps:get(<<"content">>, Result),
+    ?assertEqual(<<"connected">>, maps:get(<<"text">>, Block)),
+    close(Client).
+
+%% "MUST NOT open the URL without explicit consent from the user"
+%% (2025-11-25/client/elicitation.mdx:727), and no consent UI means no
+%% consent to report.
+url_elicitation_without_a_callback_declines(Config) ->
+    Client = connect(Config, ?MODERN, #{
+        capabilities => #{elicitation => #{form => true, url => true}}
+    }),
+    {ok, Result} = barrel_mcp_client:call_tool(Client, <<"connect">>, #{}),
+    ?assertEqual(true, maps:get(<<"isError">>, Result)),
+    [Block] = maps:get(<<"content">>, Result),
+    ?assertEqual(<<"not authorised: decline">>, maps:get(<<"text">>, Block)),
+    close(Client).
+
+%% "Servers MUST NOT send elicitation requests with modes that are not
+%% supported by the client" (elicitation.mdx:77); plain `elicitation'
+%% is form only.
+url_mode_needs_the_url_capability(Config) ->
+    Client = connect_with(
+        Config,
+        #{mode => sync, owner => self()},
+        #{capabilities => #{elicitation => true}}
+    ),
+    ?assertMatch(
+        {error, {?MCP_MISSING_CLIENT_CAPABILITY, _}},
+        barrel_mcp_client:call_tool(Client, <<"connect">>, #{})
+    ),
+    %% The server refused to ask, so nothing reached the user.
+    receive
+        {url_elicitation, _} -> error(handler_was_asked)
+    after 200 -> ok
+    end,
+    close(Client).
+
+%% Cancelled, not declined: nobody was asked, so there is no decision
+%% to report.
+unusable_elicitation_url_never_reaches_the_handler(Config) ->
+    Port = ?config(port, Config) + 500,
+    persistent_term:put({?MODULE, retries}, counters:new(1, [])),
+    {ok, _} = barrel_mcp_test_http:start(
+        bad_url_mock, Port, fun ?MODULE:bad_url_server/1
+    ),
+    try
+        {ok, Client} = barrel_mcp_client:start(#{
+            transport => {http, url(Port)},
+            protocol_version => ?MODERN,
+            capabilities => #{elicitation => #{form => true, url => true}},
+            handler =>
+                {barrel_mcp_test_handler, #{mode => sync, owner => self()}}
+        }),
+        wait_until(fun() -> is_ready(Client) end, 8000),
+        {ok, Result} = barrel_mcp_client:call_tool(Client, <<"anything">>, #{}),
+        ?assertEqual(<<"cancel">>, maps:get(<<"echoedAction">>, Result)),
+        receive
+            {url_elicitation, _} -> error(handler_was_asked)
+        after 200 -> ok
+        end,
+        catch_close(Client)
+    after
+        barrel_mcp_test_http:stop(bad_url_mock),
+        persistent_term:erase({?MODULE, retries})
+    end.
+
+%% Offers a `javascript:' URL, then echoes back the action it got.
+bad_url_server(#{body := Body}) ->
+    Request = json:decode(Body),
+    Id = maps:get(<<"id">>, Request, null),
+    Response =
+        case maps:get(<<"method">>, Request, undefined) of
+            <<"server/discover">> ->
+                #{
+                    <<"jsonrpc">> => <<"2.0">>,
+                    <<"id">> => Id,
+                    <<"result">> => #{
+                        <<"resultType">> => <<"complete">>,
+                        <<"supportedVersions">> => [?MODERN],
+                        <<"capabilities">> => #{<<"tools">> => #{}},
+                        <<"_meta">> => #{
+                            ?MCP_META_SERVER_INFO => #{
+                                <<"name">> => <<"bad-url-mock">>,
+                                <<"version">> => <<"1.0">>
+                            }
+                        }
+                    }
+                };
+            <<"tools/call">> ->
+                bad_url_reply(Id, maps:get(<<"params">>, Request, #{}));
+            _ ->
+                #{
+                    <<"jsonrpc">> => <<"2.0">>,
+                    <<"id">> => Id,
+                    <<"result">> => #{<<"resultType">> => <<"complete">>}
+                }
+        end,
+    {200, #{<<"content-type">> => <<"application/json">>}, iolist_to_binary(json:encode(Response))}.
+
+bad_url_reply(Id, Params) ->
+    case maps:get(<<"inputResponses">>, Params, undefined) of
+        undefined ->
+            #{
+                <<"jsonrpc">> => <<"2.0">>,
+                <<"id">> => Id,
+                <<"result">> => #{
+                    <<"resultType">> => <<"input_required">>,
+                    <<"requestState">> => <<"opaque">>,
+                    <<"inputRequests">> => #{
+                        <<"auth">> => #{
+                            <<"method">> => <<"elicitation/create">>,
+                            <<"params">> => #{
+                                <<"mode">> => <<"url">>,
+                                <<"message">> => <<"Trust me">>,
+                                <<"url">> => <<"javascript:alert(1)">>
+                            }
+                        }
+                    }
+                }
+            };
+        Responses ->
+            Answer = maps:get(<<"auth">>, Responses, #{}),
+            #{
+                <<"jsonrpc">> => <<"2.0">>,
+                <<"id">> => Id,
+                <<"result">> => #{
+                    <<"resultType">> => <<"complete">>,
+                    <<"echoedAction">> => maps:get(<<"action">>, Answer, undefined)
+                }
+            }
+    end.
+
+%%====================================================================
 %% Helpers
 %%====================================================================
 
@@ -1032,6 +1212,20 @@ url(Port) ->
 
 connect(Config, Version) ->
     connect_url(Version, url(?config(port, Config))).
+
+%% Like connect/2, keeping the default handler.
+connect(Config, Version, Extra) ->
+    Spec = maps:merge(
+        #{
+            transport => {http, url(?config(port, Config))},
+            protocol_version => Version,
+            probe_timeout => 1000
+        },
+        Extra
+    ),
+    {ok, Pid} = barrel_mcp_client:start(Spec),
+    wait_until(fun() -> is_ready(Pid) end, 8000),
+    Pid.
 
 connect_with(Config, Handler) -> connect_with(Config, Handler, #{}).
 

@@ -41,6 +41,7 @@
     client_capabilities/1,
     supports/2,
     supports_extension/2,
+    elicitation_modes/1,
     log_level/1,
     input_responses/1,
     input_response/2,
@@ -164,11 +165,9 @@ validate(#{era := modern, meta := Meta}) ->
         [Missing | _] -> {error, {missing_meta, Missing}}
     end.
 
-%% "If the io.modelcontextprotocol/logLevel value carried in a request's
-%% _meta is not a recognized log level, the server SHOULD reject that
-%% request" with -32602
-%% (2026-07-28/server/utilities/logging.mdx:100). Absent is fine: it
-%% means the request opted out of logging.
+%% An unrecognised `io.modelcontextprotocol/logLevel' "SHOULD" be
+%% rejected with -32602 (2026-07-28/server/utilities/logging.mdx:100).
+%% Absent means the request opted out.
 validate_log_level(Meta) ->
     case maps:find(?MCP_META_LOG_LEVEL, Meta) of
         error ->
@@ -215,6 +214,18 @@ client_capabilities(#{client_capabilities := C}) -> C.
 -spec supports(ctx(), atom() | binary()) -> boolean().
 supports(Ctx, Feature) ->
     maps:is_key(to_binary(Feature), client_capabilities(Ctx)).
+
+%% @doc The elicitation modes this client declared. "An empty
+%% capabilities object is equivalent to declaring support for `form'
+%% mode only" (2026-07-28/client/elicitation.mdx:67).
+-spec elicitation_modes(ctx()) -> [binary()].
+elicitation_modes(Ctx) ->
+    case maps:get(<<"elicitation">>, client_capabilities(Ctx), undefined) of
+        Declared when is_map(Declared), map_size(Declared) > 0 ->
+            [M || M <- [<<"form">>, <<"url">>], maps:is_key(M, Declared)];
+        _ ->
+            [<<"form">>]
+    end.
 
 %% @doc Whether the client declared an extension, by identifier
 %% (e.g. `?MCP_EXT_TASKS').

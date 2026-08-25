@@ -864,7 +864,7 @@ handle_server_request(
     _State,
     #data{handler_mod = Mod, handler_state = HS} = Data
 ) ->
-    case Mod:handle_request(Method, Params, HS) of
+    case ask_handler_for(Mod, Method, Params, HS) of
         {reply, Result, HS1} ->
             send_envelope(Data, barrel_mcp_protocol:encode_response(Id, Result)),
             {keep_state, Data#data{handler_state = HS1}};
@@ -879,11 +879,91 @@ handle_server_request(
             }}
     end.
 
-deliver_async_reply(Tag, Result, Data) ->
+%% One entry point for both paths a server can ask on: a legacy request,
+%% and a modern `inputRequests' entry.
+ask_handler_for(Mod, <<"elicitation/create">>, Params, HS) ->
+    case url_elicitation(Params) of
+        no -> Mod:handle_request(<<"elicitation/create">>, Params, HS);
+        {ok, Request} -> ask_url_consent(Mod, Request, HS);
+        {error, Reason} -> refuse_url(Reason, Params, HS)
+    end;
+ask_handler_for(Mod, Method, Params, HS) ->
+    Mod:handle_request(Method, Params, HS).
+
+%% "Clients MUST treat requests without a `mode' field as form mode"
+%% (2026-07-28/client/elicitation.mdx:97).
+url_elicitation(Params) when is_map(Params) ->
+    case maps:get(<<"mode">>, Params, <<"form">>) of
+        <<"url">> -> url_request(Params);
+        _ -> no
+    end;
+url_elicitation(_Params) ->
+    no.
+
+url_request(Params) ->
+    Url = maps:get(<<"url">>, Params, undefined),
+    case barrel_mcp_elicitation:inspect_url(Url) of
+        {error, _} = Err ->
+            Err;
+        {ok, Host} ->
+            Base = #{
+                url => Url,
+                host => Host,
+                message => maps:get(<<"message">>, Params, <<>>)
+            },
+            case maps:get(<<"elicitationId">>, Params, undefined) of
+                Id when is_binary(Id) -> {ok, Base#{elicitation_id => Id}};
+                _ -> {ok, Base}
+            end
+    end.
+
+%% Cancelled rather than declined: nobody was asked, so there is no
+%% decision to report.
+refuse_url(Reason, Params, HS) ->
+    logger:warning(
+        "Refused a URL-mode elicitation: ~p (host=~p)",
+        [Reason, safe_host(Params)]
+    ),
+    {reply, elicitation_action(cancel), HS}.
+
+%% The host only: a credential would be in the path or query.
+safe_host(Params) ->
+    case barrel_mcp_elicitation:inspect_url(maps:get(<<"url">>, Params, undefined)) of
+        {ok, Host} -> Host;
+        _ -> undefined
+    end.
+
+ask_url_consent(Mod, Request, HS) ->
+    _ = code:ensure_loaded(Mod),
+    case erlang:function_exported(Mod, handle_elicitation_url, 2) of
+        false ->
+            %% No consent UI means no consent.
+            {reply, elicitation_action(decline), HS};
+        true ->
+            case Mod:handle_elicitation_url(Request, HS) of
+                {async, Tag, HS1} -> {async, Tag, HS1};
+                {Action, HS1} -> {reply, elicitation_action(Action), HS1}
+            end
+    end.
+
+%% "For URL mode: the `content' field is omitted" (elicitation.mdx:445).
+elicitation_action(accept) -> #{<<"action">> => <<"accept">>};
+elicitation_action(decline) -> #{<<"action">> => <<"decline">>};
+elicitation_action(_Other) -> #{<<"action">> => <<"cancel">>}.
+
+deliver_async_reply(Tag, Result0, Data) ->
+    Result = normalize_async_reply(Result0),
     case deliver_input_reply(Tag, Result, Data) of
         {ok, {Data1, Actions}} -> {Data1, Actions};
         not_found -> {deliver_server_reply(Tag, Result, Data), []}
     end.
+
+%% A deferred URL-mode consent answers with the decision alone. Nothing
+%% else uses these atoms as a result.
+normalize_async_reply(accept) -> elicitation_action(accept);
+normalize_async_reply(decline) -> elicitation_action(decline);
+normalize_async_reply(cancel) -> elicitation_action(cancel);
+normalize_async_reply(Result) -> Result.
 
 deliver_server_reply(Tag, Result, Data) ->
     case maps:take(Tag, Data#data.async_replies) of
@@ -1050,17 +1130,10 @@ refresh_subscription(Data) ->
 %% Multi round-trip requests
 %%====================================================================
 
-%% A modern result names its type, and an unrecognised name is not
-%% something to pass to the caller as a success: the whole point of the
-%% discriminator is that a client which does not understand a result
-%% must not act on it.
-%%
-%% Validity is capability- and method-aware. `task' is only meaningful
-%% when the tasks extension was negotiated, and only for a method that
-%% can be task-augmented.
+%% A client that does not understand a result must not act on it, so an
+%% unrecognised discriminator is an error rather than a success.
 check_result_type(_P, _Result, #data{era = Era}) when Era =/= modern ->
-    %% A legacy result carries no discriminator, and its absence means
-    %% complete rather than invalid.
+    %% Legacy carries no discriminator; absent means complete.
     ok;
 check_result_type(#pending{method = Method}, Result, Data) when is_map(Result) ->
     case maps:get(<<"resultType">>, Result, undefined) of
@@ -1075,8 +1148,8 @@ check_result_type(_P, _Result, _Data) ->
 
 %% "A server MUST NOT return CreateTaskResult to a client that did not
 %% include the extension capability on its request, regardless of prior
-%% declarations" (ext-tasks tasks.md:59). So this reads what we put in
-%% that request's `_meta', not what the server advertised at discovery.
+%% declarations" (ext-tasks tasks.md:59): what we sent, not what the
+%% server advertised.
 task_result_allowed(Method, #data{spec = Spec}) ->
     Declared = capabilities_to_wire(maps:get(capabilities, Spec, #{})),
     Extensions = maps:get(<<"extensions">>, Declared, #{}),
@@ -1085,10 +1158,8 @@ task_result_allowed(Method, #data{spec = Spec}) ->
         true -> task_augmentable(Method)
     end.
 
-%% `tools/call' is the only task-augmentable method the extension
-%% defines, and "a client that receives CreateTaskResult in response to
-%% an unsupported request type MUST interpret this as an invalid
-%% response" (tasks.md:59).
+%% The only task-augmentable method the extension defines, and one for
+%% anything else "MUST" read as an invalid response (tasks.md:59).
 task_augmentable(<<"tools/call">>) -> ok;
 task_augmentable(Method) -> {error, {task_not_allowed_for, Method}}.
 
@@ -1139,7 +1210,7 @@ round_remaining(Deadline) ->
 ask_handler(Ref, Key, Request, Round, #data{handler_mod = Mod, handler_state = HS} = Data) ->
     Method = maps:get(<<"method">>, Request, <<>>),
     Params = maps:get(<<"params">>, Request, #{}),
-    case Mod:handle_request(Method, Params, HS) of
+    case ask_handler_for(Mod, Method, Params, HS) of
         {reply, Result, HS1} ->
             Responses = (Round#mrtr.responses)#{Key => Result},
             {Round#mrtr{responses = Responses}, Data#data{handler_state = HS1}};
@@ -1359,11 +1430,27 @@ build_initialize_params(#data{spec = Spec}) ->
 capabilities_to_wire(Map) when is_map(Map) ->
     maps:fold(
         fun(K, V, Acc) ->
-            Acc#{cap_key(K) => cap_value(V)}
+            Key = cap_key(K),
+            Acc#{Key => cap_value(Key, V)}
         end,
         #{},
         Map
     ).
+
+%% Modes are declared as objects, not booleans: `{"form": {}, "url": {}}'
+%% (2026-07-28/client/elicitation.mdx:55).
+cap_value(<<"elicitation">>, Map) when is_map(Map) ->
+    maps:fold(
+        fun
+            (_K, false, Acc) -> Acc;
+            (K, true, Acc) -> Acc#{cap_subkey(K) => #{}};
+            (K, V, Acc) -> Acc#{cap_subkey(K) => V}
+        end,
+        #{},
+        Map
+    );
+cap_value(_Key, V) ->
+    cap_value(V).
 
 cap_key(K) when is_atom(K) -> atom_to_binary(K, utf8);
 cap_key(K) when is_binary(K) -> K.
@@ -1723,14 +1810,9 @@ do_cancel(Id, #data{pending = Pending} = Data) ->
     end.
 
 %% "How a client signals cancellation depends on the transport"
-%% (2026-07-28/basic/patterns/cancellation.mdx:38): on Streamable HTTP
-%% closing the response stream is the signal and no notification is
-%% expected, while stdio has no per-request stream and MUST send one.
-%%
-%% Legacy is the other way round on HTTP: there a disconnect "SHOULD NOT
-%% be interpreted as the client cancelling its request"
-%% (2025-11-25/basic/transports.mdx:128), so the notification is the
-%% only signal that works and closing the stream would say nothing.
+%% (2026-07-28/basic/patterns/cancellation.mdx:38). Legacy runs the
+%% other way: there a disconnect "SHOULD NOT be interpreted as the
+%% client cancelling" (2025-11-25/basic/transports.mdx:128).
 signal_cancel(Id, Reason, #data{era = modern, transport = Transport} = Data) when
     Transport =/= undefined
 ->

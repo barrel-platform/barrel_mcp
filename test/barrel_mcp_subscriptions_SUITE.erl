@@ -215,10 +215,9 @@ graceful_close_sends_response(Config) ->
     {Ref, _} = listen(Config, 5, #{<<"toolsListChanged">> => true}),
     _Ack = next_event(Ref),
     ok = barrel_mcp_subscriptions:close_all(),
-    %% "A server MUST send notifications/cancelled referencing a
+    %% "MUST send notifications/cancelled referencing a
     %% subscriptions/listen request ID when it tears down that
-    %% subscription stream" (cancellation.mdx:12), and it comes before
-    %% the response that ends the request.
+    %% subscription stream" (cancellation.mdx:12), and it comes first.
     Cancelled = next_event(Ref),
     ?assertEqual(<<"notifications/cancelled">>, maps:get(<<"method">>, Cancelled)),
     CParams = maps:get(<<"params">>, Cancelled),

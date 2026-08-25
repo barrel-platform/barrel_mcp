@@ -38,12 +38,9 @@
 %% Close the transport.
 -callback close(TransportPid :: pid()) -> ok.
 
-%% Cancel one in-flight request at the transport level, where the
-%% transport has a per-request channel to tear down. Streamable HTTP
-%% implements it, because closing the response stream "is itself the
-%% cancellation signal" there; stdio has no per-request stream and does
-%% not, so the client sends `notifications/cancelled' instead
-%% (2026-07-28/basic/patterns/cancellation.mdx:38).
+%% Cancel one in-flight request by tearing down its channel. Streamable
+%% HTTP has one; stdio does not, and sends `notifications/cancelled'
+%% instead (2026-07-28/basic/patterns/cancellation.mdx:38).
 -callback cancel_request(
     TransportPid :: pid(),
     RequestId :: integer() | binary()
@@ -65,9 +62,8 @@ send({Mod, Pid}, Body) ->
 close({Mod, Pid}) ->
     Mod:close(Pid).
 
-%% @doc Ask the transport to cancel one request by tearing down its
-%% channel. `unsupported' when this transport has no such channel, and
-%% the caller must fall back to `notifications/cancelled'.
+%% @doc Ask the transport to cancel one request. `unsupported' when it
+%% has no per-request channel; the caller then sends the notification.
 -spec cancel_request(t(), integer() | binary()) -> ok | unsupported.
 cancel_request({Mod, Pid}, RequestId) ->
     _ = code:ensure_loaded(Mod),

@@ -51,9 +51,7 @@
 
 -record(req, {
     body :: binary(),
-    %% The JSON-RPC id this POST carries, so a cancel naming that id can
-    %% find the stream to close. `undefined' for a notification, which
-    %% has no id and cannot be cancelled.
+    %% What a cancel names. `undefined' for a notification.
     request_id :: integer() | binary() | undefined,
     status :: undefined | non_neg_integer(),
     headers = [] :: list(),
@@ -108,9 +106,8 @@ close(Pid) ->
     gen_server:cast(Pid, close).
 
 %% @doc Cancel one in-flight request by closing its response stream,
-%% which on Streamable HTTP "is itself the cancellation signal"
-%% (2026-07-28/basic/patterns/cancellation.mdx:38). Naming a request
-%% that already finished is a no-op.
+%% which "is itself the cancellation signal"
+%% (2026-07-28/basic/patterns/cancellation.mdx:38).
 cancel_request(Pid, RequestId) ->
     gen_server:cast(Pid, {cancel_request, RequestId}).
 
@@ -208,10 +205,8 @@ handle_cast(open_event_stream, #state{sse_ref = Ref} = State) when is_pid(Ref) -
 handle_cast(open_event_stream, State) ->
     {noreply, start_stream(State)};
 handle_cast({cancel_request, RequestId}, #state{requests = Reqs} = State) ->
-    %% Dropping the slot before closing matters: hackney may still
-    %% deliver a chunk or a `done' for this ref, and an entry left
-    %% behind would have it dispatched as a response to a request the
-    %% caller was already told was cancelled.
+    %% Drop the slot first: a late chunk on this ref must not be
+    %% dispatched as a response to a request already reported cancelled.
     Refs = [R || {R, #req{request_id = Id}} <- maps:to_list(Reqs), Id =:= RequestId],
     Rest = lists:foldl(fun maps:remove/2, Reqs, Refs),
     _ = [close_ref(R) || R <- Refs],
@@ -345,9 +340,8 @@ start_post(Body, Retried, State) ->
             Err
     end.
 
-%% A ref hackney has already retired raises rather than returning an
-%% error, and cancelling a request that just finished is a race we are
-%% required to tolerate, not a fault.
+%% A retired ref raises, and cancelling a request that just finished is
+%% a race we have to tolerate.
 close_ref(Ref) ->
     try
         hackney:close(Ref)

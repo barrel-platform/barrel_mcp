@@ -183,10 +183,9 @@ dispatch(stream, _Method, Headers, _Body, Responder, Config) ->
         <<"{\"error\":\"Method not allowed\"}">>
     ).
 
-%% Sessions off means only 2026-07-28 is served, and that revision has
-%% neither a standalone GET stream nor a DELETE to end a session. An
-%% older client that tries either "SHOULD" get 405
-%% (2026-07-28/basic/transports/streamable-http.mdx:683).
+%% Sessions off means only 2026-07-28 is served, which has neither a
+%% standalone GET stream nor a DELETE. An older client that tries either
+%% "SHOULD" get 405 (2026-07-28/.../streamable-http.mdx:683).
 modern_only_method(Headers, Responder, Config) ->
     reply(
         Responder,
@@ -598,23 +597,16 @@ subscription_loop(Responder, SubId, Interval) ->
                 {error, _} -> end_subscription(Responder, SubId)
             end;
         {mcp_subscription_close, SubId} ->
-            %% A graceful end, in the order the two rules give it. The
-            %% server "MUST send notifications/cancelled referencing a
+            %% "MUST send notifications/cancelled referencing a
             %% subscriptions/listen request ID when it tears down that
-            %% subscription stream"
-            %% (2026-07-28/basic/patterns/cancellation.mdx:12), then
-            %% "SHOULD respond to the original subscriptions/listen
-            %% request with a completion result before closing the
-            %% stream" (patterns/subscriptions.mdx:130), which is what
-            %% tells the client this was not a dropped connection.
+            %% subscription stream" (cancellation.mdx:12), then "SHOULD
+            %% respond to the original subscriptions/listen request with
+            %% a completion result" (subscriptions.mdx:130).
             _ = push_sse_data(Responder, subscription_cancelled(SubId)),
             _ = push_sse_data(Responder, subscription_closed(SubId)),
             end_subscription(Responder, SubId);
         mcp_disconnect ->
             end_subscription(Responder, SubId);
-        %% The connection process died, taking the stream with it.
-        %% Nothing left to write to, so release the subscription rather
-        %% than hold it for a peer that is gone.
         {'EXIT', _Conn, _Reason} ->
             end_subscription(Responder, SubId);
         _Other ->
@@ -628,9 +620,8 @@ subscription_loop(Responder, SubId, Interval) ->
         end
     end.
 
-%% Tearing down a subscription stream is the one purpose a server may
-%% send this for: "Servers MUST NOT send notifications/cancelled for any
-%% other purpose" (cancellation.mdx:12).
+%% The one purpose a server may send this for: "Servers MUST NOT send
+%% notifications/cancelled for any other purpose" (cancellation.mdx:12).
 subscription_cancelled(SubId) ->
     #{
         <<"jsonrpc">> => <<"2.0">>,
@@ -852,10 +843,8 @@ handle_async_tool_call(
                 AuthInfo
             );
         false ->
-            %% A modern request that opted into progress or into logging
-            %% gets those notifications on its own response stream, so
-            %% the reply has to be an SSE stream opened before the tool
-            %% runs.
+            %% Opting into progress or logging turns the reply into an
+            %% SSE stream, opened before the tool runs.
             LogLevel = request_log_level(Reply),
             Streaming = streams_notifications(Reply, ProgressToken, LogLevel),
             EmitProgress =
@@ -913,9 +902,8 @@ handle_async_tool_call(
             end
     end.
 
-%% Legacy requests keep delivering progress and logs out of band on the
-%% session's SSE channel, so only a modern request that opted into one
-%% of them needs its response turned into a stream.
+%% Legacy delivers both out of band on the session channel, so only a
+%% modern request that opted in needs its response turned into a stream.
 streams_notifications(_Reply, undefined, undefined) ->
     false;
 streams_notifications(#{ctx := Ctx}, _Token, _Level) when Ctx =/= undefined ->
@@ -923,25 +911,18 @@ streams_notifications(#{ctx := Ctx}, _Token, _Level) when Ctx =/= undefined ->
 streams_notifications(_Reply, _Token, _Level) ->
     false.
 
-%% The eras read a dropped connection differently, and both are
-%% explicit rules rather than defaults.
-%%
-%% On 2026-07-28 "closing the SSE response stream is itself the
-%% cancellation signal" and the server "MUST treat a client disconnect
-%% as cancellation of that request"
-%% (2026-07-28/basic/patterns/cancellation.mdx:38).
-%%
-%% Through 2025-11-25, "disconnection SHOULD NOT be interpreted as the
-%% client cancelling its request" (2025-11-25/basic/transports.mdx:128):
-%% the work continues and the client cancels by sending
-%% `notifications/cancelled' instead.
+%% 2026-07-28: the server "MUST treat a client disconnect as
+%% cancellation of that request"
+%% (2026-07-28/basic/patterns/cancellation.mdx:38). Through 2025-11-25:
+%% "disconnection SHOULD NOT be interpreted as the client cancelling its
+%% request" (2025-11-25/basic/transports.mdx:128).
 cancels_on_disconnect(#{ctx := Ctx}) when Ctx =/= undefined ->
     barrel_mcp_ctx:is_modern(Ctx);
 cancels_on_disconnect(_Reply) ->
     false.
 
-%% A disconnected request has no one left to answer, so the worker is
-%% stopped and the outcome becomes the one with no envelope.
+%% Nobody left to answer, so stop the worker and use the outcome that
+%% has no envelope.
 settle_disconnect(disconnected, WorkerPid) ->
     _ =
         case is_pid(WorkerPid) andalso is_process_alive(WorkerPid) of
@@ -952,8 +933,7 @@ settle_disconnect(disconnected, WorkerPid) ->
 settle_disconnect(Outcome, _WorkerPid) ->
     Outcome.
 
-%% `undefined' unless this request named a level in its `_meta', which
-%% is what makes modern logging opt-in.
+%% `undefined' unless this request named a level in its `_meta'.
 request_log_level(#{ctx := Ctx}) when Ctx =/= undefined ->
     case barrel_mcp_ctx:is_modern(Ctx) of
         true -> barrel_mcp_ctx:log_level(Ctx);
@@ -1142,9 +1122,8 @@ progress_notification(Params) ->
         <<"params">> => Params
     }.
 
-%% Legacy logging stays on the session's SSE channel, filtered by
-%% whatever `logging/setLevel' last set. A modern request without a
-%% session has nowhere out of band to put one, so it drops.
+%% Legacy logging stays on the session's SSE channel. A modern request
+%% has no session, so it drops.
 emit_log_fun(_Reply, undefined) ->
     fun(_, _, _) -> ok end;
 emit_log_fun(_Reply, SessionId) ->
@@ -1153,9 +1132,7 @@ emit_log_fun(_Reply, SessionId) ->
     end.
 
 %% "The server MUST NOT emit notifications/message for a request that
-%% does not include this field"
-%% (2026-07-28/server/utilities/logging.mdx:64). `undefined' is that
-%% request, so it gets a sink.
+%% does not include this field" (2026-07-28/.../logging.mdx:64).
 self_log_fun(_Self, _RequestId, undefined) ->
     fun(_, _, _) -> ok end;
 self_log_fun(Self, RequestId, Requested) ->
@@ -1189,10 +1166,8 @@ log_notification(Params) ->
         <<"params">> => Params
     }.
 
-%% `OnEmit' is called with each request-scoped notification envelope the
-%% tool produces. Modern requests write those onto their own response
-%% stream; legacy ones deliver them out of band on the session's SSE
-%% channel and pass a sink that drops them.
+%% `OnEmit' takes each request-scoped notification envelope. Legacy
+%% passes a sink: it delivers them on the session channel instead.
 wait_for_tool(RequestId, Timeout, OnEmit, CancelOnDisconnect) ->
     Deadline = progress_deadline(Timeout),
     Outcome = collect_tool_outcome(RequestId, Deadline, OnEmit, CancelOnDisconnect),
@@ -1227,12 +1202,9 @@ progress_remaining(Deadline) ->
 collect_tool_outcome(RequestId, Deadline, OnEmit, CancelOnDisconnect) ->
     Outcome =
         receive
-            %% Left in the mailbox unless this revision reads a
-            %% disconnect as cancellation, so a legacy request keeps
-            %% running exactly as it did. The exit signal is the same
-            %% event seen from the other side: the connection process
-            %% dies when the peer closes, and this process is linked to
-            %% it.
+            %% Left in the mailbox otherwise, so a legacy request keeps
+            %% running. The exit signal is the same event: this process
+            %% is linked to the connection.
             mcp_disconnect when CancelOnDisconnect ->
                 disconnected;
             {'EXIT', _Conn, _Reason} when CancelOnDisconnect ->
@@ -1292,10 +1264,14 @@ tool_outcome_envelope(Reply, RequestId, {structured, Data, Content, Meta}) ->
         Meta
     );
 tool_outcome_envelope(Reply, RequestId, {tool_error, Content, Meta}) ->
+    %% `CallToolResult.content' is an array in every revision.
     tool_success(
         Reply,
         RequestId,
-        #{<<"content">> => Content, <<"isError">> => true},
+        #{
+            <<"content">> => barrel_mcp_protocol:format_tool_result_external(Content),
+            <<"isError">> => true
+        },
         Meta
     );
 tool_outcome_envelope(Reply, RequestId, {validation_failed, Errors}) ->
@@ -1616,9 +1592,8 @@ stream_sse_response(Headers, Responder, Config, SessionId, Result) ->
         SessionId
     ),
     stream_start(Responder, 200, Hdrs),
-    %% `SessionId' is `undefined' on the modern path and only there:
-    %% 2026-07-28 has no sessions and no resumability, so the event
-    %% carries no `id:' a client could replay from.
+    %% `SessionId' is `undefined' on the modern path and only there, and
+    %% 2026-07-28 has no resumability to carry an `id:' for.
     _ =
         case SessionId of
             undefined -> push_sse_data(Responder, Result);

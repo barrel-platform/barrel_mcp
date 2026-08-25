@@ -11,6 +11,7 @@
 -behaviour(barrel_mcp_client_handler).
 
 -export([init/1, handle_request/3, handle_notification/3]).
+-export([handle_elicitation_url/2]).
 
 %% The owner is passed in rather than taken from `self()': init/1 runs
 %% inside the client process, so `self()' here is the client, not
@@ -30,6 +31,13 @@ handle_request(<<"elicitation/create">>, _Params, #{mode := never} = S) ->
     {async, make_ref(), S};
 handle_request(_Method, _Params, S) ->
     {error, -32601, <<"Method not found">>, S}.
+
+%% URL mode never reaches handle_request/3.
+handle_elicitation_url(Request, #{owner := Owner} = S) ->
+    Owner ! {url_elicitation, Request},
+    {maps:get(url_action, S, accept), S};
+handle_elicitation_url(_Request, S) ->
+    {maps:get(url_action, S, accept), S}.
 
 handle_notification(_Method, _Params, S) ->
     {ok, S}.

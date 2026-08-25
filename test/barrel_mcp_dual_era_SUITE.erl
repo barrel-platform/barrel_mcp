@@ -72,8 +72,7 @@
     slow_tool/1
 ]).
 
-%% The name the slow tool reports its lifecycle to. A disconnect case
-%% asserts on which of the two messages arrives.
+%% Where the slow tool reports its lifecycle.
 -define(WATCH, barrel_mcp_dual_era_watch).
 
 all() ->
@@ -195,7 +194,6 @@ a_resource(_Args) ->
 region_tool(Args) ->
     maps:get(<<"region">>, Args, <<"none">>).
 
-%% Arity 2 so it can reach the progress hook in Ctx.
 slow_tool(_Args) ->
     watch(started),
     timer:sleep(1500),
@@ -214,6 +212,7 @@ chatty_tool(_Args, Ctx) ->
     ok = barrel_mcp:log(Ctx, error, <<"db">>, <<"it broke">>),
     <<"chatted">>.
 
+%% Arity 2 so it can reach the progress hook in Ctx.
 counting_tool(_Args, Ctx) ->
     Emit = maps:get(emit_progress, Ctx),
     Emit(1, 3, <<"step one">>),
@@ -639,23 +638,21 @@ modern_without_progress_token_is_plain_json(Config) ->
 %%====================================================================
 
 %% "Resumable SSE streams via `Last-Event-ID' are not supported"
-%% (2026-07-28/basic/transports/streamable-http.mdx:157). An `id:' line
-%% is what a client resumes from, so emitting one would advertise a
-%% replay this revision cannot serve.
+%% (2026-07-28/basic/transports/streamable-http.mdx:157), and an `id:'
+%% line is what a client would resume from.
 modern_sse_carries_no_event_id(Config) ->
     Port = ?config(port, Config),
     Params = #{<<"name">> => <<"counter">>, <<"arguments">> => #{}},
     Body = modern_request_with_progress(1, <<"tools/call">>, Params, <<"tok-1">>),
     {200, Headers, Raw} = post_sse_raw(Port, Body),
     <<"text/event-stream", _/binary>> = header(<<"content-type">>, Headers),
-    %% Every block still carries data, so the absence is of ids alone.
+    %% Still delivering, so the absence is of ids alone.
     ?assert(length(decode_sse(Raw)) >= 2),
     ?assertEqual(nomatch, binary:match(Raw, <<"\nid: ">>)),
     ?assertNotMatch(<<"id: ", _/binary>>, Raw),
     ok.
 
-%% With sessions off only 2026-07-28 is served, and that revision has
-%% neither a standalone GET stream nor a DELETE to end a session
+%% Sessions off means only 2026-07-28 is served, which has neither
 %% (streamable-http.mdx:683).
 modern_only_refuses_get_and_delete(Config) ->
     Port = ?config(port, Config),
@@ -675,8 +672,7 @@ modern_only_refuses_get_and_delete(Config) ->
         end,
         [get, delete]
     ),
-    %% POST still works, so the listener is refusing the method rather
-    %% than being broken.
+    %% POST still works, so it is the method being refused.
     Body = modern_request(1, <<"tools/list">>, #{}),
     {200, _, _} = post_modern(Port, Body, []),
     ok.
@@ -686,9 +682,8 @@ modern_only_refuses_get_and_delete(Config) ->
 %%====================================================================
 
 %% "The server MUST NOT emit notifications/message for a request that
-%% does not include this field"
-%% (2026-07-28/server/utilities/logging.mdx:64). The same tool logs
-%% either way, so the request's `_meta' is the only thing deciding it.
+%% does not include this field" (2026-07-28/.../logging.mdx:64). The
+%% same tool logs either way.
 modern_logs_only_when_opted_in(Config) ->
     Port = ?config(port, Config),
     Params = #{<<"name">> => <<"chatty">>, <<"arguments">> => #{}},
@@ -718,8 +713,7 @@ modern_logs_only_when_opted_in(Config) ->
     ?assertEqual(<<"chatted">>, maps:get(<<"text">>, Block)),
     ok.
 
-%% The level names a floor, so the `debug' line is dropped and the
-%% `error' one survives.
+%% The level is a floor: `debug' drops, `error' survives.
 modern_logs_below_requested_level_are_dropped(Config) ->
     Port = ?config(port, Config),
     Params = #{<<"name">> => <<"chatty">>, <<"arguments">> => #{}},
@@ -733,9 +727,8 @@ modern_logs_below_requested_level_are_dropped(Config) ->
     ?assertEqual(<<"error">>, maps:get(<<"level">>, Only)),
     ok.
 
-%% "If the io.modelcontextprotocol/logLevel value ... is not a
-%% recognized log level, the server SHOULD reject that request" with
-%% -32602 (logging.mdx:100).
+%% An unrecognised level "SHOULD" be rejected with -32602
+%% (logging.mdx:100).
 modern_unknown_log_level_is_invalid_params(Config) ->
     Port = ?config(port, Config),
     Params = #{<<"name">> => <<"echo">>, <<"arguments">> => #{}},
@@ -749,8 +742,7 @@ modern_unknown_log_level_is_invalid_params(Config) ->
 %% Disconnect
 %%====================================================================
 
-%% On 2026-07-28 the server "MUST treat a client disconnect as
-%% cancellation of that request"
+%% "MUST treat a client disconnect as cancellation of that request"
 %% (2026-07-28/basic/patterns/cancellation.mdx:38).
 modern_disconnect_cancels_the_request(Config) ->
     Port = ?config(port, Config),
@@ -763,10 +755,8 @@ modern_disconnect_cancels_the_request(Config) ->
         ?assertEqual(timeout, await_watch(finished, 4000))
     end).
 
-%% Through 2025-11-25 "disconnection SHOULD NOT be interpreted as the
-%% client cancelling its request"
-%% (2025-11-25/basic/transports.mdx:128), so the same drop leaves the
-%% work running.
+%% "Disconnection SHOULD NOT be interpreted as the client cancelling its
+%% request" (2025-11-25/basic/transports.mdx:128).
 legacy_disconnect_does_not_cancel(Config) ->
     Port = ?config(port, Config),
     {200, InitHeaders, _} = post(Port, init_body(), []),
@@ -798,10 +788,8 @@ await_watch(Msg, Timeout) ->
     after Timeout -> timeout
     end.
 
-%% A POST written straight onto a socket the case owns, so closing it
-%% is an unambiguous client disconnect. hackney would pool the
-%% connection instead of sending FIN, which is the very thing under
-%% test.
+%% Straight onto a socket the case owns, so closing it sends FIN.
+%% hackney would pool the connection instead.
 post_raw(Port, Body0, ExtraHeaders) ->
     Body = iolist_to_binary(Body0),
     Decoded = json:decode(Body),
@@ -825,8 +813,7 @@ post_raw(Port, Body0, ExtraHeaders) ->
     ok = gen_tcp:send(Sock, Request),
     Sock.
 
-%% Only a modern request carries the routing headers, and only it
-%% carries the version in `_meta' to build them from.
+%% Only a modern request carries the routing headers.
 version_header(Meta) when map_size(Meta) =:= 0 ->
     [];
 version_header(Meta) ->
@@ -951,8 +938,7 @@ post_sse(Port, Body) ->
     {Status, Headers, Raw} = post_sse_raw(Port, Body),
     {Status, Headers, decode_sse(Raw)}.
 
-%% The same request, left as bytes: a case that asserts on the SSE
-%% framing itself cannot use the decoded events.
+%% The same request left as bytes, for asserting on the framing itself.
 post_sse_raw(Port, Body) ->
     Decoded = json:decode(iolist_to_binary(Body)),
     Params = maps:get(<<"params">>, Decoded, #{}),

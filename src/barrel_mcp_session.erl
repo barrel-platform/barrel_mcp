@@ -53,6 +53,7 @@
     %% Server -> client notifications.
     broadcast_list_changed/1,
     notify_progress/4,
+    send_notification/3,
     %% In-flight tool tracking (used by `notifications/cancelled').
     record_in_flight/4,
     cancel_in_flight/2,
@@ -554,6 +555,23 @@ collect_after(Buf, LastId) ->
 set_sse_buffer_max(SessionId, Max) when is_integer(Max), Max > 0 ->
     gen_server:call(?MODULE, {set_sse_buffer_max, SessionId, Max}).
 
+%% @doc Push one notification to a single session over its SSE channel.
+%% Dropped when that session has no channel open.
+-spec send_notification(binary(), binary(), map()) -> ok.
+send_notification(SessionId, Method, Params) ->
+    case get_sse_pid(SessionId) of
+        {ok, Pid} ->
+            Pid !
+                {sse_send_message, #{
+                    <<"jsonrpc">> => <<"2.0">>,
+                    <<"method">> => Method,
+                    <<"params">> => Params
+                }},
+            ok;
+        _ ->
+            ok
+    end.
+
 %% @doc Push a `notifications/progress' envelope to a specific
 %% session over its SSE channel. `Token' is the progressToken the
 %% client supplied on the originating request.
@@ -651,6 +669,8 @@ handle_call({delete, SessionId}, _From, State) ->
             ok
     end,
     true = ets:delete(?SESSION_TABLE, SessionId),
+    %% Its elicitations have nowhere left to deliver a completion.
+    _ = barrel_mcp_elicitation:forget_session(SessionId),
     {reply, ok, State};
 handle_call({set_client_capabilities, SessionId, Caps}, _From, State) ->
     Reply =

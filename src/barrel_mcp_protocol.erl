@@ -1092,13 +1092,46 @@ input_required_result(Requests, State, Method, Params, Ctx) ->
     end.
 
 undeclared_capabilities(Requests, Ctx) ->
-    lists:usort([
-        Capability
-     || Request <- maps:values(Requests),
-        Capability <- [capability_for(request_method(Request))],
-        Capability =/= undefined,
-        not barrel_mcp_ctx:supports(Ctx, Capability)
-    ]).
+    lists:usort(
+        lists:append([missing_capabilities(R, Ctx) || R <- maps:values(Requests)])
+    ).
+
+missing_capabilities(Request, Ctx) ->
+    Method = request_method(Request),
+    case capability_for(Method) of
+        undefined ->
+            [];
+        Capability ->
+            case barrel_mcp_ctx:supports(Ctx, Capability) of
+                false -> [Capability];
+                true -> missing_mode(Method, Request, Ctx)
+            end
+    end.
+
+%% "Servers MUST NOT send elicitation requests with modes that are not
+%% supported by the client" (2026-07-28/client/elicitation.mdx:77).
+missing_mode(<<"elicitation/create">>, Request, Ctx) ->
+    Mode = elicitation_mode(Request),
+    case lists:member(Mode, barrel_mcp_ctx:elicitation_modes(Ctx)) of
+        true -> [];
+        false -> [<<"elicitation.", Mode/binary>>]
+    end;
+missing_mode(_Method, _Request, _Ctx) ->
+    [].
+
+%% Absent `mode' is form mode (elicitation.mdx:97).
+elicitation_mode(Request) when is_map(Request) ->
+    Params =
+        case request_params(Request) of
+            P when is_map(P) -> P;
+            _ -> #{}
+        end,
+    case maps:get(<<"mode">>, Params, maps:get(mode, Params, undefined)) of
+        M when is_binary(M) -> M;
+        _ -> <<"form">>
+    end;
+elicitation_mode(_Request) ->
+    <<"form">>.
 
 %% Which client capability each server-to-client request needs.
 capability_for(<<"elicitation/create">>) -> <<"elicitation">>;
@@ -1591,10 +1624,8 @@ handle_request(Method, _Params, Id, _State) ->
         <<"Method not found: ", Method/binary>>
     ).
 
-%% The eras disagree on what a successful `tasks/cancel' returns.
 %% 2025-11-25 returns the cancelled task; the extension returns an
-%% acknowledgement, which still carries `resultType' like every modern
-%% result.
+%% acknowledgement.
 cancel_task_response(Owner, TaskId, Id, Ctx) ->
     case barrel_mcp_ctx:is_modern(Ctx) of
         true ->
@@ -1815,7 +1846,7 @@ run_async_plan(Plan, Timeout, AuthInfo) ->
             success_response(
                 RequestId,
                 #{
-                    <<"content">> => Content,
+                    <<"content">> => format_tool_result(Content),
                     <<"isError">> => true
                 }
             );
@@ -1823,7 +1854,7 @@ run_async_plan(Plan, Timeout, AuthInfo) ->
             success_response(
                 RequestId,
                 #{
-                    <<"content">> => Content,
+                    <<"content">> => format_tool_result(Content),
                     <<"isError">> => true
                 },
                 RespMeta
