@@ -12,7 +12,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--export([slow_tool/1, killable_tool/1]).
+-export([slow_tool/1, killable_tool/1, asking_tool/2]).
 
 tasks_test_() ->
     {setup, fun setup/0, fun cleanup/1, [
@@ -142,8 +142,27 @@ drive_async_plan_test_() ->
         {"Legacy task methods are ungated", fun legacy_task_methods_ungated/0},
         {"A tool error completes the task", fun tool_error_completes_task/0},
         {"Admission refuses past the per-principal cap", fun per_principal_cap/0},
-        {"An unexpired task is never evicted to make room", fun no_eviction_of_live_tasks/0}
+        {"An unexpired task is never evicted to make room", fun no_eviction_of_live_tasks/0},
+        {"A task parks on the input it asked for", fun task_parks_on_input/0},
+        {"An answered task resumes and completes", fun task_resumes_after_update/0},
+        {"A reused key is refused", fun reused_key_refused/0}
     ]}.
+
+%% Asks once, then finishes with whatever came back.
+asking_tool(_Args, Ctx) ->
+    case barrel_mcp:input(Ctx, <<"who">>) of
+        {ok, #{<<"content">> := #{<<"name">> := Name}}} ->
+            <<"hello ", Name/binary>>;
+        _ ->
+            {input_required,
+                #{
+                    <<"who">> => #{
+                        method => <<"elicitation/create">>,
+                        params => #{<<"message">> => <<"Your name?">>}
+                    }
+                },
+                seed}
+    end.
 
 setup_slow() ->
     application:ensure_all_started(barrel_mcp),
@@ -154,11 +173,15 @@ setup_slow() ->
     ok = barrel_mcp_registry:reg(tool, <<"killable">>, ?MODULE, killable_tool, #{
         long_running => true
     }),
+    ok = barrel_mcp_registry:reg(tool, <<"asking">>, ?MODULE, asking_tool, #{
+        long_running => true
+    }),
     ok.
 
 cleanup_slow(_) ->
     barrel_mcp_registry:unreg(tool, <<"slow_stdio">>),
     barrel_mcp_registry:unreg(tool, <<"killable">>),
+    barrel_mcp_registry:unreg(tool, <<"asking">>),
     ok.
 
 call_request(Meta) ->
@@ -415,3 +438,78 @@ no_eviction_of_live_tasks() ->
         %% The first is still there, and still readable.
         ?assertMatch({ok, _}, barrel_mcp_tasks:get(Owner, First))
     end).
+
+%%====================================================================
+%% Task multi round-trip
+%%
+%% The worker that asks has already returned, so nothing is resumed in
+%% the literal sense: the handler runs again from the top and reads the
+%% answers, exactly as the stateless path does.
+%%====================================================================
+
+tasks_caps() ->
+    #{<<"extensions">> => #{<<"io.modelcontextprotocol/tasks">> => #{}}}.
+
+start_asking_task() ->
+    Resp = drive(call_request(<<"asking">>, modern_meta(tasks_caps()))),
+    maps:get(<<"taskId">>, maps:get(<<"result">>, Resp)).
+
+task_parks_on_input() ->
+    Owner = {principal, anonymous},
+    TaskId = start_asking_task(),
+    wait_for_status(Owner, TaskId, <<"input_required">>, 40),
+    {ok, Task} = barrel_mcp_tasks:get(Owner, TaskId, modern),
+    Requests = maps:get(<<"inputRequests">>, Task),
+    ?assert(maps:is_key(<<"who">>, Requests)),
+    ?assertEqual(
+        <<"elicitation/create">>,
+        maps:get(<<"method">>, maps:get(<<"who">>, Requests))
+    ).
+
+task_resumes_after_update() ->
+    Owner = {principal, anonymous},
+    TaskId = start_asking_task(),
+    wait_for_status(Owner, TaskId, <<"input_required">>, 40),
+    %% Through the protocol handler, since that is what spawns the
+    %% replacement worker.
+    Ack = barrel_mcp_protocol:handle(#{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 99,
+        <<"method">> => <<"tasks/update">>,
+        <<"params">> => #{
+            <<"taskId">> => TaskId,
+            <<"inputResponses">> => #{
+                <<"who">> => #{
+                    <<"action">> => <<"accept">>,
+                    <<"content">> => #{<<"name">> => <<"ada">>}
+                }
+            },
+            <<"_meta">> => modern_meta(tasks_caps())
+        }
+    }),
+    ?assertEqual(
+        <<"complete">>,
+        maps:get(<<"resultType">>, maps:get(<<"result">>, Ack))
+    ),
+    %% The handler ran again and finished with the answer it was given.
+    wait_for_status(Owner, TaskId, <<"completed">>, 40),
+    {ok, Task} = barrel_mcp_tasks:get(Owner, TaskId, modern),
+    [Block] = maps:get(<<"content">>, maps:get(<<"result">>, Task)),
+    ?assertEqual(<<"hello ada">>, maps:get(<<"text">>, Block)).
+
+%% A handler reusing a key after its answer was consumed would read a
+%% stale response as a fresh one, so the round is refused.
+reused_key_refused() ->
+    Owner = <<"reuse-sess">>,
+    {ok, TaskId} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+    Requests = #{<<"k">> => #{method => <<"elicitation/create">>, params => #{}}},
+    ok = barrel_mcp_tasks:await_input(Owner, TaskId, Requests, seed, #{}),
+    ?assertEqual(
+        {error, {reused_input_key, <<"k">>}},
+        barrel_mcp_tasks:await_input(Owner, TaskId, Requests, seed, #{})
+    ),
+    %% And a round that asks nothing at all is refused too.
+    ?assertEqual(
+        {error, empty_input_round},
+        barrel_mcp_tasks:await_input(Owner, TaskId, #{}, seed, #{})
+    ).

@@ -895,7 +895,8 @@ handle_long_running_call(
 ) ->
     RequestCtx = maps:get(ctx, Reply),
     Owner = task_owner(RequestCtx),
-    case barrel_mcp_tasks:create(Owner, ToolName, #{}) of
+    Params = maps:get(params, Reply, #{}),
+    case barrel_mcp_tasks:create(Owner, ToolName, #{params => Params}) of
         {error, too_many_tasks} ->
             %% Refused at admission, and the caller is still waiting,
             %% so it is told rather than left to poll a task that was

@@ -784,6 +784,20 @@ task_collector_loop(Owner, TaskId) ->
             barrel_mcp_tasks:fail(Owner, TaskId, Reason);
         {tool_validation_failed, _ReqId, Errors} ->
             barrel_mcp_tasks:fail(Owner, TaskId, {validation_failed, Errors});
+        {tool_input_required, _ReqId, Requests, HandlerState} ->
+            %% The handler needs something before it can finish. Park
+            %% the task on those questions; the client answers through
+            %% `tasks/update' and the handler runs again from the top.
+            case
+                barrel_mcp_tasks:await_input(
+                    Owner, TaskId, Requests, HandlerState, task_params(TaskId, Owner)
+                )
+            of
+                ok ->
+                    ok;
+                {error, Reason} ->
+                    barrel_mcp_tasks:fail(Owner, TaskId, input_error(Reason))
+            end;
         {cancelled, _ReqId} ->
             barrel_mcp_tasks:cancel(Owner, TaskId);
         %% The worker died without reporting. A result sent before it
@@ -803,6 +817,50 @@ read_task_for(Owner, TaskId, Ctx) ->
         {ok, T} -> T;
         _ -> #{<<"taskId">> => TaskId, <<"status">> => <<"working">>}
     end.
+
+%% Run the handler again, reporting into the same task. This is a fresh
+%% worker: nothing of the original one survived its return.
+resume_task(Owner, TaskId, Info, Ctx) ->
+    #{params := Params, responses := Responses, methods := Methods, state := HState} = Info,
+    Name = maps:get(<<"name">>, Params, <<>>),
+    Args = maps:get(<<"arguments">>, Params, #{}),
+    Mrtr = #{responses => Responses, methods => Methods, state => HState},
+    spawn_task_collector(Owner, TaskId, fun(Collector) ->
+        ToolCtx = #{
+            request_id => TaskId,
+            session_id => barrel_mcp_ctx:session_id(Ctx),
+            progress_token => undefined,
+            meta => #{},
+            emit_progress => fun(_, _, _) -> ok end,
+            reply_to => Collector,
+            auth_info => barrel_mcp_ctx:auth_info(Ctx),
+            mcp_ctx => Ctx,
+            mrtr => Mrtr
+        },
+        case barrel_mcp_registry:run_tool(Name, Args, ToolCtx) of
+            {ok, Pid} ->
+                Pid;
+            {error, _} = Err ->
+                Collector ! {tool_failed, TaskId, Err},
+                spawn(fun() -> ok end)
+        end
+    end).
+
+%% The params of the call this task was created for, so the handler can
+%% be re-invoked once its questions are answered.
+task_params(TaskId, Owner) ->
+    case barrel_mcp_tasks:params(Owner, TaskId) of
+        {ok, Params} -> Params;
+        _ -> #{}
+    end.
+
+%% A limit reached mid-flight has no request left to answer, so it ends
+%% the task with an error object rather than a JSON-RPC reply.
+input_error(Reason) ->
+    #{
+        <<"code">> => ?JSONRPC_INTERNAL_ERROR,
+        <<"message">> => iolist_to_binary(io_lib:format("~p", [Reason]))
+    }.
 
 %% @doc The result that hands a client a task instead of a value.
 %%
@@ -1273,8 +1331,15 @@ handle_request(<<"tasks/update">>, Params, Id, Ctx) ->
                 R when is_map(R) -> R;
                 _ -> #{}
             end,
-        case barrel_mcp_tasks:update(task_owner(Ctx), TaskId, Responses) of
+        Owner = task_owner(Ctx),
+        case barrel_mcp_tasks:update(Owner, TaskId, Responses) of
             ok ->
+                success_response(Id, #{<<"resultType">> => <<"complete">>});
+            {resume, Info} ->
+                %% Every question is answered, so the handler runs again
+                %% from the top with the answers in its context. The
+                %% worker that asked has long since exited.
+                _ = resume_task(Owner, TaskId, Info, Ctx),
                 success_response(Id, #{<<"resultType">> => <<"complete">>});
             {error, not_found} ->
                 error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
@@ -1522,7 +1587,8 @@ long_running_plan(Plan, Ctx) ->
 %% the task. The caller is not waiting on it.
 drive_as_task(Plan, ToolName, Ctx, AuthInfo) ->
     RequestId = maps:get(request_id, Plan),
-    case barrel_mcp_tasks:create(task_owner(Ctx), ToolName, #{}) of
+    {_Method, Params} = maps:get(mrtr_binding, Plan, {<<>>, #{}}),
+    case barrel_mcp_tasks:create(task_owner(Ctx), ToolName, #{params => Params}) of
         {error, too_many_tasks} ->
             %% Refused at admission, so there is still a request to
             %% answer. Running the tool anyway would produce a result

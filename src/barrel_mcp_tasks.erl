@@ -37,6 +37,8 @@
     finish/3,
     fail/3,
     set_worker/3,
+    await_input/5,
+    params/2,
     update/3
 ]).
 
@@ -63,11 +65,34 @@
 -define(DEFAULT_MAX_TASKS_PER_PRINCIPAL, 100).
 -define(DEFAULT_MAX_TASKS_TOTAL, 10000).
 
+%% Lifetime bounds on one task's input exchange. Concurrency caps do not
+%% help here: a handler and a client can trade rounds as fast as they
+%% like without ever holding more than one outstanding request.
+-define(DEFAULT_MAX_INPUT_ROUNDS, 10).
+-define(DEFAULT_MAX_ISSUED_KEYS, 50).
+-define(DEFAULT_MAX_STATE_BYTES, 65536).
+
+-record(mrtr, {
+    %% Every key ever issued for this task, not merely the outstanding
+    %% ones: a handler reusing a key after its answer was consumed would
+    %% otherwise read a stale response as a fresh one.
+    issued = #{} :: #{binary() => binary()},
+    outstanding = [] :: [binary()],
+    responses = #{} :: map(),
+    %% The handler's own state, opaque to us.
+    state :: term(),
+    rounds = 0 :: non_neg_integer()
+}).
+
 -record(task, {
     id :: binary(),
     %% A session id (legacy) or `{principal, AuthInfo}' (modern).
     owner :: term(),
     method :: binary(),
+    %% The originating request's params, kept so the handler can be run
+    %% again once its questions are answered. Recorded at creation
+    %% because the first round has no continuation yet.
+    params = #{} :: map(),
     %% Spec vocabulary (MCP 2025-11-25):
     %%   submitted | working | completed | failed | cancelled
     %% We don't model `submitted' today (workers start immediately),
@@ -91,11 +116,11 @@
     generation = 0 :: non_neg_integer(),
     worker_pid :: pid() | undefined,
     request_id :: integer() | binary() | undefined,
-    %% Answers a client supplied through `tasks/update'. Recorded even
-    %% when nothing is waiting on them, since the extension has the
-    %% server ignore responses it does not need rather than reject
-    %% them.
-    input_responses = #{} :: map()
+    %% Everything needed to re-invoke the handler once its questions are
+    %% answered. The worker that asked has already exited, so nothing is
+    %% literally resumed: the handler runs again from the top and reads
+    %% the answers, exactly as the stateless HTTP path does.
+    mrtr :: undefined | #mrtr{}
 }).
 
 %%====================================================================
@@ -187,9 +212,30 @@ fail(Owner, TaskId, Reason) ->
 %% @doc Record answers a client supplied for a task through
 %% `tasks/update'. Merged rather than replaced, so a client answering
 %% one key at a time does not drop the others.
--spec update(term(), binary(), map()) -> ok | {error, not_found}.
+-spec update(term(), binary(), map()) ->
+    ok | {resume, map()} | {error, not_found}.
 update(Owner, TaskId, Responses) when is_map(Responses) ->
     gen_server:call(?MODULE, {update, Owner, TaskId, Responses}).
+
+%% @doc The originating request params recorded for a task, if any.
+-spec params(term(), binary()) -> {ok, map()} | {error, not_found}.
+params(Owner, TaskId) ->
+    case lookup(Owner, TaskId) of
+        {ok, #task{params = P}} -> {ok, P};
+        {error, not_found} -> {error, not_found}
+    end.
+
+%% @doc Park a task on the input its handler asked for.
+%%
+%% The asking worker has already returned, so everything needed to run
+%% the handler again is stored: the originating params, the handler's
+%% own state, and which keys are outstanding.
+-spec await_input(term(), binary(), map(), term(), map()) ->
+    ok | {error, term()}.
+await_input(Owner, TaskId, Requests, HandlerState, Params) ->
+    gen_server:call(
+        ?MODULE, {await_input, Owner, TaskId, Requests, HandlerState, Params}
+    ).
 
 %%====================================================================
 %% gen_server
@@ -211,8 +257,132 @@ granted_ttl(Opts) ->
         _ -> min(Default, Max)
     end.
 
+%% A parked task publishes what it is waiting for, so a client polling
+%% `tasks/get' can see which answers to supply through `tasks/update'.
+with_input_requests(Base, #task{status = input_required, mrtr = #mrtr{} = M}) ->
+    Base#{
+        <<"inputRequests">> => maps:from_list([
+            {K, #{<<"method">> => maps:get(K, M#mrtr.issued, null)}}
+         || K <- M#mrtr.outstanding
+        ])
+    };
+with_input_requests(Base, _Task) ->
+    Base.
+
 ttl_or_null(undefined) -> null;
 ttl_or_null(Ttl) -> Ttl.
+
+%% Park a task on the questions its handler asked. Everything needed to
+%% run the handler again is stored here, since the worker that asked has
+%% already exited.
+do_await_input(Owner, TaskId, Requests, HandlerState, Params) ->
+    case lookup(Owner, TaskId) of
+        {error, not_found} ->
+            {error, not_found};
+        {ok, #task{mrtr = Prev} = Task} ->
+            _ = Params,
+            M0 =
+                case Prev of
+                    undefined -> #mrtr{};
+                    #mrtr{} = P -> P
+                end,
+            case check_round(M0, Requests, HandlerState) of
+                {error, _} = Err ->
+                    Err;
+                ok ->
+                    Keys = maps:keys(Requests),
+                    M1 = M0#mrtr{
+                        issued = maps:merge(
+                            M0#mrtr.issued,
+                            maps:map(fun(_K, R) -> request_method(R) end, Requests)
+                        ),
+                        outstanding = Keys,
+                        state = HandlerState,
+                        rounds = M0#mrtr.rounds + 1
+                    },
+                    Updated = Task#task{
+                        status = input_required,
+                        mrtr = M1,
+                        updated_at = erlang:system_time(millisecond)
+                    },
+                    true = ets:insert(?TABLE, {TaskId, Updated}),
+                    notify_changed(Owner, Updated),
+                    ok
+            end
+    end.
+
+%% A round that issues no new key, reuses one already answered, or
+%% carries state without bound would let a handler and a client spin
+%% until the ttl elapsed while breaking no concurrency limit.
+check_round(#mrtr{rounds = Rounds, issued = Issued}, Requests, HandlerState) ->
+    MaxRounds = application:get_env(
+        barrel_mcp, max_task_input_rounds, ?DEFAULT_MAX_INPUT_ROUNDS
+    ),
+    MaxKeys = application:get_env(
+        barrel_mcp, max_task_issued_keys, ?DEFAULT_MAX_ISSUED_KEYS
+    ),
+    MaxState = application:get_env(
+        barrel_mcp, max_task_state_bytes, ?DEFAULT_MAX_STATE_BYTES
+    ),
+    Keys = maps:keys(Requests),
+    Reused = [K || K <- Keys, maps:is_key(K, Issued)],
+    StateBytes = byte_size(term_to_binary(HandlerState)),
+    if
+        Keys =:= [] -> {error, empty_input_round};
+        Reused =/= [] -> {error, {reused_input_key, hd(Reused)}};
+        Rounds + 1 > MaxRounds -> {error, too_many_input_rounds};
+        map_size(Issued) + length(Keys) > MaxKeys -> {error, too_many_input_keys};
+        StateBytes > MaxState -> {error, task_state_too_large};
+        true -> ok
+    end.
+
+request_method(R) when is_map(R) ->
+    case maps:get(method, R, undefined) of
+        undefined -> maps:get(<<"method">>, R, undefined);
+        M -> M
+    end;
+request_method(_R) ->
+    undefined.
+
+%% Merge only what was asked for. Unknown and duplicate keys are ignored
+%% rather than refused: the extension has the server drop what it does
+%% not need instead of failing the call.
+do_update(Owner, TaskId, Responses) ->
+    case lookup(Owner, TaskId) of
+        {error, not_found} ->
+            {error, not_found};
+        {ok, #task{mrtr = undefined}} ->
+            ok;
+        {ok, #task{status = St}} when St =/= input_required ->
+            ok;
+        {ok, #task{mrtr = M} = Task} ->
+            Wanted = maps:with(M#mrtr.outstanding, Responses),
+            Merged = maps:merge(M#mrtr.responses, Wanted),
+            Remaining = [K || K <- M#mrtr.outstanding, not maps:is_key(K, Merged)],
+            M1 = M#mrtr{responses = Merged, outstanding = Remaining},
+            Updated = Task#task{
+                mrtr = M1,
+                status =
+                    case Remaining of
+                        [] -> working;
+                        _ -> input_required
+                    end,
+                updated_at = erlang:system_time(millisecond)
+            },
+            true = ets:insert(?TABLE, {TaskId, Updated}),
+            case Remaining of
+                [] ->
+                    notify_changed(Owner, Updated),
+                    {resume, #{
+                        params => Task#task.params,
+                        responses => Merged,
+                        methods => M1#mrtr.issued,
+                        state => M1#mrtr.state
+                    }};
+                _ ->
+                    ok
+            end
+    end.
 
 %% Refuse at admission rather than evict later. An unexpired record is
 %% the retention we advertised, so dropping one to make room would break
@@ -249,6 +419,7 @@ do_create(Owner, Method, Opts) ->
         id = TaskId,
         owner = Owner,
         method = Method,
+        params = maps:get(params, Opts, #{}),
         status = working,
         ttl_ms = granted_ttl(Opts),
         created_at = Now,
@@ -298,20 +469,10 @@ handle_call({set_worker, SessionId, TaskId, Info}, _From, State) ->
                 {error, not_found}
         end,
     {reply, Reply, State};
+handle_call({await_input, Owner, TaskId, Requests, HandlerState, Params}, _From, State) ->
+    {reply, do_await_input(Owner, TaskId, Requests, HandlerState, Params), State};
 handle_call({update, Owner, TaskId, Responses}, _From, State) ->
-    Reply =
-        case lookup(Owner, TaskId) of
-            {ok, #task{input_responses = Existing} = Task} ->
-                Updated = Task#task{
-                    input_responses = maps:merge(Existing, Responses),
-                    updated_at = erlang:system_time(millisecond)
-                },
-                true = ets:insert(?TABLE, {TaskId, Updated}),
-                ok;
-            {error, not_found} ->
-                {error, not_found}
-        end,
-    {reply, Reply, State};
+    {reply, do_update(Owner, TaskId, Responses), State};
 handle_call({finish, SessionId, TaskId, Result}, _From, State) ->
     Reply = transition(SessionId, TaskId, completed, Result, undefined),
     {reply, Reply, State};
@@ -497,7 +658,7 @@ task_to_map(
         created_at = C,
         updated_at = U,
         ttl_ms = Ttl
-    },
+    } = Task,
     Era
 ) ->
     TtlKey =
@@ -505,7 +666,7 @@ task_to_map(
             modern -> <<"ttlMs">>;
             _ -> <<"ttl">>
         end,
-    Base = #{
+    Base0 = #{
         <<"taskId">> => Id,
         <<"method">> => M,
         <<"status">> => atom_to_binary(St, utf8),
@@ -513,6 +674,7 @@ task_to_map(
         <<"lastUpdatedAt">> => to_rfc3339(U),
         TtlKey => ttl_or_null(Ttl)
     },
+    Base = with_input_requests(Base0, Task),
     Base1 =
         case Owner of
             Sid when is_binary(Sid) -> Base#{<<"sessionId">> => Sid};
