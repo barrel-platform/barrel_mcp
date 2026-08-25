@@ -1715,40 +1715,51 @@ do_cancel(Id, #data{pending = Pending} = Data) ->
     case maps:take(Id, Pending) of
         {#pending{caller = From} = P, Rest} when From =/= init, From =/= ping ->
             gen_statem:reply(From, {error, cancelled}),
-            send_envelope(
-                Data,
-                barrel_mcp_protocol:encode_notification(
-                    <<"notifications/cancelled">>,
-                    #{<<"requestId">> => Id, <<"reason">> => <<"cancelled by client">>}
-                )
-            ),
+            signal_cancel(Id, <<"cancelled by client">>, Data),
             Data1 = settle_data(P, Data#data{pending = Rest}),
             {keep_state, Data1, [drop_req_timeout(Id)]};
         _ ->
             keep_state_and_data
     end.
 
+%% "How a client signals cancellation depends on the transport"
+%% (2026-07-28/basic/patterns/cancellation.mdx:38): on Streamable HTTP
+%% closing the response stream is the signal and no notification is
+%% expected, while stdio has no per-request stream and MUST send one.
+%%
+%% Legacy is the other way round on HTTP: there a disconnect "SHOULD NOT
+%% be interpreted as the client cancelling its request"
+%% (2025-11-25/basic/transports.mdx:128), so the notification is the
+%% only signal that works and closing the stream would say nothing.
+signal_cancel(Id, Reason, #data{era = modern, transport = Transport} = Data) when
+    Transport =/= undefined
+->
+    case barrel_mcp_client_transport:cancel_request(Transport, Id) of
+        ok -> ok;
+        unsupported -> send_cancelled(Id, Reason, Data)
+    end;
+signal_cancel(Id, Reason, Data) ->
+    send_cancelled(Id, Reason, Data).
+
+send_cancelled(Id, Reason, Data) ->
+    send_envelope(
+        Data,
+        barrel_mcp_protocol:encode_notification(
+            <<"notifications/cancelled">>,
+            #{<<"requestId">> => Id, <<"reason">> => Reason}
+        )
+    ),
+    ok.
+
 timeout_pending(Id, #data{pending = Pending} = Data) ->
     case maps:take(Id, Pending) of
         {#pending{caller = ping} = P, Rest} ->
             Data1 = settle_data(P, bump_ping_failures(Data#data{pending = Rest})),
-            send_envelope(
-                Data1,
-                barrel_mcp_protocol:encode_notification(
-                    <<"notifications/cancelled">>,
-                    #{<<"requestId">> => Id, <<"reason">> => <<"timeout">>}
-                )
-            ),
+            signal_cancel(Id, <<"timeout">>, Data1),
             maybe_close_on_ping_failures(Data1, Id);
         {#pending{caller = From} = P, Rest} when From =/= init ->
             gen_statem:reply(From, {error, timeout}),
-            send_envelope(
-                Data,
-                barrel_mcp_protocol:encode_notification(
-                    <<"notifications/cancelled">>,
-                    #{<<"requestId">> => Id, <<"reason">> => <<"timeout">>}
-                )
-            ),
+            signal_cancel(Id, <<"timeout">>, Data),
             Data1 = settle_data(P, Data#data{pending = Rest}),
             {keep_state, Data1};
         _ ->

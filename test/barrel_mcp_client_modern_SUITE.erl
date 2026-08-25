@@ -51,11 +51,13 @@
     missing_result_type_is_refused/1,
     task_result_needs_the_extension/1,
     task_result_only_on_tools_call/1,
-    legacy_result_needs_no_type/1
+    legacy_result_needs_no_type/1,
+    modern_timeout_closes_the_stream/1,
+    legacy_timeout_sends_cancelled/1
 ]).
 
 -export([echo_tool/1, a_resource/1, a_prompt/1, legacy_only_server/1]).
--export([version_error_server/1, result_type_server/1]).
+-export([version_error_server/1, result_type_server/1, slow_server/1]).
 -export([confirm_tool/2, insatiable_tool/2, region_tool/1]).
 
 -define(BASE_PORT, 22000).
@@ -93,7 +95,9 @@ all() ->
         missing_result_type_is_refused,
         task_result_needs_the_extension,
         task_result_only_on_tools_call,
-        legacy_result_needs_no_type
+        legacy_result_needs_no_type,
+        modern_timeout_closes_the_stream,
+        legacy_timeout_sends_cancelled
     ].
 
 init_per_suite(Config) ->
@@ -903,6 +907,120 @@ with_result_body(Config, ResultBody, Extra, Fun) ->
     after
         barrel_mcp_test_http:stop(result_type_mock),
         persistent_term:erase({?MODULE, result_body})
+    end.
+
+%%====================================================================
+%% Cancellation by transport
+%%====================================================================
+
+%% On Streamable HTTP "closing the SSE response stream is itself the
+%% cancellation signal ... No notifications/cancelled message is
+%% required or expected"
+%% (2026-07-28/basic/patterns/cancellation.mdx:38). Sending one anyway
+%% would be a second, uncorrelated request: the era has no session to
+%% tie it to the first.
+modern_timeout_closes_the_stream(Config) ->
+    with_slow_server(Config, ?MODERN, fun(Client, Counter) ->
+        ?assertEqual(
+            {error, timeout},
+            barrel_mcp_client:call_tool(Client, <<"slow">>, #{}, #{timeout => 400})
+        ),
+        timer:sleep(500),
+        ?assertEqual(0, counters:get(Counter, 1))
+    end).
+
+%% Legacy is the other way round: there a disconnect is explicitly not
+%% cancellation, so the notification is the only signal that works.
+legacy_timeout_sends_cancelled(Config) ->
+    with_slow_server(Config, <<"2025-11-25">>, fun(Client, Counter) ->
+        ?assertEqual(
+            {error, timeout},
+            barrel_mcp_client:call_tool(Client, <<"slow">>, #{}, #{timeout => 400})
+        ),
+        wait_until(fun() -> counters:get(Counter, 1) >= 1 end, 3000),
+        ?assertEqual(1, counters:get(Counter, 1))
+    end).
+
+%% Answers discovery and the handshake at once, stalls on `tools/call',
+%% and counts every `notifications/cancelled' it is sent.
+slow_server(#{body := Body}) ->
+    Request = json:decode(Body),
+    Id = maps:get(<<"id">>, Request, null),
+    case maps:get(<<"method">>, Request, undefined) of
+        <<"notifications/cancelled">> ->
+            counters:add(persistent_term:get({?MODULE, cancels}), 1, 1),
+            {202, #{}, <<>>};
+        <<"tools/call">> ->
+            timer:sleep(3000),
+            {200, #{<<"content-type">> => <<"application/json">>},
+                iolist_to_binary(
+                    json:encode(#{
+                        <<"jsonrpc">> => <<"2.0">>,
+                        <<"id">> => Id,
+                        <<"result">> => #{
+                            <<"resultType">> => <<"complete">>,
+                            <<"content">> => []
+                        }
+                    })
+                )};
+        Method ->
+            {200, #{<<"content-type">> => <<"application/json">>},
+                iolist_to_binary(json:encode(slow_server_reply(Method, Id)))}
+    end.
+
+slow_server_reply(<<"server/discover">>, Id) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => Id,
+        <<"result">> => #{
+            <<"resultType">> => <<"complete">>,
+            <<"supportedVersions">> => [?MODERN],
+            <<"capabilities">> => #{<<"tools">> => #{}},
+            <<"_meta">> => #{
+                ?MCP_META_SERVER_INFO => #{
+                    <<"name">> => <<"slow-mock">>,
+                    <<"version">> => <<"1.0">>
+                }
+            }
+        }
+    };
+slow_server_reply(<<"initialize">>, Id) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => Id,
+        <<"result">> => #{
+            <<"protocolVersion">> => <<"2025-11-25">>,
+            <<"capabilities">> => #{<<"tools">> => #{}},
+            <<"serverInfo">> => #{
+                <<"name">> => <<"slow-mock">>,
+                <<"version">> => <<"1.0">>
+            }
+        }
+    };
+slow_server_reply(_Method, Id) ->
+    #{<<"jsonrpc">> => <<"2.0">>, <<"id">> => Id, <<"result">> => #{}}.
+
+with_slow_server(Config, Version, Fun) ->
+    Port = ?config(port, Config) + 500,
+    Counter = counters:new(1, []),
+    persistent_term:put({?MODULE, cancels}, Counter),
+    {ok, _} = barrel_mcp_test_http:start(
+        slow_mock, Port, fun ?MODULE:slow_server/1
+    ),
+    try
+        {ok, Client} = barrel_mcp_client:start(#{
+            transport => {http, url(Port)},
+            protocol_version => Version
+        }),
+        wait_until(fun() -> is_ready(Client) end, 8000),
+        try
+            Fun(Client, Counter)
+        after
+            catch_close(Client)
+        end
+    after
+        barrel_mcp_test_http:stop(slow_mock),
+        persistent_term:erase({?MODULE, cancels})
     end.
 
 %%====================================================================

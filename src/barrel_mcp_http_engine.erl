@@ -598,11 +598,24 @@ subscription_loop(Responder, SubId, Interval) ->
                 {error, _} -> end_subscription(Responder, SubId)
             end;
         {mcp_subscription_close, SubId} ->
-            %% A graceful end: answer the long-lived request so the
-            %% client can tell this from a dropped connection.
+            %% A graceful end, in the order the two rules give it. The
+            %% server "MUST send notifications/cancelled referencing a
+            %% subscriptions/listen request ID when it tears down that
+            %% subscription stream"
+            %% (2026-07-28/basic/patterns/cancellation.mdx:12), then
+            %% "SHOULD respond to the original subscriptions/listen
+            %% request with a completion result before closing the
+            %% stream" (patterns/subscriptions.mdx:130), which is what
+            %% tells the client this was not a dropped connection.
+            _ = push_sse_data(Responder, subscription_cancelled(SubId)),
             _ = push_sse_data(Responder, subscription_closed(SubId)),
             end_subscription(Responder, SubId);
         mcp_disconnect ->
+            end_subscription(Responder, SubId);
+        %% The connection process died, taking the stream with it.
+        %% Nothing left to write to, so release the subscription rather
+        %% than hold it for a peer that is gone.
+        {'EXIT', _Conn, _Reason} ->
             end_subscription(Responder, SubId);
         _Other ->
             subscription_loop(Responder, SubId, Interval)
@@ -614,6 +627,20 @@ subscription_loop(Responder, SubId, Interval) ->
             {error, _} -> end_subscription(Responder, SubId)
         end
     end.
+
+%% Tearing down a subscription stream is the one purpose a server may
+%% send this for: "Servers MUST NOT send notifications/cancelled for any
+%% other purpose" (cancellation.mdx:12).
+subscription_cancelled(SubId) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"method">> => <<"notifications/cancelled">>,
+        <<"params">> => #{
+            <<"_meta">> => #{?MCP_META_SUBSCRIPTION_ID => SubId},
+            <<"requestId">> => SubId,
+            <<"reason">> => <<"Subscription torn down by the server">>
+        }
+    }.
 
 subscription_closed(SubId) ->
     #{
@@ -863,7 +890,10 @@ handle_async_tool_call(
                         SessionId, RequestId, WorkerPid, Self
                     )
             end,
-            Outcome = wait_for_tool(RequestId, Timeout, OnProgress),
+            Outcome0 = wait_for_tool(
+                RequestId, Timeout, OnProgress, cancels_on_disconnect(Reply)
+            ),
+            Outcome = settle_disconnect(Outcome0, WorkerPid),
             case SessionId of
                 undefined -> ok;
                 _ -> ok = barrel_mcp_session:clear_in_flight(SessionId, RequestId)
@@ -892,6 +922,35 @@ streams_notifications(#{ctx := Ctx}, _Token, _Level) when Ctx =/= undefined ->
     barrel_mcp_ctx:is_modern(Ctx);
 streams_notifications(_Reply, _Token, _Level) ->
     false.
+
+%% The eras read a dropped connection differently, and both are
+%% explicit rules rather than defaults.
+%%
+%% On 2026-07-28 "closing the SSE response stream is itself the
+%% cancellation signal" and the server "MUST treat a client disconnect
+%% as cancellation of that request"
+%% (2026-07-28/basic/patterns/cancellation.mdx:38).
+%%
+%% Through 2025-11-25, "disconnection SHOULD NOT be interpreted as the
+%% client cancelling its request" (2025-11-25/basic/transports.mdx:128):
+%% the work continues and the client cancels by sending
+%% `notifications/cancelled' instead.
+cancels_on_disconnect(#{ctx := Ctx}) when Ctx =/= undefined ->
+    barrel_mcp_ctx:is_modern(Ctx);
+cancels_on_disconnect(_Reply) ->
+    false.
+
+%% A disconnected request has no one left to answer, so the worker is
+%% stopped and the outcome becomes the one with no envelope.
+settle_disconnect(disconnected, WorkerPid) ->
+    _ =
+        case is_pid(WorkerPid) andalso is_process_alive(WorkerPid) of
+            true -> exit(WorkerPid, kill);
+            false -> ok
+        end,
+    cancelled;
+settle_disconnect(Outcome, _WorkerPid) ->
+    Outcome.
 
 %% `undefined' unless this request named a level in its `_meta', which
 %% is what makes modern logging opt-in.
@@ -1134,12 +1193,14 @@ log_notification(Params) ->
 %% tool produces. Modern requests write those onto their own response
 %% stream; legacy ones deliver them out of band on the session's SSE
 %% channel and pass a sink that drops them.
-wait_for_tool(RequestId, Timeout, OnEmit) ->
+wait_for_tool(RequestId, Timeout, OnEmit, CancelOnDisconnect) ->
     Deadline = progress_deadline(Timeout),
-    Outcome = collect_tool_outcome(RequestId, Deadline, OnEmit),
+    Outcome = collect_tool_outcome(RequestId, Deadline, OnEmit, CancelOnDisconnect),
     case Outcome of
         cancelled ->
             cancelled;
+        disconnected ->
+            disconnected;
         timeout ->
             timeout;
         _ ->
@@ -1163,9 +1224,19 @@ progress_remaining(infinity) ->
 progress_remaining(Deadline) ->
     max(0, Deadline - erlang:monotonic_time(millisecond)).
 
-collect_tool_outcome(RequestId, Deadline, OnEmit) ->
+collect_tool_outcome(RequestId, Deadline, OnEmit, CancelOnDisconnect) ->
     Outcome =
         receive
+            %% Left in the mailbox unless this revision reads a
+            %% disconnect as cancellation, so a legacy request keeps
+            %% running exactly as it did. The exit signal is the same
+            %% event seen from the other side: the connection process
+            %% dies when the peer closes, and this process is linked to
+            %% it.
+            mcp_disconnect when CancelOnDisconnect ->
+                disconnected;
+            {'EXIT', _Conn, _Reason} when CancelOnDisconnect ->
+                disconnected;
             {tool_progress, RequestId, Params} ->
                 OnEmit(progress_notification(Params)),
                 notified;
@@ -1196,7 +1267,7 @@ collect_tool_outcome(RequestId, Deadline, OnEmit) ->
             timeout
         end,
     case Outcome of
-        notified -> collect_tool_outcome(RequestId, Deadline, OnEmit);
+        notified -> collect_tool_outcome(RequestId, Deadline, OnEmit, CancelOnDisconnect);
         _ -> Outcome
     end.
 
@@ -1461,6 +1532,8 @@ sse_loop(Responder, SessionId) ->
         session_terminated ->
             sse_cleanup(Responder, SessionId);
         mcp_disconnect ->
+            sse_cleanup(Responder, SessionId);
+        {'EXIT', _Conn, _Reason} ->
             sse_cleanup(Responder, SessionId);
         {sse_event, EventId, Data} ->
             case push_sse_event(Responder, EventId, Data) of

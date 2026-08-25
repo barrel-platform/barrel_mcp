@@ -215,6 +215,18 @@ graceful_close_sends_response(Config) ->
     {Ref, _} = listen(Config, 5, #{<<"toolsListChanged">> => true}),
     _Ack = next_event(Ref),
     ok = barrel_mcp_subscriptions:close_all(),
+    %% "A server MUST send notifications/cancelled referencing a
+    %% subscriptions/listen request ID when it tears down that
+    %% subscription stream" (cancellation.mdx:12), and it comes before
+    %% the response that ends the request.
+    Cancelled = next_event(Ref),
+    ?assertEqual(<<"notifications/cancelled">>, maps:get(<<"method">>, Cancelled)),
+    CParams = maps:get(<<"params">>, Cancelled),
+    ?assertEqual(5, maps:get(<<"requestId">>, CParams)),
+    ?assertEqual(
+        5,
+        maps:get(?MCP_META_SUBSCRIPTION_ID, maps:get(<<"_meta">>, CParams))
+    ),
     Final = next_event(Ref),
     %% A response to the long-lived request, not a notification: that
     %% is what distinguishes a clean end from a dropped connection.

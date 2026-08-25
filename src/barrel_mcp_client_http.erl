@@ -32,7 +32,7 @@
 -include("barrel_mcp.hrl").
 
 %% Transport API
--export([connect/2, send/2, close/1]).
+-export([connect/2, send/2, close/1, cancel_request/2]).
 
 %% Public helpers
 -export([set_session_id/2, set_protocol_version/2, open_event_stream/1]).
@@ -51,6 +51,10 @@
 
 -record(req, {
     body :: binary(),
+    %% The JSON-RPC id this POST carries, so a cancel naming that id can
+    %% find the stream to close. `undefined' for a notification, which
+    %% has no id and cannot be cancelled.
+    request_id :: integer() | binary() | undefined,
     status :: undefined | non_neg_integer(),
     headers = [] :: list(),
     buffer = <<>> :: binary(),
@@ -102,6 +106,13 @@ send(Pid, Body) ->
 
 close(Pid) ->
     gen_server:cast(Pid, close).
+
+%% @doc Cancel one in-flight request by closing its response stream,
+%% which on Streamable HTTP "is itself the cancellation signal"
+%% (2026-07-28/basic/patterns/cancellation.mdx:38). Naming a request
+%% that already finished is a no-op.
+cancel_request(Pid, RequestId) ->
+    gen_server:cast(Pid, {cancel_request, RequestId}).
 
 %%====================================================================
 %% Public helpers
@@ -196,6 +207,15 @@ handle_cast(open_event_stream, #state{sse_ref = Ref} = State) when is_pid(Ref) -
     {noreply, State};
 handle_cast(open_event_stream, State) ->
     {noreply, start_stream(State)};
+handle_cast({cancel_request, RequestId}, #state{requests = Reqs} = State) ->
+    %% Dropping the slot before closing matters: hackney may still
+    %% deliver a chunk or a `done' for this ref, and an entry left
+    %% behind would have it dispatched as a response to a request the
+    %% caller was already told was cancelled.
+    Refs = [R || {R, #req{request_id = Id}} <- maps:to_list(Reqs), Id =:= RequestId],
+    Rest = lists:foldl(fun maps:remove/2, Reqs, Refs),
+    _ = [close_ref(R) || R <- Refs],
+    {noreply, State#state{requests = Rest}};
 handle_cast(close, State) ->
     _ = send_delete(State),
     {stop, normal, State};
@@ -319,10 +339,28 @@ start_post(Body, Retried, State) ->
         )
     of
         {ok, Ref} ->
-            Req = #req{body = Body, retried = Retried},
+            Req = #req{body = Body, retried = Retried, request_id = body_request_id(Body)},
             {ok, State#state{requests = (State#state.requests)#{Ref => Req}}};
         {error, _} = Err ->
             Err
+    end.
+
+%% A ref hackney has already retired raises rather than returning an
+%% error, and cancelling a request that just finished is a race we are
+%% required to tolerate, not a fault.
+close_ref(Ref) ->
+    try
+        hackney:close(Ref)
+    catch
+        _:_ -> ok
+    end.
+
+body_request_id(Body) ->
+    try json:decode(iolist_to_binary(Body)) of
+        #{<<"id">> := Id} when is_integer(Id); is_binary(Id) -> Id;
+        _ -> undefined
+    catch
+        _:_ -> undefined
     end.
 
 finalize_request(Ref, #req{format = sse} = _R, #state{requests = Reqs} = State) ->

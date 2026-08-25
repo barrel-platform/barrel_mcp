@@ -53,7 +53,9 @@
     modern_only_refuses_get_and_delete/1,
     modern_logs_only_when_opted_in/1,
     modern_logs_below_requested_level_are_dropped/1,
-    modern_unknown_log_level_is_invalid_params/1
+    modern_unknown_log_level_is_invalid_params/1,
+    modern_disconnect_cancels_the_request/1,
+    legacy_disconnect_does_not_cancel/1
 ]).
 
 -define(BASE_PORT, 21400).
@@ -61,8 +63,18 @@
 
 %% A tool per outcome we need to observe on the wire.
 -export([
-    echo_tool/1, boom_tool/1, a_resource/1, counting_tool/2, region_tool/1, chatty_tool/2
+    echo_tool/1,
+    boom_tool/1,
+    a_resource/1,
+    counting_tool/2,
+    region_tool/1,
+    chatty_tool/2,
+    slow_tool/1
 ]).
+
+%% The name the slow tool reports its lifecycle to. A disconnect case
+%% asserts on which of the two messages arrives.
+-define(WATCH, barrel_mcp_dual_era_watch).
 
 all() ->
     [
@@ -95,7 +107,9 @@ all() ->
         modern_only_refuses_get_and_delete,
         modern_logs_only_when_opted_in,
         modern_logs_below_requested_level_are_dropped,
-        modern_unknown_log_level_is_invalid_params
+        modern_unknown_log_level_is_invalid_params,
+        modern_disconnect_cancels_the_request,
+        legacy_disconnect_does_not_cancel
     ].
 
 init_per_suite(Config) ->
@@ -113,6 +127,9 @@ init_per_suite(Config) ->
     }),
     ok = barrel_mcp:reg_tool(<<"chatty">>, ?MODULE, chatty_tool, #{
         description => <<"Logs at two levels, then finishes">>
+    }),
+    ok = barrel_mcp:reg_tool(<<"slow">>, ?MODULE, slow_tool, #{
+        description => <<"Reports that it started, waits, reports that it finished">>
     }),
     ok = barrel_mcp:reg_tool(<<"regional">>, ?MODULE, region_tool, #{
         description => <<"Mirrors its region argument into a header">>,
@@ -138,6 +155,7 @@ end_per_suite(_Config) ->
     barrel_mcp_registry:unreg(tool, <<"boom">>),
     barrel_mcp_registry:unreg(tool, <<"counter">>),
     barrel_mcp_registry:unreg(tool, <<"chatty">>),
+    barrel_mcp_registry:unreg(tool, <<"slow">>),
     barrel_mcp_registry:unreg(tool, <<"regional">>),
     barrel_mcp_registry:unreg(resource, <<"res">>),
     try
@@ -178,6 +196,19 @@ region_tool(Args) ->
     maps:get(<<"region">>, Args, <<"none">>).
 
 %% Arity 2 so it can reach the progress hook in Ctx.
+slow_tool(_Args) ->
+    watch(started),
+    timer:sleep(1500),
+    watch(finished),
+    <<"slow">>.
+
+watch(Msg) ->
+    case whereis(?WATCH) of
+        undefined -> ok;
+        Pid -> Pid ! Msg
+    end,
+    ok.
+
 chatty_tool(_Args, Ctx) ->
     ok = barrel_mcp:log(Ctx, debug, <<"db">>, <<"opening">>),
     ok = barrel_mcp:log(Ctx, error, <<"db">>, <<"it broke">>),
@@ -713,6 +744,98 @@ modern_unknown_log_level_is_invalid_params(Config) ->
     Error = maps:get(<<"error">>, json:decode(RespBody)),
     ?assertEqual(-32602, maps:get(<<"code">>, Error)),
     ok.
+
+%%====================================================================
+%% Disconnect
+%%====================================================================
+
+%% On 2026-07-28 the server "MUST treat a client disconnect as
+%% cancellation of that request"
+%% (2026-07-28/basic/patterns/cancellation.mdx:38).
+modern_disconnect_cancels_the_request(Config) ->
+    Port = ?config(port, Config),
+    Params = #{<<"name">> => <<"slow">>, <<"arguments">> => #{}},
+    Body = modern_request(1, <<"tools/call">>, Params),
+    with_watch(fun() ->
+        Sock = post_raw(Port, Body, []),
+        ok = await_watch(started, 5000),
+        ok = gen_tcp:close(Sock),
+        ?assertEqual(timeout, await_watch(finished, 4000))
+    end).
+
+%% Through 2025-11-25 "disconnection SHOULD NOT be interpreted as the
+%% client cancelling its request"
+%% (2025-11-25/basic/transports.mdx:128), so the same drop leaves the
+%% work running.
+legacy_disconnect_does_not_cancel(Config) ->
+    Port = ?config(port, Config),
+    {200, InitHeaders, _} = post(Port, init_body(), []),
+    SessionId = header(<<"mcp-session-id">>, InitHeaders),
+    Params = #{<<"name">> => <<"slow">>, <<"arguments">> => #{}},
+    Body = legacy_request(2, <<"tools/call">>, Params),
+    with_watch(fun() ->
+        Sock = post_raw(Port, Body, [{<<"mcp-session-id">>, SessionId}]),
+        ok = await_watch(started, 5000),
+        ok = gen_tcp:close(Sock),
+        ?assertEqual(ok, await_watch(finished, 5000))
+    end).
+
+with_watch(Fun) ->
+    true = register(?WATCH, self()),
+    try
+        Fun()
+    after
+        try
+            unregister(?WATCH)
+        catch
+            _:_ -> ok
+        end
+    end.
+
+await_watch(Msg, Timeout) ->
+    receive
+        Msg -> ok
+    after Timeout -> timeout
+    end.
+
+%% A POST written straight onto a socket the case owns, so closing it
+%% is an unambiguous client disconnect. hackney would pool the
+%% connection instead of sending FIN, which is the very thing under
+%% test.
+post_raw(Port, Body0, ExtraHeaders) ->
+    Body = iolist_to_binary(Body0),
+    Decoded = json:decode(Body),
+    Params = maps:get(<<"params">>, Decoded, #{}),
+    Meta = maps:get(<<"_meta">>, Params, #{}),
+    Headers =
+        [
+            {<<"host">>, iolist_to_binary(io_lib:format("127.0.0.1:~B", [Port]))},
+            {<<"content-type">>, <<"application/json">>},
+            {<<"accept">>, <<"application/json, text/event-stream">>},
+            {<<"content-length">>, integer_to_binary(byte_size(Body))}
+        ] ++
+            version_header(Meta) ++
+            metadata_headers(Meta, maps:get(<<"method">>, Decoded, <<>>), Params) ++
+            ExtraHeaders,
+    Lines = [[K, <<": ">>, V, <<"\r\n">>] || {K, V} <- Headers],
+    Request = [<<"POST /mcp HTTP/1.1\r\n">>, Lines, <<"\r\n">>, Body],
+    {ok, Sock} = gen_tcp:connect(
+        {127, 0, 0, 1}, Port, [binary, {active, false}, {packet, raw}], 5000
+    ),
+    ok = gen_tcp:send(Sock, Request),
+    Sock.
+
+%% Only a modern request carries the routing headers, and only it
+%% carries the version in `_meta' to build them from.
+version_header(Meta) when map_size(Meta) =:= 0 ->
+    [];
+version_header(Meta) ->
+    [{<<"mcp-protocol-version">>, maps:get(?MCP_META_PROTOCOL_VERSION, Meta, ?MODERN)}].
+
+metadata_headers(Meta, _Method, _Params) when map_size(Meta) =:= 0 ->
+    [];
+metadata_headers(_Meta, Method, Params) ->
+    barrel_mcp_headers:standard(Method, Params).
 
 %%====================================================================
 %% Helpers

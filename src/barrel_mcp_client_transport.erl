@@ -19,7 +19,7 @@
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_client_transport).
 
--export([send/2, close/1]).
+-export([send/2, close/1, cancel_request/2]).
 
 -type t() :: {module(), pid()}.
 -export_type([t/0]).
@@ -38,6 +38,19 @@
 %% Close the transport.
 -callback close(TransportPid :: pid()) -> ok.
 
+%% Cancel one in-flight request at the transport level, where the
+%% transport has a per-request channel to tear down. Streamable HTTP
+%% implements it, because closing the response stream "is itself the
+%% cancellation signal" there; stdio has no per-request stream and does
+%% not, so the client sends `notifications/cancelled' instead
+%% (2026-07-28/basic/patterns/cancellation.mdx:38).
+-callback cancel_request(
+    TransportPid :: pid(),
+    RequestId :: integer() | binary()
+) -> ok.
+
+-optional_callbacks([cancel_request/2]).
+
 %%====================================================================
 %% Helpers
 %%====================================================================
@@ -51,3 +64,17 @@ send({Mod, Pid}, Body) ->
 -spec close(t()) -> ok.
 close({Mod, Pid}) ->
     Mod:close(Pid).
+
+%% @doc Ask the transport to cancel one request by tearing down its
+%% channel. `unsupported' when this transport has no such channel, and
+%% the caller must fall back to `notifications/cancelled'.
+-spec cancel_request(t(), integer() | binary()) -> ok | unsupported.
+cancel_request({Mod, Pid}, RequestId) ->
+    _ = code:ensure_loaded(Mod),
+    case erlang:function_exported(Mod, cancel_request, 2) of
+        true ->
+            Mod:cancel_request(Pid, RequestId),
+            ok;
+        false ->
+            unsupported
+    end.

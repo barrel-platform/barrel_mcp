@@ -491,11 +491,15 @@ spawn_handler(Proto, Conn, StreamId, Method, Path, Headers, Handler) ->
     %% stream blocks until its connection tells it to stop, so if the
     %% connection is killed outright (a listener `stop', say) there is
     %% no code left to send that signal and the handler would be
-    %% orphaned, holding its subscription forever. The handler already
-    %% traps its own crashes below, so the link only ever fires in the
-    %% direction we want.
+    %% orphaned, holding its subscription forever.
     spawn_opt(
         fun() ->
+            %% Trapping turns that link into a message. It has to: what
+            %% a lost connection means is revision-dependent, since
+            %% 2026-07-28 reads it as cancellation while every earlier
+            %% revision says it is not, and only the engine knows which
+            %% one is being served. Dying here would decide it for both.
+            process_flag(trap_exit, true),
             try
                 Handler(Proto, Conn, StreamId, Method, Path, Headers)
             catch
@@ -573,6 +577,8 @@ read_body(StreamId, Acc) ->
         {mcp_body, StreamId, eof} ->
             {ok, Acc};
         mcp_disconnect ->
+            {error, closed};
+        {'EXIT', _Conn, _Reason} ->
             {error, closed}
     after ?BODY_TIMEOUT ->
         {error, timeout}
