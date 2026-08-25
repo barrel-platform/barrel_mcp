@@ -101,7 +101,7 @@
 -define(DEFAULT_MAX_FRAME_BYTES, 16 * 1024 * 1024).
 -define(READ_CHUNK_BYTES, 65536).
 
--record(state, {buf = <<>> :: binary()}).
+-record(state, {buf = <<>> :: binary(), version :: binary() | undefined}).
 
 %%====================================================================
 %% API
@@ -210,9 +210,9 @@ handle_info(read_line, State) ->
             ),
             {stop, normal, State};
         {ok, Line, Rest} ->
-            handle_line(Line),
+            Version = handle_line(Line, State#state.version),
             self() ! read_line,
-            {noreply, State#state{buf = Rest}}
+            {noreply, State#state{buf = Rest, version = Version}}
     end;
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -225,9 +225,9 @@ terminate(_Reason, _State) ->
 %%====================================================================
 
 loop() ->
-    loop(<<>>).
+    loop(<<>>, undefined).
 
-loop(Buf) ->
+loop(Buf, Version) ->
     case read_frame(Buf) of
         eof ->
             ok;
@@ -241,8 +241,7 @@ loop(Buf) ->
             ),
             ok;
         {ok, Line, Rest} ->
-            handle_line(Line),
-            loop(Rest)
+            loop(Rest, handle_line(Line, Version))
     end.
 
 %% Read one newline-delimited frame without ever holding more than the
@@ -280,19 +279,19 @@ read_frame(Buf, Max) ->
             end
     end.
 
-handle_line(Line) when is_binary(Line) ->
+handle_line(Line, Version) when is_binary(Line) ->
     %% Trim whitespace
     TrimmedLine = string:trim(Line),
     case TrimmedLine of
         <<>> ->
-            ok;
+            Version;
         _ ->
             %% One malformed message must not take the transport down
             %% with it: stdio has a single process serving every
             %% request, so an uncaught throw here ends the server and
             %% every in-flight call with it.
             try
-                process_request(TrimmedLine)
+                process_request(TrimmedLine, Version)
             catch
                 Class:Reason:Stack ->
                     logger:error(
@@ -303,19 +302,25 @@ handle_line(Line) when is_binary(Line) ->
                         barrel_mcp_protocol:error_response(
                             null, -32603, <<"Internal error">>
                         )
-                    )
+                    ),
+                    Version
             end
     end;
-handle_line(Line) when is_list(Line) ->
-    handle_line(list_to_binary(Line)).
+handle_line(Line, Version) when is_list(Line) ->
+    handle_line(list_to_binary(Line), Version).
 
-process_request(Line) ->
+%% `Version' is what a previous `initialize' on this connection settled
+%% on. stdio has no session to record it against and no header to carry
+%% it, so the transport remembers it, and returns whatever the exchange
+%% negotiated so the caller can carry it forward. Batch acceptance is
+%% the first rule that depends on it.
+process_request(Line, Version) ->
     case barrel_mcp_protocol:decode(Line) of
         {ok, Request} ->
-            case barrel_mcp_protocol:handle(Request) of
+            case barrel_mcp_protocol:handle(Request, #{protocol_version => Version}) of
                 no_response ->
                     %% Notification - no response needed
-                    ok;
+                    Version;
                 {async, Plan} ->
                     %% tools/call returns an async plan; drive it
                     %% synchronously here. stdio is single-threaded;
@@ -323,16 +328,33 @@ process_request(Line) ->
                     Response = barrel_mcp_protocol:drive_async_plan(
                         Plan, 60000
                     ),
-                    send_response(Response);
+                    send_response(Response),
+                    Version;
                 Response ->
-                    send_response(Response)
+                    send_response(Response),
+                    negotiated(Response, Version)
             end;
+        {error, too_deep} ->
+            send_response(
+                barrel_mcp_protocol:error_response(
+                    null, -32600, <<"Request nesting is too deep">>
+                )
+            ),
+            Version;
         {error, parse_error} ->
             ErrorResponse = barrel_mcp_protocol:error_response(
                 null, -32700, <<"Parse error">>
             ),
-            send_response(ErrorResponse)
+            send_response(ErrorResponse),
+            Version
     end.
+
+%% The revision an `initialize' exchange settled on, read back off the
+%% answer we just produced rather than re-derived from the request.
+negotiated(#{<<"result">> := #{<<"protocolVersion">> := V}}, _Version) when is_binary(V) ->
+    V;
+negotiated(_Response, Version) ->
+    Version.
 
 send_response(Response) ->
     ResponseJson = barrel_mcp_protocol:encode(Response),

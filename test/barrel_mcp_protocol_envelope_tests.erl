@@ -159,7 +159,9 @@ handle_notification_returns_no_response_test() ->
         )
     ).
 
-handle_batch_returns_invalid_request_test() ->
+%% Batches are revision gated, and `handle/1' names no revision, so
+%% this is the unnegotiated case rather than a blanket refusal.
+handle_batch_without_a_revision_is_refused_test() ->
     Resp = barrel_mcp_protocol:handle([
         #{
             <<"jsonrpc">> => <<"2.0">>,

@@ -261,17 +261,8 @@ stream_post(Headers, Body, Responder, Config) ->
 stream_post_authed(Headers, Body, Responder, Config, AuthInfo) ->
     SessionEnabled = maps:get(session_enabled, Config, true),
     case barrel_mcp_protocol:decode(Body) of
-        {ok, Request} when is_list(Request) ->
-            reply_jsonrpc_error(
-                Headers,
-                Responder,
-                Config,
-                undefined,
-                400,
-                null,
-                ?JSONRPC_INVALID_REQUEST,
-                <<"Batch requests are not supported">>
-            );
+        {ok, Batch} when is_list(Batch) ->
+            stream_post_batch(Headers, Responder, Config, SessionEnabled, Batch, AuthInfo);
         {ok, Request} when is_map(Request) ->
             %% Pass the raw request through the response-vs-request
             %% split; `_auth' is attached only on the request path
@@ -296,6 +287,41 @@ stream_post_authed(Headers, Body, Responder, Config, AuthInfo) ->
                 <<"Parse error">>
             )
     end.
+
+%% A batch never carries a session id of its own and never creates one,
+%% so it reuses the session the header names, if any. Whether it is
+%% accepted at all depends on the negotiated revision, which the
+%% protocol core decides.
+stream_post_batch(Headers, Responder, Config, SessionEnabled, Batch, AuthInfo) ->
+    SessionId =
+        case lookup_session(Headers, Config, SessionEnabled, undefined) of
+            {ok, Sid} -> Sid;
+            {error, _} -> undefined
+        end,
+    ProtocolState = #{
+        auth_info => AuthInfo,
+        protocol_version => negotiated_version(Headers, SessionId),
+        session_id => SessionId
+    },
+    case barrel_mcp_protocol:handle(with_auth_elements(Batch, AuthInfo), ProtocolState) of
+        no_response ->
+            Hdrs = add_session_header(cors_headers(Headers, Config, #{}), SessionId),
+            reply(Responder, 202, Hdrs, <<>>);
+        Response when is_map(Response) ->
+            %% A refusal of the whole envelope, not a per-element answer.
+            reply_json(Headers, Responder, Config, 400, Response);
+        Responses when is_list(Responses) ->
+            reply_json(Headers, Responder, Config, 200, Responses)
+    end.
+
+with_auth_elements(Batch, AuthInfo) ->
+    [
+        case E of
+            M when is_map(M) -> with_auth(M, AuthInfo);
+            Other -> Other
+        end
+     || E <- Batch
+    ].
 
 %% Keep both the original request (for response detection) and an
 %% auth-tagged copy used when dispatching to the protocol core.
@@ -653,7 +679,13 @@ handle_dispatch(Headers, Responder, Config, SessionId, Request, AuthInfo) ->
                     undefined -> #{};
                     _ -> #{session_id => SessionId}
                 end,
-            ProtocolState = ProtocolState0#{auth_info => AuthInfo},
+            %% The negotiated revision decides whether a batch is
+            %% accepted at all, so the protocol core needs it rather
+            %% than only the session id it is recorded against.
+            ProtocolState = ProtocolState0#{
+                auth_info => AuthInfo,
+                protocol_version => negotiated_version(Headers, SessionId)
+            },
             case
                 barrel_mcp_protocol:handle(
                     with_auth(Request, AuthInfo),
@@ -1149,6 +1181,22 @@ lookup_session(Headers, Config, true, Method) ->
                 {ok, _} -> {ok, SessionId};
                 {error, not_found} -> {error, unknown_session}
             end
+    end.
+
+%% What this connection settled on, preferring the header the client
+%% sends on every post-initialize request and falling back to what the
+%% session recorded at the handshake.
+negotiated_version(Headers, SessionId) ->
+    case header(<<"mcp-protocol-version">>, Headers, undefined) of
+        Version when is_binary(Version) ->
+            Version;
+        undefined when is_binary(SessionId) ->
+            case barrel_mcp_session:get_protocol_version(SessionId) of
+                {ok, Version} -> Version;
+                _ -> undefined
+            end;
+        _ ->
+            undefined
     end.
 
 validate_protocol_version(_Headers, _Sid, <<"initialize">>) ->
