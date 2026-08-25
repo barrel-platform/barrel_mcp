@@ -137,7 +137,10 @@ drive_async_plan_test_() ->
         {"A killed worker fails its task", fun killed_worker_fails_task/0},
         {"Modern create carries every required field", fun modern_create_shape/0},
         {"Legacy create keeps the wrapped shape", fun legacy_create_shape/0},
-        {"The granted ttl is reported, not the request", fun granted_ttl_reported/0}
+        {"The granted ttl is reported, not the request", fun granted_ttl_reported/0},
+        {"Task methods need the extension declared", fun task_methods_need_extension/0},
+        {"Legacy task methods are ungated", fun legacy_task_methods_ungated/0},
+        {"A tool error completes the task", fun tool_error_completes_task/0}
     ]}.
 
 setup_slow() ->
@@ -301,3 +304,59 @@ granted_ttl_reported() ->
     ?assertEqual(Max, maps:get(<<"ttl">>, Task)),
     {ok, Modern} = barrel_mcp_tasks:get(<<"ttl-sess">>, TaskId, modern),
     ?assertEqual(Max, maps:get(<<"ttlMs">>, Modern)).
+
+%%====================================================================
+%% Capability gating and error semantics
+%%====================================================================
+
+modern_task_request(Method, Caps) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 7,
+        <<"method">> => Method,
+        <<"params">> => #{
+            <<"taskId">> => <<"whatever">>,
+            <<"_meta">> => modern_meta(Caps)
+        }
+    }.
+
+%% The extension makes this a MUST: a client that never declared it
+%% would be told to poll a method it does not know it can call.
+task_methods_need_extension() ->
+    lists:foreach(
+        fun(Method) ->
+            Resp = barrel_mcp_protocol:handle(modern_task_request(Method, #{})),
+            Error = maps:get(<<"error">>, Resp),
+            ?assertEqual(-32021, maps:get(<<"code">>, Error)),
+            ?assertEqual(
+                [<<"io.modelcontextprotocol/tasks">>],
+                maps:get(<<"requiredCapabilities">>, maps:get(<<"data">>, Error))
+            )
+        end,
+        [<<"tasks/get">>, <<"tasks/update">>, <<"tasks/cancel">>]
+    ).
+
+%% Legacy clients negotiated tasks in the handshake, so the extension
+%% capability is not theirs to declare.
+legacy_task_methods_ungated() ->
+    Resp = barrel_mcp_protocol:handle(#{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 8,
+        <<"method">> => <<"tasks/get">>,
+        <<"params">> => #{<<"taskId">> => <<"absent">>}
+    }),
+    %% Not found rather than refused for want of a capability.
+    ?assertEqual(-32602, maps:get(<<"code">>, maps:get(<<"error">>, Resp))).
+
+%% `failed' is for protocol errors. A tool reporting a domain failure
+%% has completed, and its result carries isError.
+tool_error_completes_task() ->
+    Owner = <<"err-sess">>,
+    {ok, TaskId} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+    ok = barrel_mcp_tasks:finish(Owner, TaskId, #{
+        <<"content">> => [#{<<"type">> => <<"text">>, <<"text">> => <<"nope">>}],
+        <<"isError">> => true
+    }),
+    {ok, Task} = barrel_mcp_tasks:get(Owner, TaskId),
+    ?assertEqual(<<"completed">>, maps:get(<<"status">>, Task)),
+    ?assertEqual(true, maps:get(<<"isError">>, maps:get(<<"result">>, Task))).

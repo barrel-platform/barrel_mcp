@@ -676,7 +676,13 @@ rpc(Port, Id, Method, Params, Capabilities) ->
     post(Port, Body, [
         {<<"mcp-protocol-version">>, ?MODERN},
         {<<"mcp-method">>, Method}
+        %% The tasks extension mirrors the task id into Mcp-Name, and
+        %% the server rejects a task request that omits it.
+        | task_name_header(Params)
     ]).
+
+task_name_header(#{<<"taskId">> := TaskId}) -> [{<<"mcp-name">>, TaskId}];
+task_name_header(_Params) -> [].
 
 %% `prompts/get' and `resources/read' mirror their subject into
 %% `Mcp-Name', so the server rejects a request that omits it.

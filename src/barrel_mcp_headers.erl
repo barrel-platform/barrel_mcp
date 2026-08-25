@@ -178,6 +178,11 @@ name_header(Method, Params) ->
 name_field(<<"tools/call">>) -> <<"name">>;
 name_field(<<"prompts/get">>) -> <<"name">>;
 name_field(<<"resources/read">>) -> <<"uri">>;
+%% The tasks extension mirrors the task id, so an intermediary can route
+%% a follow-up to the instance holding that task's state.
+name_field(<<"tasks/get">>) -> <<"taskId">>;
+name_field(<<"tasks/update">>) -> <<"taskId">>;
+name_field(<<"tasks/cancel">>) -> <<"taskId">>;
 name_field(_) -> undefined.
 
 %% @doc Mirror the arguments a tool's schema opted into.

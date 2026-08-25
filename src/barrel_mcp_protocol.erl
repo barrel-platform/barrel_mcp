@@ -670,6 +670,23 @@ mrtr_unavailable(RequestId, Why) ->
 %% Tasks
 %%====================================================================
 
+%% The extension makes -32021 a MUST for a client that calls a task
+%% method without declaring the extension: it would otherwise be told to
+%% poll something it does not know it can call. Read from this request's
+%% own `_meta', never a capability remembered from an earlier one.
+with_tasks_extension(Id, Ctx, Fun) ->
+    case barrel_mcp_ctx:is_modern(Ctx) andalso not tasks_enabled(Ctx) of
+        true ->
+            error_with_data(
+                Id,
+                ?MCP_MISSING_CLIENT_CAPABILITY,
+                <<"Client did not declare a required capability">>,
+                #{<<"requiredCapabilities">> => [?MCP_EXT_TASKS]}
+            );
+        false ->
+            Fun()
+    end.
+
 %% @doc Who a task belongs to, which differs by era.
 %%
 %% A legacy task is scoped to its session. A modern request has no
@@ -755,7 +772,14 @@ task_collector_loop(Owner, TaskId) ->
                 <<"structuredContent">> => Data
             });
         {tool_error, _ReqId, Content} ->
-            barrel_mcp_tasks:fail(Owner, TaskId, {tool_error, Content});
+            %% A tool that reports a domain failure has still completed.
+            %% `failed' is for protocol errors, and the extension
+            %% requires the CallToolResult with isError to be the task's
+            %% result rather than an error object.
+            barrel_mcp_tasks:finish(Owner, TaskId, #{
+                <<"content">> => format_tool_result_external(Content),
+                <<"isError">> => true
+            });
         {tool_failed, _ReqId, Reason} ->
             barrel_mcp_tasks:fail(Owner, TaskId, Reason);
         {tool_validation_failed, _ReqId, Errors} ->
@@ -1229,45 +1253,55 @@ handle_request(<<"tasks/list">>, Params, Id, Ctx) ->
     ),
     success_response(Id, with_next_cursor(#{<<"tasks">> => Page}, Next));
 handle_request(<<"tasks/get">>, Params, Id, Ctx) ->
-    TaskId = maps:get(<<"taskId">>, Params, <<>>),
-    case barrel_mcp_tasks:get(task_owner(Ctx), TaskId, barrel_mcp_ctx:era(Ctx)) of
-        {ok, Task} -> success_response(Id, Task);
-        {error, not_found} -> error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
-    end;
+    with_tasks_extension(Id, Ctx, fun() ->
+        TaskId = maps:get(<<"taskId">>, Params, <<>>),
+        case barrel_mcp_tasks:get(task_owner(Ctx), TaskId, barrel_mcp_ctx:era(Ctx)) of
+            {ok, Task} ->
+                success_response(Id, Task);
+            {error, not_found} ->
+                error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
+        end
+    end);
 %% Supply answers the task was waiting on. The extension has the server
 %% ignore anything it does not need rather than reject it, so this only
 %% fails when the task itself is unknown.
 handle_request(<<"tasks/update">>, Params, Id, Ctx) ->
     TaskId = maps:get(<<"taskId">>, Params, <<>>),
-    Responses =
-        case maps:get(<<"inputResponses">>, Params, #{}) of
-            R when is_map(R) -> R;
-            _ -> #{}
-        end,
-    case barrel_mcp_tasks:update(task_owner(Ctx), TaskId, Responses) of
-        ok -> success_response(Id, #{});
-        {error, not_found} -> error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
-    end;
+    with_tasks_extension(Id, Ctx, fun() ->
+        Responses =
+            case maps:get(<<"inputResponses">>, Params, #{}) of
+                R when is_map(R) -> R;
+                _ -> #{}
+            end,
+        case barrel_mcp_tasks:update(task_owner(Ctx), TaskId, Responses) of
+            ok ->
+                success_response(Id, #{<<"resultType">> => <<"complete">>});
+            {error, not_found} ->
+                error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
+        end
+    end);
 handle_request(<<"tasks/cancel">>, Params, Id, Ctx) ->
-    Owner = task_owner(Ctx),
-    TaskId = maps:get(<<"taskId">>, Params, <<>>),
-    case barrel_mcp_tasks:cancel(Owner, TaskId) of
-        ok ->
-            %% The eras disagree. 2025-11-25 returns the cancelled task;
-            %% the extension returns an acknowledgement, which still
-            %% carries resultType like every modern result.
-            case barrel_mcp_ctx:is_modern(Ctx) of
-                true ->
-                    success_response(Id, #{<<"resultType">> => <<"complete">>});
-                false ->
-                    case barrel_mcp_tasks:get(Owner, TaskId) of
-                        {ok, Task} -> success_response(Id, Task);
-                        {error, not_found} -> success_response(Id, #{})
-                    end
-            end;
-        {error, not_found} ->
-            error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
-    end;
+    with_tasks_extension(Id, Ctx, fun() ->
+        Owner = task_owner(Ctx),
+        TaskId = maps:get(<<"taskId">>, Params, <<>>),
+        case barrel_mcp_tasks:cancel(Owner, TaskId) of
+            ok ->
+                %% The eras disagree. 2025-11-25 returns the cancelled task;
+                %% the extension returns an acknowledgement, which still
+                %% carries resultType like every modern result.
+                case barrel_mcp_ctx:is_modern(Ctx) of
+                    true ->
+                        success_response(Id, #{<<"resultType">> => <<"complete">>});
+                    false ->
+                        case barrel_mcp_tasks:get(Owner, TaskId) of
+                            {ok, Task} -> success_response(Id, Task);
+                            {error, not_found} -> success_response(Id, #{})
+                        end
+                end;
+            {error, not_found} ->
+                error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
+        end
+    end);
 handle_request(<<"tasks/result">>, Params, Id, Ctx) ->
     SessionId = barrel_mcp_ctx:session_id(Ctx),
     TaskId = maps:get(<<"taskId">>, Params, <<>>),

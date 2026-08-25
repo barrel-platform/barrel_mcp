@@ -40,10 +40,12 @@
     mrtr_shares_one_deadline/1,
     removed_methods_are_refused/1,
     tasks_extension_methods/1,
+    tasks_methods_refused_without_extension/1,
     ping_cadence_is_off/1,
     subscribe_receives_resource_updates/1,
     unsubscribe_stops_updates/1,
     mirrors_tool_parameters/1,
+    mirrors_task_id_header/1,
     excludes_tools_with_bad_annotations/1
 ]).
 
@@ -75,10 +77,12 @@ all() ->
         mrtr_shares_one_deadline,
         removed_methods_are_refused,
         tasks_extension_methods,
+        tasks_methods_refused_without_extension,
         ping_cadence_is_off,
         subscribe_receives_resource_updates,
         unsubscribe_stops_updates,
         mirrors_tool_parameters,
+        mirrors_task_id_header,
         excludes_tools_with_bad_annotations
     ].
 
@@ -612,8 +616,16 @@ removed_methods_are_refused(Config) ->
 
 %% The extension is advertised under `extensions', not as a
 %% capability, so the client has to look in the right place.
+%%
+%% Declaring it is also what makes the methods reachable: without it the
+%% extension requires -32021, since the client would otherwise be told
+%% to poll something it does not know it can call.
 tasks_extension_methods(Config) ->
-    Client = connect(Config, ?MODERN),
+    Client = connect_with(Config, #{mode => sync}, #{
+        capabilities => #{
+            <<"extensions">> => #{<<"io.modelcontextprotocol/tasks">> => #{}}
+        }
+    }),
     ?assertMatch(
         {error, {_, <<"Task not found">>}},
         barrel_mcp_client:tasks_get(Client, <<"task_missing">>)
@@ -621,6 +633,21 @@ tasks_extension_methods(Config) ->
     ?assertMatch(
         {error, {_, <<"Task not found">>}},
         barrel_mcp_client:tasks_update(Client, <<"task_missing">>, #{})
+    ),
+    close(Client).
+
+%% The same calls from a client that never declared the extension.
+tasks_methods_refused_without_extension(Config) ->
+    Client = connect(Config, ?MODERN),
+    lists:foreach(
+        fun(Call) ->
+            ?assertMatch({error, {?MCP_MISSING_CLIENT_CAPABILITY, _}}, Call())
+        end,
+        [
+            fun() -> barrel_mcp_client:tasks_get(Client, <<"x">>) end,
+            fun() -> barrel_mcp_client:tasks_update(Client, <<"x">>, #{}) end,
+            fun() -> barrel_mcp_client:tasks_cancel(Client, <<"x">>) end
+        ]
     ),
     close(Client).
 
@@ -816,3 +843,21 @@ case_index(TC) ->
 case_index(TC, [TC | _], N) -> N;
 case_index(TC, [_ | Rest], N) -> case_index(TC, Rest, N + 1);
 case_index(_TC, [], N) -> N.
+
+%% The extension has the client set Mcp-Name to the task id so an
+%% intermediary can route a follow-up to the instance holding that
+%% task's state. Our own server rejects a header that disagrees with
+%% the body, so a call that succeeds is the assertion.
+mirrors_task_id_header(Config) ->
+    Client = connect_with(Config, #{mode => sync}, #{
+        capabilities => #{
+            <<"extensions">> => #{<<"io.modelcontextprotocol/tasks">> => #{}}
+        }
+    }),
+    %% An unknown id still exercises the header: the server validates it
+    %% before it decides the task does not exist.
+    ?assertMatch(
+        {error, {_Code, _Msg}},
+        barrel_mcp_client:tasks_get(Client, <<"no-such-task">>)
+    ),
+    close(Client).
