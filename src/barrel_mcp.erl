@@ -119,6 +119,8 @@
     notify_log/4,
     notify_list_changed/1,
     input/2,
+    log/3,
+    log/4,
     request_state/1,
     client_supports/2
 ]).
@@ -960,6 +962,34 @@ decode_input(<<"roots/list">>, Response) ->
     {ok, maps:get(<<"roots">>, Response, [])};
 decode_input(_Method, Response) ->
     {ok, Response}.
+
+%% @doc Emit `notifications/message' for the request this tool is
+%% serving. `Logger' is an optional component name; pass `undefined' to
+%% omit it. `Data' is the structured payload, typically a string or a
+%% map.
+%%
+%% Where it goes, and whether it goes at all, depends on the era:
+%%
+%% <ul>
+%%   <li>modern — on this request's own response stream, and only when
+%%       the request named `io.modelcontextprotocol/logLevel' in its
+%%       `_meta'. A request that did not opt in gets nothing, and
+%%       anything below the level it asked for is dropped.</li>
+%%   <li>legacy — on the session's SSE channel, filtered by whatever
+%%       `logging/setLevel' last set.</li>
+%% </ul>
+%%
+%% Silently does nothing when there is nowhere to deliver, so a handler
+%% never has to ask first.
+-spec log(map(), atom() | binary(), term()) -> ok.
+log(Ctx, Level, Data) ->
+    log(Ctx, Level, undefined, Data).
+
+-spec log(map(), atom() | binary(), binary() | undefined, term()) -> ok.
+log(Ctx, Level, Logger, Data) when is_map(Ctx) ->
+    Emit = maps:get(emit_log, Ctx, fun(_, _, _) -> ok end),
+    _ = Emit(Level, Logger, Data),
+    ok.
 
 %% @doc The term this tool passed as the state of its previous attempt,
 %% verified and deserialised.

@@ -305,9 +305,7 @@ handle_line(Line, Version) when is_binary(Line) ->
                     ),
                     Version
             end
-    end;
-handle_line(Line, Version) when is_list(Line) ->
-    handle_line(list_to_binary(Line), Version).
+    end.
 
 %% `Version' is what a previous `initialize' on this connection settled
 %% on. stdio has no session to record it against and no header to carry

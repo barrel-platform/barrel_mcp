@@ -44,6 +44,9 @@
     update/3
 ]).
 
+%% Exported only so the sweep can name it as `fun ?MODULE:expire/1'.
+-export([expire/1]).
+
 -export([
     init/1,
     handle_call/3,
@@ -361,14 +364,23 @@ check_round(#mrtr{rounds = Rounds, issued = Issued}, Requests, HandlerState) ->
     Keys = maps:keys(Requests),
     Reused = [K || K <- Keys, maps:is_key(K, Issued)],
     StateBytes = byte_size(term_to_binary(HandlerState)),
-    if
-        Keys =:= [] -> {error, empty_input_round};
-        Reused =/= [] -> {error, {reused_input_key, hd(Reused)}};
-        Rounds + 1 > MaxRounds -> {error, too_many_input_rounds};
-        map_size(Issued) + length(Keys) > MaxKeys -> {error, too_many_input_keys};
-        StateBytes > MaxState -> {error, task_state_too_large};
-        true -> ok
-    end.
+    first_error([
+        {Keys =:= [], empty_input_round},
+        {Reused =/= [], {reused_input_key, first_of(Reused)}},
+        {Rounds + 1 > MaxRounds, too_many_input_rounds},
+        {map_size(Issued) + length(Keys) > MaxKeys, too_many_input_keys},
+        {StateBytes > MaxState, task_state_too_large}
+    ]).
+
+%% The first limit a round trips, in the order the checks are listed:
+%% a handler that broke two of them should hear about the same one on
+%% every run.
+first_error([]) -> ok;
+first_error([{true, Reason} | _]) -> {error, Reason};
+first_error([{false, _} | Rest]) -> first_error(Rest).
+
+first_of([K | _]) -> K;
+first_of([]) -> undefined.
 
 request_method(R) when is_map(R) ->
     case maps:get(method, R, undefined) of
@@ -608,7 +620,7 @@ handle_info(sweep, State) ->
     %% past its ttl would otherwise hold its worker and continuation
     %% for the life of the node, since a task that legitimately runs for
     %% hours looks exactly the same.
-    lists:foreach(fun(T) -> expire(T) end, Expired),
+    lists:foreach(fun ?MODULE:expire/1, Expired),
     lists:foreach(
         fun({TaskId, #task{owner = Owner}}) ->
             _ = transition(Owner, TaskId, failed, undefined, worker_died)

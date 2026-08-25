@@ -787,16 +787,25 @@ handle_response(Id, Result, _State, Data) ->
         {#pending{caller = From} = P, Rest} when From =/= init ->
             Data0 = settle_data(P, Data#data{pending = Rest}),
             {Result1, Data1} = observe_result(P, Result, Data0),
-            case input_required(Result1, Data1) of
-                false ->
-                    gen_statem:reply(From, {ok, Result1}),
+            case check_result_type(P, Result1, Data1) of
+                {error, Why} ->
+                    gen_statem:reply(From, {error, {invalid_result, Why}}),
                     {keep_state, Data1, [drop_req_timeout(Id)]};
-                true ->
-                    {Data2, Actions} = begin_input_round(P, Result1, Data1),
-                    {keep_state, Data2, [drop_req_timeout(Id) | Actions]}
+                ok ->
+                    settle_or_retry(Id, From, P, Result1, Data1)
             end;
         _ ->
             keep_state_and_data
+    end.
+
+settle_or_retry(Id, From, P, Result, Data) ->
+    case input_required(Result, Data) of
+        false ->
+            gen_statem:reply(From, {ok, Result}),
+            {keep_state, Data, [drop_req_timeout(Id)]};
+        true ->
+            {Data1, Actions} = begin_input_round(P, Result, Data),
+            {keep_state, Data1, [drop_req_timeout(Id) | Actions]}
     end.
 
 %% A version error is the one error that identifies a modern server: it
@@ -1040,6 +1049,48 @@ refresh_subscription(Data) ->
 %%====================================================================
 %% Multi round-trip requests
 %%====================================================================
+
+%% A modern result names its type, and an unrecognised name is not
+%% something to pass to the caller as a success: the whole point of the
+%% discriminator is that a client which does not understand a result
+%% must not act on it.
+%%
+%% Validity is capability- and method-aware. `task' is only meaningful
+%% when the tasks extension was negotiated, and only for a method that
+%% can be task-augmented.
+check_result_type(_P, _Result, #data{era = Era}) when Era =/= modern ->
+    %% A legacy result carries no discriminator, and its absence means
+    %% complete rather than invalid.
+    ok;
+check_result_type(#pending{method = Method}, Result, Data) when is_map(Result) ->
+    case maps:get(<<"resultType">>, Result, undefined) of
+        undefined -> {error, missing_result_type};
+        <<"complete">> -> ok;
+        <<"input_required">> -> ok;
+        <<"task">> -> task_result_allowed(Method, Data);
+        Other -> {error, {unknown_result_type, Other}}
+    end;
+check_result_type(_P, _Result, _Data) ->
+    ok.
+
+%% "A server MUST NOT return CreateTaskResult to a client that did not
+%% include the extension capability on its request, regardless of prior
+%% declarations" (ext-tasks tasks.md:59). So this reads what we put in
+%% that request's `_meta', not what the server advertised at discovery.
+task_result_allowed(Method, #data{spec = Spec}) ->
+    Declared = capabilities_to_wire(maps:get(capabilities, Spec, #{})),
+    Extensions = maps:get(<<"extensions">>, Declared, #{}),
+    case is_map(Extensions) andalso maps:is_key(?MCP_EXT_TASKS, Extensions) of
+        false -> {error, task_without_extension};
+        true -> task_augmentable(Method)
+    end.
+
+%% `tools/call' is the only task-augmentable method the extension
+%% defines, and "a client that receives CreateTaskResult in response to
+%% an unsupported request type MUST interpret this as an invalid
+%% response" (tasks.md:59).
+task_augmentable(<<"tools/call">>) -> ok;
+task_augmentable(Method) -> {error, {task_not_allowed_for, Method}}.
 
 %% Only a modern server answers this way. A legacy one issues real
 %% requests instead, which `handle_server_request/5' serves.

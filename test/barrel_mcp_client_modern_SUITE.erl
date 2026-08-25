@@ -46,11 +46,16 @@
     unsubscribe_stops_updates/1,
     mirrors_tool_parameters/1,
     mirrors_task_id_header/1,
-    excludes_tools_with_bad_annotations/1
+    excludes_tools_with_bad_annotations/1,
+    unknown_result_type_is_refused/1,
+    missing_result_type_is_refused/1,
+    task_result_needs_the_extension/1,
+    task_result_only_on_tools_call/1,
+    legacy_result_needs_no_type/1
 ]).
 
 -export([echo_tool/1, a_resource/1, a_prompt/1, legacy_only_server/1]).
--export([version_error_server/1]).
+-export([version_error_server/1, result_type_server/1]).
 -export([confirm_tool/2, insatiable_tool/2, region_tool/1]).
 
 -define(BASE_PORT, 22000).
@@ -83,7 +88,12 @@ all() ->
         unsubscribe_stops_updates,
         mirrors_tool_parameters,
         mirrors_task_id_header,
-        excludes_tools_with_bad_annotations
+        excludes_tools_with_bad_annotations,
+        unknown_result_type_is_refused,
+        missing_result_type_is_refused,
+        task_result_needs_the_extension,
+        task_result_only_on_tools_call,
+        legacy_result_needs_no_type
     ].
 
 init_per_suite(Config) ->
@@ -765,6 +775,134 @@ excludes_tools_with_bad_annotations(Config) ->
         close(Client)
     after
         barrel_mcp_registry:unreg(tool, <<"unusable">>)
+    end.
+
+%%====================================================================
+%% Result discriminator
+%%====================================================================
+
+%% `resultType' tells the client how to parse the result, so a value it
+%% does not understand cannot be handed to the caller as a success: it
+%% would act on a shape it never checked.
+unknown_result_type_is_refused(Config) ->
+    with_result_body(Config, #{<<"resultType">> => <<"weird">>}, #{}, fun(Client) ->
+        ?assertEqual(
+            {error, {invalid_result, {unknown_result_type, <<"weird">>}}},
+            barrel_mcp_client:call_tool(Client, <<"echo">>, #{})
+        )
+    end).
+
+%% "Servers implementing this protocol version MUST include this field"
+%% (schema/2026-07-28/schema.ts:227). A modern connection has already
+%% established the server implements it, so absence is a broken server
+%% rather than an older one.
+missing_result_type_is_refused(Config) ->
+    with_result_body(Config, #{<<"content">> => []}, #{}, fun(Client) ->
+        ?assertEqual(
+            {error, {invalid_result, missing_result_type}},
+            barrel_mcp_client:call_tool(Client, <<"echo">>, #{})
+        )
+    end).
+
+%% "A server MUST NOT return CreateTaskResult to a client that did not
+%% include the extension capability on its request, regardless of prior
+%% declarations" (ext-tasks tasks.md:59).
+task_result_needs_the_extension(Config) ->
+    Body = #{<<"resultType">> => <<"task">>, <<"taskId">> => <<"t1">>},
+    with_result_body(Config, Body, #{}, fun(Client) ->
+        ?assertEqual(
+            {error, {invalid_result, task_without_extension}},
+            barrel_mcp_client:call_tool(Client, <<"echo">>, #{})
+        )
+    end).
+
+%% `tools/call' is the only task-augmentable method the extension
+%% defines, and a task handle for anything else "MUST" be read as an
+%% invalid response (tasks.md:59).
+task_result_only_on_tools_call(Config) ->
+    Body = #{<<"resultType">> => <<"task">>, <<"taskId">> => <<"t1">>},
+    Caps = #{
+        capabilities => #{
+            <<"extensions">> => #{<<"io.modelcontextprotocol/tasks">> => #{}}
+        }
+    },
+    with_result_body(Config, Body, Caps, fun(Client) ->
+        %% The same handle is accepted for tools/call and refused for
+        %% resources/read, so the method is what decides it.
+        ?assertMatch({ok, _}, barrel_mcp_client:call_tool(Client, <<"echo">>, #{})),
+        ?assertEqual(
+            {error, {invalid_result, {task_not_allowed_for, <<"resources/read">>}}},
+            barrel_mcp_client:read_resource(Client, <<"file:///present">>)
+        )
+    end).
+
+%% A legacy result has no discriminator to check, so its absence is
+%% completion rather than a defect.
+legacy_result_needs_no_type(Config) ->
+    Client = connect(Config, <<"2025-11-25">>),
+    {ok, Result} = barrel_mcp_client:call_tool(Client, <<"echo">>, #{
+        <<"input">> => <<"plain">>
+    }),
+    ?assertEqual(error, maps:find(<<"resultType">>, Result)),
+    close(Client).
+
+%% A modern server that answers every call with one configured result
+%% body, so a case can put anything on the wire the client has to
+%% survive.
+result_type_server(#{body := Body}) ->
+    Request = json:decode(Body),
+    Id = maps:get(<<"id">>, Request, null),
+    Response =
+        case maps:get(<<"method">>, Request, undefined) of
+            <<"server/discover">> ->
+                #{
+                    <<"jsonrpc">> => <<"2.0">>,
+                    <<"id">> => Id,
+                    <<"result">> => #{
+                        <<"resultType">> => <<"complete">>,
+                        <<"supportedVersions">> => [?MODERN],
+                        <<"capabilities">> => #{
+                            <<"tools">> => #{},
+                            <<"resources">> => #{}
+                        },
+                        <<"_meta">> => #{
+                            ?MCP_META_SERVER_INFO => #{
+                                <<"name">> => <<"result-type-mock">>,
+                                <<"version">> => <<"1.0">>
+                            }
+                        }
+                    }
+                };
+            _ ->
+                #{
+                    <<"jsonrpc">> => <<"2.0">>,
+                    <<"id">> => Id,
+                    <<"result">> => persistent_term:get({?MODULE, result_body})
+                }
+        end,
+    {200, #{<<"content-type">> => <<"application/json">>}, iolist_to_binary(json:encode(Response))}.
+
+with_result_body(Config, ResultBody, Extra, Fun) ->
+    Port = ?config(port, Config) + 500,
+    persistent_term:put({?MODULE, result_body}, ResultBody),
+    {ok, _} = barrel_mcp_test_http:start(
+        result_type_mock, Port, fun ?MODULE:result_type_server/1
+    ),
+    try
+        Spec = maps:merge(
+            #{transport => {http, url(Port)}, protocol_version => ?MODERN},
+            Extra
+        ),
+        {ok, Client} = barrel_mcp_client:start(Spec),
+        wait_until(fun() -> is_ready(Client) end, 8000),
+        try
+            Fun(Client)
+        after
+            catch_close(Client)
+        end
+    after
+        barrel_mcp_test_http:stop(result_type_mock),
+        persistent_term:erase({?MODULE, result_body})
     end.
 
 %%====================================================================

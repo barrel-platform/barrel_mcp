@@ -51,6 +51,17 @@
 %% defines, and far below what would trouble the stack.
 -define(DEFAULT_MAX_JSON_DEPTH, 64).
 
+%% What the transport gets back from `handle/1,2'. See its doc for what
+%% each shape obliges the transport to do.
+-type result() ::
+    map()
+    | [map()]
+    | no_response
+    | {async, map()}
+    | {subscribe, map()}.
+
+-export_type([result/0]).
+
 %%====================================================================
 %% API
 %%====================================================================
@@ -66,7 +77,7 @@ decode(Binary) ->
         {Term, _Acc, <<>>} -> {ok, Term};
         {_Term, _Acc, _Trailing} -> {error, parse_error}
     catch
-        throw:too_deep -> {error, too_deep};
+        error:too_deep -> {error, too_deep};
         _:_ -> {error, parse_error}
     end.
 
@@ -78,7 +89,7 @@ depth_counting_decoders(Depth, Max) ->
     Enter = fun() ->
         counters:add(Depth, 1, 1),
         case counters:get(Depth, 1) > Max of
-            true -> throw(too_deep);
+            true -> error(too_deep);
             false -> ok
         end
     end,
@@ -109,14 +120,13 @@ depth_counting_decoders(Depth, Max) ->
         end
     }.
 
-%% @doc Encode a JSON-RPC response.
--spec encode(map()) -> binary().
+%% @doc Encode a JSON-RPC response, or a batch of them.
+-spec encode(map() | [map()]) -> binary().
 encode(Response) ->
     iolist_to_binary(json:encode(Response)).
 
 %% @doc Handle a JSON-RPC request with default state.
--spec handle(map() | list()) ->
-    map() | no_response | {async, map()} | {subscribe, map()}.
+-spec handle(map() | list()) -> result().
 handle(Request) ->
     handle(Request, #{}).
 
@@ -125,19 +135,23 @@ handle(Request) ->
 %% Returns one of:
 %% <ul>
 %%   <li>`map()' — a JSON-RPC response envelope ready to encode.</li>
-%%   <li>`no_response' — for inbound notifications.</li>
+%%   <li>`[map()]' — one envelope per request element of a batch, on
+%%       the revisions that accept batches.</li>
+%%   <li>`no_response' — for inbound notifications, and for a batch of
+%%       nothing but notifications and responses.</li>
 %%   <li>`{async, AsyncPlan}' — for `tools/call'. The transport
 %%       spawns the worker via `(maps:get(spawn, AsyncPlan))(Ctx)'
 %%       and waits on its mailbox for a `tool_result' / `tool_error' /
 %%       `tool_failed' / `tool_validation_failed' / `cancelled'
 %%       message.</li>
+%%   <li>`{subscribe, Sub}' — for `subscriptions/listen', which needs a
+%%       stream the transport holds open.</li>
 %% </ul>
 %%
-%% MCP forbids JSON-RPC batches (a top-level JSON array) — they are
-%% rejected here with `Invalid Request' so non-HTTP callers see the
-%% same error as the HTTP transport.
--spec handle(map() | list(), map()) ->
-    map() | no_response | {async, map()} | {subscribe, map()}.
+%% A top-level JSON array is a batch. Whether one is accepted depends on
+%% the negotiated revision: required at 2025-03-26, accepted at
+%% 2024-11-05, and refused with `Invalid Request' from 2025-06-18 on.
+-spec handle(map() | list(), map()) -> result().
 handle(L, State) when is_list(L) ->
     Revision = maps:get(protocol_version, State, undefined),
     case barrel_mcp_version:feature(batch_receive, Revision) of
@@ -408,6 +422,12 @@ dispatch_checked(Method, Params, Id, Ctx) ->
                 Id,
                 ?JSONRPC_INVALID_PARAMS,
                 <<"Missing required _meta field: ", Key/binary>>
+            );
+        {error, {invalid_meta, Key}} ->
+            error_response(
+                Id,
+                ?JSONRPC_INVALID_PARAMS,
+                <<"Invalid _meta field: ", Key/binary>>
             );
         ok ->
             case serves(Method, barrel_mcp_ctx:era(Ctx)) of
@@ -823,6 +843,7 @@ resume_task(Owner, TaskId, Info, Ctx) ->
             progress_token => undefined,
             meta => #{},
             emit_progress => fun(_, _, _) -> ok end,
+            emit_log => fun(_, _, _) -> ok end,
             reply_to => Collector,
             auth_info => barrel_mcp_ctx:auth_info(Ctx),
             mcp_ctx => Ctx,
@@ -1477,18 +1498,7 @@ handle_request(<<"tasks/cancel">>, Params, Id, Ctx) ->
         TaskId = maps:get(<<"taskId">>, Params, <<>>),
         case barrel_mcp_tasks:cancel(Owner, TaskId) of
             ok ->
-                %% The eras disagree. 2025-11-25 returns the cancelled task;
-                %% the extension returns an acknowledgement, which still
-                %% carries resultType like every modern result.
-                case barrel_mcp_ctx:is_modern(Ctx) of
-                    true ->
-                        success_response(Id, #{<<"resultType">> => <<"complete">>});
-                    false ->
-                        case barrel_mcp_tasks:get(Owner, TaskId) of
-                            {ok, Task} -> success_response(Id, Task);
-                            {error, not_found} -> success_response(Id, #{})
-                        end
-                end;
+                cancel_task_response(Owner, TaskId, Id, Ctx);
             {error, not_found} ->
                 error_response(Id, ?JSONRPC_INVALID_PARAMS, <<"Task not found">>)
         end
@@ -1580,6 +1590,21 @@ handle_request(Method, _Params, Id, _State) ->
         ?JSONRPC_METHOD_NOT_FOUND,
         <<"Method not found: ", Method/binary>>
     ).
+
+%% The eras disagree on what a successful `tasks/cancel' returns.
+%% 2025-11-25 returns the cancelled task; the extension returns an
+%% acknowledgement, which still carries `resultType' like every modern
+%% result.
+cancel_task_response(Owner, TaskId, Id, Ctx) ->
+    case barrel_mcp_ctx:is_modern(Ctx) of
+        true ->
+            success_response(Id, #{<<"resultType">> => <<"complete">>});
+        false ->
+            case barrel_mcp_tasks:get(Owner, TaskId) of
+                {ok, Task} -> success_response(Id, Task);
+                {error, not_found} -> success_response(Id, #{})
+            end
+    end.
 
 %%====================================================================
 %% Notification Handlers
@@ -1726,6 +1751,7 @@ drive_as_task(Plan, _ToolName, Ctx, AuthInfo, TaskId) ->
             progress_token => undefined,
             meta => maps:get(meta, Plan, #{}),
             emit_progress => fun(_, _, _) -> ok end,
+            emit_log => fun(_, _, _) -> ok end,
             reply_to => Collector,
             auth_info => AuthInfo
         })
@@ -1749,6 +1775,7 @@ run_async_plan(Plan, Timeout, AuthInfo) ->
         progress_token => undefined,
         meta => Meta,
         emit_progress => fun(_, _, _) -> ok end,
+        emit_log => fun(_, _, _) -> ok end,
         reply_to => Self,
         auth_info => AuthInfo
     },

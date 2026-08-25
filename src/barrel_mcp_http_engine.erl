@@ -157,9 +157,15 @@ dispatch(simple, _Method, Headers, _Body, Responder, Config) ->
 dispatch(stream, <<"POST">>, Headers, Body, Responder, Config) ->
     stream_post(Headers, Body, Responder, Config);
 dispatch(stream, <<"GET">>, Headers, _Body, Responder, Config) ->
-    stream_get_sse(Headers, Responder, Config);
+    case sessions_enabled(Config) of
+        true -> stream_get_sse(Headers, Responder, Config);
+        false -> modern_only_method(Headers, Responder, Config)
+    end;
 dispatch(stream, <<"DELETE">>, Headers, _Body, Responder, Config) ->
-    stream_delete(Headers, Responder, Config);
+    case sessions_enabled(Config) of
+        true -> stream_delete(Headers, Responder, Config);
+        false -> modern_only_method(Headers, Responder, Config)
+    end;
 dispatch(stream, <<"OPTIONS">>, Headers, _Body, Responder, Config) ->
     reply(Responder, 204, cors_headers(Headers, Config, #{}), <<>>);
 dispatch(stream, _Method, Headers, _Body, Responder, Config) ->
@@ -176,6 +182,31 @@ dispatch(stream, _Method, Headers, _Body, Responder, Config) ->
         ),
         <<"{\"error\":\"Method not allowed\"}">>
     ).
+
+%% Sessions off means only 2026-07-28 is served, and that revision has
+%% neither a standalone GET stream nor a DELETE to end a session. An
+%% older client that tries either "SHOULD" get 405
+%% (2026-07-28/basic/transports/streamable-http.mdx:683).
+modern_only_method(Headers, Responder, Config) ->
+    reply(
+        Responder,
+        405,
+        cors_headers(
+            Headers,
+            Config,
+            #{
+                <<"content-type">> => <<"application/json">>,
+                <<"allow">> => <<"POST, OPTIONS">>
+            }
+        ),
+        <<"{\"error\":\"Method not allowed\"}">>
+    ).
+
+sessions_enabled(Config) ->
+    case maps:get(session_enabled, Config, true) of
+        false -> false;
+        _ -> true
+    end.
 
 %%====================================================================
 %% Simple transport
@@ -794,14 +825,21 @@ handle_async_tool_call(
                 AuthInfo
             );
         false ->
-            %% A modern request that opted into progress gets its
-            %% notifications on its own response stream, so the reply
-            %% has to be an SSE stream opened before the tool runs.
-            Streaming = streams_progress(Reply, ProgressToken),
+            %% A modern request that opted into progress or into logging
+            %% gets those notifications on its own response stream, so
+            %% the reply has to be an SSE stream opened before the tool
+            %% runs.
+            LogLevel = request_log_level(Reply),
+            Streaming = streams_notifications(Reply, ProgressToken, LogLevel),
             EmitProgress =
                 case Streaming of
                     true -> self_progress_fun(Self, RequestId, ProgressToken);
                     false -> emit_progress_fun(SessionId, ProgressToken)
+                end,
+            EmitLog =
+                case Streaming of
+                    true -> self_log_fun(Self, RequestId, LogLevel);
+                    false -> emit_log_fun(Reply, SessionId)
                 end,
             Ctx = #{
                 session_id => SessionId,
@@ -809,6 +847,7 @@ handle_async_tool_call(
                 progress_token => ProgressToken,
                 meta => Meta,
                 emit_progress => EmitProgress,
+                emit_log => EmitLog,
                 reply_to => Self,
                 auth_info => AuthInfo
             },
@@ -844,18 +883,28 @@ handle_async_tool_call(
             end
     end.
 
-%% Legacy requests keep delivering progress out of band on the
-%% session's SSE channel, so only a modern request with a progress
-%% token needs its response turned into a stream.
-streams_progress(_Reply, undefined) ->
+%% Legacy requests keep delivering progress and logs out of band on the
+%% session's SSE channel, so only a modern request that opted into one
+%% of them needs its response turned into a stream.
+streams_notifications(_Reply, undefined, undefined) ->
     false;
-streams_progress(#{ctx := Ctx}, _Token) when Ctx =/= undefined ->
+streams_notifications(#{ctx := Ctx}, _Token, _Level) when Ctx =/= undefined ->
     barrel_mcp_ctx:is_modern(Ctx);
-streams_progress(_Reply, _Token) ->
+streams_notifications(_Reply, _Token, _Level) ->
     false.
 
+%% `undefined' unless this request named a level in its `_meta', which
+%% is what makes modern logging opt-in.
+request_log_level(#{ctx := Ctx}) when Ctx =/= undefined ->
+    case barrel_mcp_ctx:is_modern(Ctx) of
+        true -> barrel_mcp_ctx:log_level(Ctx);
+        false -> undefined
+    end;
+request_log_level(_Reply) ->
+    undefined.
+
 start_progress_stream(false, _Headers, _Responder, _Config, _Reply) ->
-    fun(_Params) -> ok end;
+    fun(_Envelope) -> ok end;
 start_progress_stream(true, Headers, Responder, Config, Reply) ->
     Hdrs = reply_headers(
         Headers,
@@ -870,8 +919,8 @@ start_progress_stream(true, Headers, Responder, Config, Reply) ->
         }
     ),
     stream_start(Responder, 200, Hdrs),
-    fun(Params) ->
-        _ = push_sse_data(Responder, progress_notification(Params)),
+    fun(Envelope) ->
+        _ = push_sse_data(Responder, Envelope),
         ok
     end.
 
@@ -922,35 +971,32 @@ handle_long_running_call(
             );
         {ok, TaskId} ->
             start_task_worker(
-                Headers,
-                Responder,
-                Config,
+                {Headers, Responder, Config},
                 Reply,
-                RequestId,
-                ProgressToken,
-                Meta,
-                Spawn,
-                AuthInfo,
-                Owner,
-                TaskId,
-                RequestCtx
+                #{
+                    request_id => RequestId,
+                    progress_token => ProgressToken,
+                    meta => Meta,
+                    spawn => Spawn,
+                    auth_info => AuthInfo,
+                    owner => Owner,
+                    task_id => TaskId,
+                    ctx => RequestCtx
+                }
             )
     end.
 
-start_task_worker(
-    Headers,
-    Responder,
-    Config,
-    Reply,
-    RequestId,
-    ProgressToken,
-    Meta,
-    Spawn,
-    AuthInfo,
-    Owner,
-    TaskId,
-    RequestCtx
-) ->
+start_task_worker({Headers, Responder, Config}, Reply, Work) ->
+    #{
+        request_id := RequestId,
+        progress_token := ProgressToken,
+        meta := Meta,
+        spawn := Spawn,
+        auth_info := AuthInfo,
+        owner := Owner,
+        task_id := TaskId,
+        ctx := RequestCtx
+    } = Work,
     SessionId = maps:get(session_id, Reply),
     {_Collector, Worker} = barrel_mcp_protocol:spawn_task_collector(
         Owner,
@@ -962,6 +1008,7 @@ start_task_worker(
                 progress_token => ProgressToken,
                 meta => Meta,
                 emit_progress => emit_progress_fun(SessionId, ProgressToken),
+                emit_log => emit_log_fun(Reply, SessionId),
                 reply_to => Collector,
                 auth_info => AuthInfo
             })
@@ -1036,13 +1083,60 @@ progress_notification(Params) ->
         <<"params">> => Params
     }.
 
-%% `OnProgress' is called for each `notifications/progress' the tool
-%% emits. Modern requests write those onto their own response stream;
-%% legacy ones deliver them out of band on the session's SSE channel
-%% and pass a sink that drops them.
-wait_for_tool(RequestId, Timeout, OnProgress) ->
+%% Legacy logging stays on the session's SSE channel, filtered by
+%% whatever `logging/setLevel' last set. A modern request without a
+%% session has nowhere out of band to put one, so it drops.
+emit_log_fun(_Reply, undefined) ->
+    fun(_, _, _) -> ok end;
+emit_log_fun(_Reply, SessionId) ->
+    fun(Level, Logger, Data) ->
+        barrel_mcp:notify_log(SessionId, Level, Logger, Data)
+    end.
+
+%% "The server MUST NOT emit notifications/message for a request that
+%% does not include this field"
+%% (2026-07-28/server/utilities/logging.mdx:64). `undefined' is that
+%% request, so it gets a sink.
+self_log_fun(_Self, _RequestId, undefined) ->
+    fun(_, _, _) -> ok end;
+self_log_fun(Self, RequestId, Requested) ->
+    Floor = barrel_mcp_session:log_level_priority(Requested),
+    fun(Level, Logger, Data) ->
+        case barrel_mcp_session:log_level_priority(Level) of
+            error ->
+                ok;
+            Prio when Prio >= Floor ->
+                Self ! {tool_log, RequestId, log_params(Level, Logger, Data)},
+                ok;
+            _ ->
+                ok
+        end
+    end.
+
+log_params(Level, Logger, Data) ->
+    Base = #{<<"level">> => level_to_binary(Level), <<"data">> => Data},
+    case Logger of
+        undefined -> Base;
+        _ -> Base#{<<"logger">> => Logger}
+    end.
+
+level_to_binary(L) when is_atom(L) -> atom_to_binary(L, utf8);
+level_to_binary(L) when is_binary(L) -> L.
+
+log_notification(Params) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"method">> => <<"notifications/message">>,
+        <<"params">> => Params
+    }.
+
+%% `OnEmit' is called with each request-scoped notification envelope the
+%% tool produces. Modern requests write those onto their own response
+%% stream; legacy ones deliver them out of band on the session's SSE
+%% channel and pass a sink that drops them.
+wait_for_tool(RequestId, Timeout, OnEmit) ->
     Deadline = progress_deadline(Timeout),
-    Outcome = collect_tool_outcome(RequestId, Deadline, OnProgress),
+    Outcome = collect_tool_outcome(RequestId, Deadline, OnEmit),
     case Outcome of
         cancelled ->
             cancelled;
@@ -1069,12 +1163,15 @@ progress_remaining(infinity) ->
 progress_remaining(Deadline) ->
     max(0, Deadline - erlang:monotonic_time(millisecond)).
 
-collect_tool_outcome(RequestId, Deadline, OnProgress) ->
+collect_tool_outcome(RequestId, Deadline, OnEmit) ->
     Outcome =
         receive
             {tool_progress, RequestId, Params} ->
-                OnProgress(Params),
-                progress;
+                OnEmit(progress_notification(Params)),
+                notified;
+            {tool_log, RequestId, Params} ->
+                OnEmit(log_notification(Params)),
+                notified;
             {tool_result, RequestId, Result} ->
                 {result, Result, #{}};
             {tool_result_meta, RequestId, Result, Meta} ->
@@ -1099,7 +1196,7 @@ collect_tool_outcome(RequestId, Deadline, OnProgress) ->
             timeout
         end,
     case Outcome of
-        progress -> collect_tool_outcome(RequestId, Deadline, OnProgress);
+        notified -> collect_tool_outcome(RequestId, Deadline, OnEmit);
         _ -> Outcome
     end.
 
@@ -1310,30 +1407,18 @@ stream_get_sse(Headers, Responder, Config) ->
         fun() -> stream_get_sse_authed(Headers, Responder, Config) end
     ).
 
+%% Only reached with sessions on: `dispatch/6' answers 405 otherwise.
 stream_get_sse_authed(Headers, Responder, Config) ->
-    case maps:get(session_enabled, Config, true) of
-        false ->
+    case session_header(Headers) of
+        undefined ->
             reply(
                 Responder,
                 400,
                 cors_headers(Headers, Config, #{}),
-                json_encode(#{<<"error">> => <<"Sessions not enabled">>})
+                json_encode(#{<<"error">> => <<"Mcp-Session-Id header required">>})
             );
-        true ->
-            case session_header(Headers) of
-                undefined ->
-                    reply(
-                        Responder,
-                        400,
-                        cors_headers(Headers, Config, #{}),
-                        json_encode(#{
-                            <<"error">> =>
-                                <<"Mcp-Session-Id header required">>
-                        })
-                    );
-                SessionId ->
-                    stream_get_sse_session(Headers, Responder, Config, SessionId)
-            end
+        SessionId ->
+            stream_get_sse_session(Headers, Responder, Config, SessionId)
     end.
 
 stream_get_sse_session(Headers, Responder, Config, SessionId) ->
@@ -1458,7 +1543,14 @@ stream_sse_response(Headers, Responder, Config, SessionId, Result) ->
         SessionId
     ),
     stream_start(Responder, 200, Hdrs),
-    _ = push_sse_event(Responder, generate_event_id(), Result),
+    %% `SessionId' is `undefined' on the modern path and only there:
+    %% 2026-07-28 has no sessions and no resumability, so the event
+    %% carries no `id:' a client could replay from.
+    _ =
+        case SessionId of
+            undefined -> push_sse_data(Responder, Result);
+            _ -> push_sse_event(Responder, generate_event_id(), Result)
+        end,
     stream_end(Responder).
 
 %% Modern streams carry no event ids: 2026-07-28 removed SSE

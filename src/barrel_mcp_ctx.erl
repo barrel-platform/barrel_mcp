@@ -145,11 +145,13 @@ capabilities_of(legacy, _Meta, Extra) ->
 %%====================================================================
 
 %% @doc Check that a modern request carries the `_meta' fields the spec
-%% marks required. A request missing one is malformed and the caller
-%% must reject it with `?JSONRPC_INVALID_PARAMS' (HTTP 400).
+%% marks required, and that the optional ones it does carry are usable.
+%% A failure is malformed params and the caller must reject it with
+%% `?JSONRPC_INVALID_PARAMS' (HTTP 400).
 %%
 %% Legacy requests carry no such requirement and always pass.
--spec validate(ctx()) -> ok | {error, {missing_meta, binary()}}.
+-spec validate(ctx()) ->
+    ok | {error, {missing_meta, binary()}} | {error, {invalid_meta, binary()}}.
 validate(#{era := legacy}) ->
     ok;
 validate(#{era := modern, meta := Meta}) ->
@@ -158,8 +160,26 @@ validate(#{era := modern, meta := Meta}) ->
         ?MCP_META_CLIENT_CAPABILITIES
     ],
     case [K || K <- Required, not maps:is_key(K, Meta)] of
-        [] -> ok;
+        [] -> validate_log_level(Meta);
         [Missing | _] -> {error, {missing_meta, Missing}}
+    end.
+
+%% "If the io.modelcontextprotocol/logLevel value carried in a request's
+%% _meta is not a recognized log level, the server SHOULD reject that
+%% request" with -32602
+%% (2026-07-28/server/utilities/logging.mdx:100). Absent is fine: it
+%% means the request opted out of logging.
+validate_log_level(Meta) ->
+    case maps:find(?MCP_META_LOG_LEVEL, Meta) of
+        error ->
+            ok;
+        {ok, Level} when is_binary(Level) ->
+            case barrel_mcp_session:log_level_priority(Level) of
+                error -> {error, {invalid_meta, ?MCP_META_LOG_LEVEL}};
+                _ -> ok
+            end;
+        {ok, _} ->
+            {error, {invalid_meta, ?MCP_META_LOG_LEVEL}}
     end.
 
 %%====================================================================

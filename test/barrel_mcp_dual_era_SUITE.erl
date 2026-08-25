@@ -48,14 +48,21 @@
     param_header_mirrored/1,
     param_header_mismatch/1,
     legacy_needs_no_metadata_headers/1,
-    cors_allows_metadata_headers/1
+    cors_allows_metadata_headers/1,
+    modern_sse_carries_no_event_id/1,
+    modern_only_refuses_get_and_delete/1,
+    modern_logs_only_when_opted_in/1,
+    modern_logs_below_requested_level_are_dropped/1,
+    modern_unknown_log_level_is_invalid_params/1
 ]).
 
 -define(BASE_PORT, 21400).
 -define(MODERN, <<"2026-07-28">>).
 
 %% A tool per outcome we need to observe on the wire.
--export([echo_tool/1, boom_tool/1, a_resource/1, counting_tool/2, region_tool/1]).
+-export([
+    echo_tool/1, boom_tool/1, a_resource/1, counting_tool/2, region_tool/1, chatty_tool/2
+]).
 
 all() ->
     [
@@ -83,7 +90,12 @@ all() ->
         param_header_mirrored,
         param_header_mismatch,
         legacy_needs_no_metadata_headers,
-        cors_allows_metadata_headers
+        cors_allows_metadata_headers,
+        modern_sse_carries_no_event_id,
+        modern_only_refuses_get_and_delete,
+        modern_logs_only_when_opted_in,
+        modern_logs_below_requested_level_are_dropped,
+        modern_unknown_log_level_is_invalid_params
     ].
 
 init_per_suite(Config) ->
@@ -98,6 +110,9 @@ init_per_suite(Config) ->
     }),
     ok = barrel_mcp:reg_tool(<<"counter">>, ?MODULE, counting_tool, #{
         description => <<"Reports progress, then finishes">>
+    }),
+    ok = barrel_mcp:reg_tool(<<"chatty">>, ?MODULE, chatty_tool, #{
+        description => <<"Logs at two levels, then finishes">>
     }),
     ok = barrel_mcp:reg_tool(<<"regional">>, ?MODULE, region_tool, #{
         description => <<"Mirrors its region argument into a header">>,
@@ -122,6 +137,7 @@ end_per_suite(_Config) ->
     barrel_mcp_registry:unreg(tool, <<"echo">>),
     barrel_mcp_registry:unreg(tool, <<"boom">>),
     barrel_mcp_registry:unreg(tool, <<"counter">>),
+    barrel_mcp_registry:unreg(tool, <<"chatty">>),
     barrel_mcp_registry:unreg(tool, <<"regional">>),
     barrel_mcp_registry:unreg(resource, <<"res">>),
     try
@@ -162,6 +178,11 @@ region_tool(Args) ->
     maps:get(<<"region">>, Args, <<"none">>).
 
 %% Arity 2 so it can reach the progress hook in Ctx.
+chatty_tool(_Args, Ctx) ->
+    ok = barrel_mcp:log(Ctx, debug, <<"db">>, <<"opening">>),
+    ok = barrel_mcp:log(Ctx, error, <<"db">>, <<"it broke">>),
+    <<"chatted">>.
+
 counting_tool(_Args, Ctx) ->
     Emit = maps:get(emit_progress, Ctx),
     Emit(1, 3, <<"step one">>),
@@ -583,6 +604,117 @@ modern_without_progress_token_is_plain_json(Config) ->
     ok.
 
 %%====================================================================
+%% Modern stream shape
+%%====================================================================
+
+%% "Resumable SSE streams via `Last-Event-ID' are not supported"
+%% (2026-07-28/basic/transports/streamable-http.mdx:157). An `id:' line
+%% is what a client resumes from, so emitting one would advertise a
+%% replay this revision cannot serve.
+modern_sse_carries_no_event_id(Config) ->
+    Port = ?config(port, Config),
+    Params = #{<<"name">> => <<"counter">>, <<"arguments">> => #{}},
+    Body = modern_request_with_progress(1, <<"tools/call">>, Params, <<"tok-1">>),
+    {200, Headers, Raw} = post_sse_raw(Port, Body),
+    <<"text/event-stream", _/binary>> = header(<<"content-type">>, Headers),
+    %% Every block still carries data, so the absence is of ids alone.
+    ?assert(length(decode_sse(Raw)) >= 2),
+    ?assertEqual(nomatch, binary:match(Raw, <<"\nid: ">>)),
+    ?assertNotMatch(<<"id: ", _/binary>>, Raw),
+    ok.
+
+%% With sessions off only 2026-07-28 is served, and that revision has
+%% neither a standalone GET stream nor a DELETE to end a session
+%% (streamable-http.mdx:683).
+modern_only_refuses_get_and_delete(Config) ->
+    Port = ?config(port, Config),
+    ok = barrel_mcp:stop_http_stream(),
+    timer:sleep(50),
+    {ok, _} = barrel_mcp:start_http_stream(#{
+        port => Port,
+        session_enabled => false
+    }),
+    lists:foreach(
+        fun(Method) ->
+            {ok, Status, RespHeaders, _} = hackney:request(
+                Method, url(Port), [], <<>>, [with_body]
+            ),
+            ?assertEqual(405, Status),
+            ?assertEqual(<<"POST, OPTIONS">>, header(<<"allow">>, RespHeaders))
+        end,
+        [get, delete]
+    ),
+    %% POST still works, so the listener is refusing the method rather
+    %% than being broken.
+    Body = modern_request(1, <<"tools/list">>, #{}),
+    {200, _, _} = post_modern(Port, Body, []),
+    ok.
+
+%%====================================================================
+%% Logging opt-in
+%%====================================================================
+
+%% "The server MUST NOT emit notifications/message for a request that
+%% does not include this field"
+%% (2026-07-28/server/utilities/logging.mdx:64). The same tool logs
+%% either way, so the request's `_meta' is the only thing deciding it.
+modern_logs_only_when_opted_in(Config) ->
+    Port = ?config(port, Config),
+    Params = #{<<"name">> => <<"chatty">>, <<"arguments">> => #{}},
+
+    {200, Silent, SilentBody} = post_modern(
+        Port, modern_request(1, <<"tools/call">>, Params), []
+    ),
+    <<"application/json", _/binary>> = header(<<"content-type">>, Silent),
+    ?assertEqual(nomatch, binary:match(SilentBody, <<"notifications/message">>)),
+
+    Body = modern_request_with_log_level(1, <<"tools/call">>, Params, <<"debug">>),
+    {200, Headers, Events} = post_sse(Port, Body),
+    <<"text/event-stream", _/binary>> = header(<<"content-type">>, Headers),
+    {Notifications, [Final]} = lists:splitwith(
+        fun(E) -> maps:is_key(<<"method">>, E) end, Events
+    ),
+    ?assertEqual(
+        [<<"notifications/message">>, <<"notifications/message">>],
+        [maps:get(<<"method">>, N) || N <- Notifications]
+    ),
+    [First, Second] = [maps:get(<<"params">>, N) || N <- Notifications],
+    ?assertEqual(<<"debug">>, maps:get(<<"level">>, First)),
+    ?assertEqual(<<"db">>, maps:get(<<"logger">>, First)),
+    ?assertEqual(<<"opening">>, maps:get(<<"data">>, First)),
+    ?assertEqual(<<"error">>, maps:get(<<"level">>, Second)),
+    [Block] = maps:get(<<"content">>, maps:get(<<"result">>, Final)),
+    ?assertEqual(<<"chatted">>, maps:get(<<"text">>, Block)),
+    ok.
+
+%% The level names a floor, so the `debug' line is dropped and the
+%% `error' one survives.
+modern_logs_below_requested_level_are_dropped(Config) ->
+    Port = ?config(port, Config),
+    Params = #{<<"name">> => <<"chatty">>, <<"arguments">> => #{}},
+    Body = modern_request_with_log_level(1, <<"tools/call">>, Params, <<"warning">>),
+    {200, _Headers, Events} = post_sse(Port, Body),
+    {Notifications, [_Final]} = lists:splitwith(
+        fun(E) -> maps:is_key(<<"method">>, E) end, Events
+    ),
+    ?assertEqual(1, length(Notifications)),
+    [Only] = [maps:get(<<"params">>, N) || N <- Notifications],
+    ?assertEqual(<<"error">>, maps:get(<<"level">>, Only)),
+    ok.
+
+%% "If the io.modelcontextprotocol/logLevel value ... is not a
+%% recognized log level, the server SHOULD reject that request" with
+%% -32602 (logging.mdx:100).
+modern_unknown_log_level_is_invalid_params(Config) ->
+    Port = ?config(port, Config),
+    Params = #{<<"name">> => <<"echo">>, <<"arguments">> => #{}},
+    Body = modern_request_with_log_level(1, <<"tools/call">>, Params, <<"chatty">>),
+    {400, _, RespBody} = post_modern(Port, Body, []),
+    Error = maps:get(<<"error">>, json:decode(RespBody)),
+    ?assertEqual(-32602, maps:get(<<"code">>, Error)),
+    ok.
+
+%%====================================================================
 %% Helpers
 %%====================================================================
 
@@ -649,6 +781,15 @@ request_at_version(Id, Method, Params, Version) ->
         <<"params">> => Params#{<<"_meta">> => Meta}
     }).
 
+modern_request_with_log_level(Id, Method, Params, Level) ->
+    Meta = (modern_meta())#{?MCP_META_LOG_LEVEL => Level},
+    json:encode(#{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => Id,
+        <<"method">> => Method,
+        <<"params">> => Params#{<<"_meta">> => Meta}
+    }).
+
 modern_request_with_progress(Id, Method, Params, Token) ->
     Meta = (modern_meta())#{<<"progressToken">> => Token},
     json:encode(#{
@@ -684,6 +825,12 @@ init_body() ->
 %% Read a streamed response to completion and return its SSE events in
 %% order, decoded.
 post_sse(Port, Body) ->
+    {Status, Headers, Raw} = post_sse_raw(Port, Body),
+    {Status, Headers, decode_sse(Raw)}.
+
+%% The same request, left as bytes: a case that asserts on the SSE
+%% framing itself cannot use the decoded events.
+post_sse_raw(Port, Body) ->
     Decoded = json:decode(iolist_to_binary(Body)),
     Params = maps:get(<<"params">>, Decoded, #{}),
     Headers =
@@ -696,7 +843,7 @@ post_sse(Port, Body) ->
     {ok, Status, RespHeaders, Raw} = hackney:request(
         post, url(Port), Headers, Body, [with_body]
     ),
-    {Status, RespHeaders, decode_sse(Raw)}.
+    {Status, RespHeaders, Raw}.
 
 decode_sse(Raw) ->
     Blocks = binary:split(Raw, <<"\n\n">>, [global]),
