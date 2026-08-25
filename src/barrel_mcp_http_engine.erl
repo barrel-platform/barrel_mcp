@@ -546,9 +546,17 @@ honoured(Filter) ->
         #{},
         Flags
     ),
-    case maps:get(resource_subscriptions, Filter, []) of
-        [] -> Base;
-        Uris -> Base#{<<"resourceSubscriptions">> => Uris}
+    Base1 =
+        case maps:get(resource_subscriptions, Filter, []) of
+            [] -> Base;
+            Uris -> Base#{<<"resourceSubscriptions">> => Uris}
+        end,
+    %% Only the ids we agreed to deliver. An id belonging to someone
+    %% else, or naming no task, is left out rather than refused, so a
+    %% caller cannot learn which of the two it was.
+    case maps:get(task_ids, Filter, []) of
+        [] -> Base1;
+        Ids -> Base1#{<<"taskIds">> => Ids}
     end.
 
 subscription_loop(Responder, SubId, Interval) ->

@@ -1049,12 +1049,34 @@ handle_request(<<"initialize">>, Params, Id, Ctx) ->
 %% the client can act on; handing back a stream nobody can write would
 %% only fail later and further away.
 handle_request(<<"subscriptions/listen">>, Params, Id, Ctx) ->
+    Filter = barrel_mcp_subscriptions:normalize_filter(Params),
     case barrel_mcp_ctx:streaming(Ctx) of
+        true when map_get(task_ids, Filter) =/= [] ->
+            %% Task notifications are part of the extension, so a client
+            %% that did not declare it may not ask for them.
+            case tasks_enabled(Ctx) of
+                false ->
+                    error_with_data(
+                        Id,
+                        ?MCP_MISSING_CLIENT_CAPABILITY,
+                        <<"Client did not declare a required capability">>,
+                        #{<<"requiredCapabilities">> => [?MCP_EXT_TASKS]}
+                    );
+                true ->
+                    %% Bound to the principal, and narrowed to the ids
+                    %% it actually holds. An id owned by someone else
+                    %% and an id naming nothing are both dropped, so the
+                    %% acknowledgement cannot be read as an existence
+                    %% check.
+                    Owner = task_owner(Ctx),
+                    Allowed = barrel_mcp_tasks:owned(Owner, map_get(task_ids, Filter)),
+                    {subscribe, #{
+                        id => Id,
+                        filter => Filter#{task_ids => Allowed, principal => Owner}
+                    }}
+            end;
         true ->
-            {subscribe, #{
-                id => Id,
-                filter => barrel_mcp_subscriptions:normalize_filter(Params)
-            }};
+            {subscribe, #{id => Id, filter => Filter}};
         false ->
             error_response(
                 Id,

@@ -35,6 +35,7 @@
     normalize_filter/1,
     list_changed/1,
     resource_updated/2,
+    task_changed/3,
     close_all/0,
     count/0
 ]).
@@ -50,7 +51,12 @@
     tools_list_changed => boolean(),
     prompts_list_changed => boolean(),
     resources_list_changed => boolean(),
-    resource_subscriptions => [binary()]
+    resource_subscriptions => [binary()],
+    %% Task ids this stream wants `notifications/tasks' for. Bound to
+    %% the principal that opened the stream, so learning another
+    %% caller's id is not enough to receive its results.
+    task_ids => [binary()],
+    principal => term()
 }.
 
 -export_type([filter/0]).
@@ -101,14 +107,24 @@ normalize_filter(Params) when is_map(Params) ->
         #{},
         Flags
     ),
-    case maps:get(<<"resourceSubscriptions">>, Wire, []) of
-        Uris when is_list(Uris) ->
-            case [U || U <- Uris, is_binary(U)] of
-                [] -> Base;
-                Kept -> Base#{resource_subscriptions => Kept}
+    Base1 =
+        case maps:get(<<"resourceSubscriptions">>, Wire, []) of
+            Uris when is_list(Uris) ->
+                case [U || U <- Uris, is_binary(U)] of
+                    [] -> Base;
+                    Kept -> Base#{resource_subscriptions => Kept}
+                end;
+            _ ->
+                Base
+        end,
+    case maps:get(<<"taskIds">>, Wire, []) of
+        Ids when is_list(Ids) ->
+            case [I || I <- Ids, is_binary(I)] of
+                [] -> Base1;
+                KeptIds -> Base1#{task_ids => KeptIds}
             end;
         _ ->
-            Base
+            Base1
     end.
 
 %% @doc Fan a list-changed notification out to every subscriber that
@@ -139,6 +155,20 @@ resource_updated(Uri, Extra) ->
                 maps:merge(#{<<"uri">> => Uri}, Extra),
                 SubId
             )
+        end
+    ).
+
+%% @doc Fan a task status change out to the streams that asked for that
+%% task by id.
+-spec task_changed(binary(), term(), map()) -> ok.
+task_changed(TaskId, Owner, Task) ->
+    deliver(
+        fun(Filter) ->
+            lists:member(TaskId, maps:get(task_ids, Filter, [])) andalso
+                maps:get(principal, Filter, undefined) =:= Owner
+        end,
+        fun(SubId) ->
+            notification(<<"notifications/tasks">>, Task, SubId)
         end
     ).
 

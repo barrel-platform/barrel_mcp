@@ -39,6 +39,7 @@
     set_worker/3,
     await_input/5,
     params/2,
+    owned/2,
     update/3
 ]).
 
@@ -216,6 +217,15 @@ fail(Owner, TaskId, Reason) ->
     ok | {resume, map()} | {error, not_found}.
 update(Owner, TaskId, Responses) when is_map(Responses) ->
     gen_server:call(?MODULE, {update, Owner, TaskId, Responses}).
+
+%% @doc Which of these task ids the owner actually holds.
+%%
+%% An id naming no task and an id belonging to someone else give the
+%% same answer, so a caller cannot use the difference to learn that a
+%% task exists.
+-spec owned(term(), [binary()]) -> [binary()].
+owned(Owner, Ids) ->
+    [I || I <- Ids, lookup(Owner, I) =/= {error, not_found}].
 
 %% @doc The originating request params recorded for a task, if any.
 -spec params(term(), binary()) -> {ok, map()} | {error, not_found}.
@@ -625,21 +635,25 @@ transition(SessionId, TaskId, Status, Result, Reason) ->
 
 %% Only a legacy task has a session channel to notify on. A modern
 %% client polls `tasks/get' instead.
-notify_changed(SessionId, _Task) when not is_binary(SessionId) ->
-    ok;
-notify_changed(SessionId, #task{} = Task) ->
+%% The eras deliver differently. A legacy task belongs to a session and
+%% is announced on its stream as `notifications/tasks/status'; a modern
+%% one has no session and is announced as `notifications/tasks' to the
+%% subscriptions that named its id.
+notify_changed(SessionId, #task{} = Task) when is_binary(SessionId) ->
     case barrel_mcp_session:get_sse_pid(SessionId) of
         {ok, Pid} when is_pid(Pid) ->
             Pid !
                 {sse_send_message, #{
                     <<"jsonrpc">> => <<"2.0">>,
                     <<"method">> => <<"notifications/tasks/status">>,
-                    <<"params">> => task_to_map(Task)
+                    <<"params">> => task_to_map(Task, legacy)
                 }},
             ok;
         _ ->
             ok
-    end.
+    end;
+notify_changed(Owner, #task{id = TaskId} = Task) ->
+    barrel_mcp_subscriptions:task_changed(TaskId, Owner, task_to_map(Task, modern)).
 
 task_to_map(Task) ->
     task_to_map(Task, legacy).

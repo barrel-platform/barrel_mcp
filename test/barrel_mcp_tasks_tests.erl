@@ -513,3 +513,51 @@ reused_key_refused() ->
         {error, empty_input_round},
         barrel_mcp_tasks:await_input(Owner, TaskId, #{}, seed, #{})
     ).
+
+%%====================================================================
+%% Task notifications and subscription binding
+%%
+%% The eras deliver differently, and a task id is not a capability: a
+%% caller that learns someone else's id must not be able to subscribe
+%% to it.
+%%====================================================================
+
+owned_narrows_to_the_holder_test() ->
+    {ok, Mine} = barrel_mcp_tasks:create(<<"owner-a">>, <<"tools/call">>, #{}),
+    {ok, Theirs} = barrel_mcp_tasks:create(<<"owner-b">>, <<"tools/call">>, #{}),
+    %% Their id and an id naming nothing give the same answer, so the
+    %% difference cannot be used to detect a task's existence.
+    ?assertEqual([Mine], barrel_mcp_tasks:owned(<<"owner-a">>, [Mine, Theirs])),
+    ?assertEqual([], barrel_mcp_tasks:owned(<<"owner-a">>, [Theirs])),
+    ?assertEqual([], barrel_mcp_tasks:owned(<<"owner-a">>, [<<"task_nothing">>])).
+
+task_ids_filter_parsed_test() ->
+    Filter = barrel_mcp_subscriptions:normalize_filter(#{
+        <<"notifications">> => #{<<"taskIds">> => [<<"a">>, <<"b">>, 42]}
+    }),
+    %% Non-binaries are dropped rather than failing the request.
+    ?assertEqual([<<"a">>, <<"b">>], maps:get(task_ids, Filter)).
+
+%% Asking for task notifications is asking for part of the extension.
+task_ids_need_the_extension_test() ->
+    Request = fun(Caps) ->
+        barrel_mcp_protocol:handle(
+            #{
+                <<"jsonrpc">> => <<"2.0">>,
+                <<"id">> => 5,
+                <<"method">> => <<"subscriptions/listen">>,
+                <<"params">> => #{
+                    <<"notifications">> => #{<<"taskIds">> => [<<"x">>]},
+                    <<"_meta">> => modern_meta(Caps)
+                }
+            },
+            #{streaming => true}
+        )
+    end,
+    Refused = Request(#{}),
+    ?assertEqual(
+        -32021,
+        maps:get(<<"code">>, maps:get(<<"error">>, Refused))
+    ),
+    %% Declared, so it opens; the unknown id is simply not honoured.
+    ?assertMatch({subscribe, #{filter := #{task_ids := []}}}, Request(tasks_caps())).
