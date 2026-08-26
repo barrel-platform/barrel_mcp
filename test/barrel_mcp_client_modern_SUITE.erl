@@ -57,13 +57,16 @@
     url_elicitation_goes_to_its_own_callback/1,
     url_elicitation_without_a_callback_declines/1,
     url_mode_needs_the_url_capability/1,
-    unusable_elicitation_url_never_reaches_the_handler/1
+    unusable_elicitation_url_never_reaches_the_handler/1,
+    excludes_peer_tools_with_unusable_schemas/1,
+    drops_a_bad_output_schema_but_keeps_the_tool/1,
+    legacy_peers_are_audited_too/1
 ]).
 
 -export([echo_tool/1, a_resource/1, a_prompt/1, legacy_only_server/1]).
 -export([version_error_server/1, result_type_server/1, slow_server/1]).
 -export([confirm_tool/2, insatiable_tool/2, region_tool/1, connect_tool/2]).
--export([bad_url_server/1]).
+-export([bad_url_server/1, tool_catalogue_server/1]).
 
 -define(BASE_PORT, 22000).
 -define(MODERN, <<"2026-07-28">>).
@@ -106,7 +109,10 @@ all() ->
         url_elicitation_goes_to_its_own_callback,
         url_elicitation_without_a_callback_declines,
         url_mode_needs_the_url_capability,
-        unusable_elicitation_url_never_reaches_the_handler
+        unusable_elicitation_url_never_reaches_the_handler,
+        excludes_peer_tools_with_unusable_schemas,
+        drops_a_bad_output_schema_but_keeps_the_tool,
+        legacy_peers_are_audited_too
     ].
 
 init_per_suite(Config) ->
@@ -1201,6 +1207,135 @@ bad_url_reply(Id, Params) ->
                     <<"echoedAction">> => maps:get(<<"action">>, Answer, undefined)
                 }
             }
+    end.
+
+%% A tool definition the client cannot act on is dropped on its own,
+%% and the rest of the catalogue arrives intact.
+excludes_peer_tools_with_unusable_schemas(Config) ->
+    with_catalogue(Config, fun(Client) ->
+        {ok, Tools} = barrel_mcp_client:list_tools(Client),
+        Names = [maps:get(<<"name">>, T) || T <- Tools],
+        ?assertEqual([<<"good">>, <<"scalar_out">>], lists:sort(Names))
+    end).
+
+%% Nothing here validates a result against an `outputSchema', so a bad
+%% one costs the field rather than the tool.
+drops_a_bad_output_schema_but_keeps_the_tool(Config) ->
+    with_catalogue(Config, fun(Client) ->
+        {ok, Tools} = barrel_mcp_client:list_tools(Client),
+        [Scalar] = [T || T <- Tools, maps:get(<<"name">>, T) =:= <<"scalar_out">>],
+        ?assertNot(maps:is_key(<<"outputSchema">>, Scalar)),
+        [Good] = [T || T <- Tools, maps:get(<<"name">>, T) =:= <<"good">>],
+        ?assert(maps:is_key(<<"outputSchema">>, Good))
+    end).
+
+%% A handshake-era server can offer an unusable tool just as easily, so
+%% the audit is not something 2026-07-28 introduced.
+legacy_peers_are_audited_too(Config) ->
+    Port = ?config(port, Config) + 501,
+    {ok, _} = barrel_mcp_test_http:start(
+        legacy_catalogue_mock, Port, fun ?MODULE:tool_catalogue_server/1
+    ),
+    try
+        {ok, Client} = barrel_mcp_client:start(#{
+            transport => {http, url(Port)},
+            protocol_version => <<"2025-11-25">>
+        }),
+        wait_until(fun() -> is_ready(Client) end, 8000),
+        {ok, Tools} = barrel_mcp_client:list_tools(Client),
+        Names = [maps:get(<<"name">>, T) || T <- Tools],
+        ?assertEqual([<<"good">>, <<"scalar_out">>], lists:sort(Names)),
+        catch_close(Client)
+    after
+        barrel_mcp_test_http:stop(legacy_catalogue_mock)
+    end.
+
+%% Two usable tools and four that are not, each broken a different way.
+tool_catalogue_server(#{body := Body}) ->
+    Request = json:decode(Body),
+    Id = maps:get(<<"id">>, Request, null),
+    Result =
+        case maps:get(<<"method">>, Request, undefined) of
+            <<"server/discover">> ->
+                #{
+                    <<"resultType">> => <<"complete">>,
+                    <<"supportedVersions">> => [?MODERN],
+                    <<"capabilities">> => #{<<"tools">> => #{}},
+                    <<"_meta">> => #{
+                        ?MCP_META_SERVER_INFO => #{
+                            <<"name">> => <<"catalogue">>,
+                            <<"version">> => <<"1.0">>
+                        }
+                    }
+                };
+            <<"initialize">> ->
+                #{
+                    <<"protocolVersion">> => <<"2025-11-25">>,
+                    <<"capabilities">> => #{<<"tools">> => #{}},
+                    <<"serverInfo">> => #{
+                        <<"name">> => <<"catalogue">>,
+                        <<"version">> => <<"1.0">>
+                    }
+                };
+            <<"tools/list">> ->
+                #{<<"resultType">> => <<"complete">>, <<"tools">> => catalogue()};
+            _ ->
+                #{<<"resultType">> => <<"complete">>}
+        end,
+    Response = #{<<"jsonrpc">> => <<"2.0">>, <<"id">> => Id, <<"result">> => Result},
+    {200, #{<<"content-type">> => <<"application/json">>}, iolist_to_binary(json:encode(Response))}.
+
+catalogue() ->
+    [
+        #{
+            <<"name">> => <<"good">>,
+            <<"inputSchema">> => #{<<"type">> => <<"object">>},
+            <<"outputSchema">> => #{<<"type">> => <<"object">>}
+        },
+        #{
+            <<"name">> => <<"scalar_out">>,
+            <<"inputSchema">> => #{<<"type">> => <<"object">>},
+            %% Not a schema: `required' takes an array.
+            <<"outputSchema">> => #{<<"type">> => <<"object">>, <<"required">> => <<"x">>}
+        },
+        #{<<"name">> => <<"not_a_schema">>, <<"inputSchema">> => #{<<"type">> => <<"nope">>}},
+        #{<<"name">> => <<"not_an_object">>, <<"inputSchema">> => <<"a string">>},
+        #{
+            <<"name">> => <<"unresolvable">>,
+            <<"inputSchema">> => #{
+                <<"type">> => <<"object">>,
+                <<"$ref">> => <<"https://example.invalid/elsewhere.json">>
+            }
+        },
+        #{
+            <<"name">> => <<"bad_header">>,
+            <<"inputSchema">> => #{
+                <<"type">> => <<"object">>,
+                <<"properties">> => #{
+                    <<"n">> => #{<<"type">> => <<"number">>, <<"x-mcp-header">> => <<"N">>}
+                }
+            }
+        }
+    ].
+
+with_catalogue(Config, Fun) ->
+    Port = ?config(port, Config) + 500,
+    {ok, _} = barrel_mcp_test_http:start(
+        catalogue_mock, Port, fun ?MODULE:tool_catalogue_server/1
+    ),
+    try
+        {ok, Client} = barrel_mcp_client:start(#{
+            transport => {http, url(Port)},
+            protocol_version => ?MODERN
+        }),
+        wait_until(fun() -> is_ready(Client) end, 8000),
+        try
+            Fun(Client)
+        after
+            catch_close(Client)
+        end
+    after
+        barrel_mcp_test_http:stop(catalogue_mock)
     end.
 
 %%====================================================================

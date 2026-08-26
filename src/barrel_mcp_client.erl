@@ -1057,7 +1057,7 @@ notify_progress(Params, Data) ->
 %% A `tools/list' result is the only place a client learns which
 %% arguments a tool wants mirrored into headers, so it is read on the
 %% way past rather than left to whoever called.
-observe_result(#pending{method = <<"tools/list">>}, Result, #data{era = modern} = Data) ->
+observe_result(#pending{method = <<"tools/list">>}, Result, Data) ->
     case maps:get(<<"tools">>, Result, undefined) of
         Tools when is_list(Tools) ->
             {Kept, Bindings} = scan_tools(Tools),
@@ -1068,39 +1068,85 @@ observe_result(#pending{method = <<"tools/list">>}, Result, #data{era = modern} 
 observe_result(_Pending, Result, Data) ->
     {Result, Data}.
 
-%% An `x-mcp-header' the client cannot honour makes the whole tool
-%% definition invalid, and the spec has it excluded from the list
-%% rather than offered and then failing on use. One malformed tool must
-%% not take the others with it.
+%% A tool definition we cannot act on is dropped on its own. Offering it
+%% and failing on use would be worse, and one malformed tool must not
+%% take the rest of the catalogue with it.
 scan_tools(Tools) ->
-    lists:foldr(
-        fun(Tool, {Kept, Bindings}) ->
-            Name = maps:get(<<"name">>, Tool, <<>>),
-            Schema = maps:get(<<"inputSchema">>, Tool, #{}),
+    lists:foldr(fun scan_tool/2, {[], #{}}, Tools).
+
+scan_tool(Tool, {Kept, Bindings}) ->
+    Name = maps:get(<<"name">>, Tool, <<>>),
+    case check_peer_tool(Tool) of
+        {error, Reason} ->
+            logger:warning(
+                "barrel_mcp client: excluding tool ~ts from tools/list: ~p",
+                [Name, Reason]
+            ),
+            {Kept, Bindings};
+        {ok, Tool1, []} ->
+            {[Tool1 | Kept], Bindings};
+        {ok, Tool1, Params} ->
+            {[Tool1 | Kept], Bindings#{Name => Params}}
+    end.
+
+%% Two different failures. An `inputSchema' we cannot use is fatal to the
+%% tool: it is what arguments are built against and what header
+%% mirroring is read from. An `outputSchema' we cannot use is not, since
+%% nothing here validates a result against it, so only that field goes.
+check_peer_tool(Tool) ->
+    Schema = maps:get(<<"inputSchema">>, Tool, #{}),
+    case usable_schema(Schema) of
+        {error, Reason} ->
+            {error, {input_schema, Reason}};
+        ok when not is_map(Schema) ->
+            {error, {input_schema, not_an_object}};
+        ok ->
             case barrel_mcp_headers:scan_header_params(Schema) of
-                {ok, []} ->
-                    {[Tool | Kept], Bindings};
-                {ok, Params} ->
-                    {[Tool | Kept], Bindings#{Name => Params}};
+                {error, Reason} -> {error, {x_mcp_header, Reason}};
+                {ok, Params} -> {ok, without_bad_output_schema(Tool), Params}
+            end
+    end.
+
+without_bad_output_schema(Tool) ->
+    case maps:find(<<"outputSchema">>, Tool) of
+        error ->
+            Tool;
+        {ok, Schema} ->
+            case usable_schema(Schema) of
+                ok ->
+                    Tool;
                 {error, Reason} ->
                     logger:warning(
-                        "barrel_mcp client: excluding tool ~s from tools/list, "
-                        "its inputSchema has an unusable x-mcp-header "
-                        "annotation: ~p",
-                        [Name, Reason]
+                        "barrel_mcp client: dropping the outputSchema of tool ~ts: ~p",
+                        [maps:get(<<"name">>, Tool, <<>>), Reason]
                     ),
-                    {Kept, Bindings}
+                    maps:remove(<<"outputSchema">>, Tool)
             end
-        end,
-        {[], #{}},
-        Tools
-    ).
+    end.
 
-cache_tool_headers(Bindings, #data{transport = {barrel_mcp_client_http, Pid}} = Data) ->
-    ok = barrel_mcp_client_http:set_tool_headers(Pid, Bindings),
+%% Both that it is a schema at all, and that its references resolve
+%% without reaching the network.
+usable_schema(Schema) when is_map(Schema) ->
+    case barrel_mcp_jsonschema:validate_schema(Schema) of
+        {error, Errors} ->
+            {error, {not_a_schema, Errors}};
+        ok ->
+            case barrel_mcp_jsonschema:compile(Schema) of
+                {ok, _} -> ok;
+                {error, Reason} -> {error, Reason}
+            end
+    end;
+usable_schema(_Schema) ->
+    {error, not_an_object}.
+
+%% Header mirroring arrived with 2026-07-28, and only the HTTP transport
+%% has headers to mirror into.
+cache_tool_headers(Bindings, #data{era = modern, transport = Transport} = Data) when
+    element(1, Transport) =:= barrel_mcp_client_http
+->
+    ok = barrel_mcp_client_http:set_tool_headers(element(2, Transport), Bindings),
     Data;
 cache_tool_headers(_Bindings, Data) ->
-    %% stdio has no headers to mirror into.
     Data.
 
 %%====================================================================
