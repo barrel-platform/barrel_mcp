@@ -33,7 +33,9 @@
     | output_schema
     | output_schema_any_root
     | elicitation
-    | elicitation_url.
+    | elicitation_url
+    | title
+    | icons.
 
 -export_type([feature/0]).
 
@@ -162,6 +164,21 @@ feature(elicitation_url, <<"2025-06-18">>) ->
     disabled;
 feature(elicitation_url, Revision) ->
     known(Revision);
+%% `BaseMetadata.title' arrived at 2025-06-18, `icons' at 2025-11-25.
+%% A field a revision never had is noise to a client that reads it
+%% strictly, so it is left out rather than sent hopefully.
+feature(title, <<"2024-11-05">>) ->
+    disabled;
+feature(title, <<"2025-03-26">>) ->
+    disabled;
+feature(title, Revision) ->
+    known(Revision);
+feature(icons, <<"2025-11-25">>) ->
+    enabled;
+feature(icons, <<"2026-07-28">>) ->
+    enabled;
+feature(icons, _Revision) ->
+    disabled;
 feature(_Feature, _Revision) ->
     disabled.
 

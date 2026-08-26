@@ -636,27 +636,14 @@ broadcast_list_changed(Type) ->
 
 build_handler(tool, Module, Function, Opts) ->
     InputSchema = maps:get(input_schema, Opts, #{type => <<"object">>}),
-    %% An invalid `x-mcp-header' annotation makes the whole tool
-    %% definition invalid, so it fails registration rather than every
-    %% later call. Scanning once here also keeps the per-request
-    %% validation off the schema-walking path.
-    case barrel_mcp_headers:scan_header_params(InputSchema) of
-        {error, Reason} ->
-            {error, {invalid_input_schema, Reason}};
-        {ok, HeaderParams} ->
-            Base = #{
-                module => Module,
-                function => Function,
-                description => maps:get(description, Opts, <<>>),
-                input_schema => InputSchema,
-                header_params => HeaderParams,
-                validate_input => maps:get(validate_input, Opts, false),
-                long_running => maps:get(long_running, Opts, false),
-                validate_output => maps:get(validate_output, Opts, false)
-            },
-            Merged = maps:merge(Base, opt_field(output_schema, Opts)),
-            Merged1 = maps:merge(Merged, opt_field(annotations, Opts)),
-            add_metadata(Merged1, Opts)
+    %% Both schemas are checked here rather than on every call: a schema
+    %% that is not one would otherwise fail at the worst moment, and a
+    %% caller registering it can still do something about it.
+    case check_schemas(InputSchema, Opts) of
+        {error, _} = SchemaErr ->
+            SchemaErr;
+        ok ->
+            build_tool(Module, Function, Opts, InputSchema)
     end;
 build_handler(resource, Module, Function, Opts) ->
     Base = #{
@@ -693,6 +680,94 @@ build_handler(completion, Module, Function, _Opts) ->
     %% Completion handlers are arity 2: (PartialValue, Ctx) ->
     %%   {ok, [Suggestion]} | {ok, [Suggestion], #{has_more => true}}.
     #{module => Module, function => Function}.
+
+build_tool(Module, Function, Opts, InputSchema) ->
+    %% An invalid `x-mcp-header' annotation makes the whole tool
+    %% definition invalid, so it fails registration rather than every
+    %% later call. Scanning once here also keeps the per-request
+    %% validation off the schema-walking path.
+    case barrel_mcp_headers:scan_header_params(InputSchema) of
+        {error, Reason} ->
+            {error, {invalid_input_schema, Reason}};
+        {ok, HeaderParams} ->
+            Base = #{
+                module => Module,
+                function => Function,
+                description => maps:get(description, Opts, <<>>),
+                input_schema => InputSchema,
+                header_params => HeaderParams,
+                validate_input => maps:get(validate_input, Opts, false),
+                long_running => maps:get(long_running, Opts, false),
+                validate_output => maps:get(validate_output, Opts, false)
+            },
+            Merged = maps:merge(Base, opt_field(output_schema, Opts)),
+            Merged1 = maps:merge(Merged, opt_field(annotations, Opts)),
+            add_metadata(Merged1, Opts)
+    end.
+
+%% `inputSchema' is object rooted in every revision. `outputSchema' is
+%% accepted with any root: registration happens before any revision is
+%% negotiated, and what a given revision can render is decided when the
+%% tool is listed.
+check_schemas(InputSchema, Opts) ->
+    case check_schema(input_schema, InputSchema) of
+        {error, _} = Err ->
+            Err;
+        ok ->
+            case object_rooted(InputSchema) of
+                false ->
+                    {error, {invalid_input_schema, not_object_rooted}};
+                true ->
+                    case maps:find(output_schema, Opts) of
+                        error -> ok;
+                        {ok, Output} -> check_schema(output_schema, Output)
+                    end
+            end
+    end.
+
+check_schema(Which, Schema) ->
+    case barrel_mcp_jsonschema:validate_schema(normalize_schema(Schema)) of
+        {error, Errors} ->
+            {error, {list_to_atom("invalid_" ++ atom_to_list(Which)), Errors}};
+        ok ->
+            case barrel_mcp_jsonschema:compile(normalize_schema(Schema)) of
+                {ok, _} ->
+                    ok;
+                {error, Reason} ->
+                    {error, {list_to_atom("invalid_" ++ atom_to_list(Which)), Reason}}
+            end
+    end.
+
+object_rooted(Schema) when is_map(Schema) ->
+    case type_of(Schema) of
+        undefined -> true;
+        Type -> Type =:= <<"object">>
+    end;
+object_rooted(_Schema) ->
+    false.
+
+type_of(Schema) ->
+    case maps:get(<<"type">>, Schema, maps:get(type, Schema, undefined)) of
+        T when is_binary(T) -> T;
+        T when is_atom(T), T =/= undefined -> atom_to_binary(T, utf8);
+        _ -> undefined
+    end.
+
+%% Handlers may be registered with atom keys, which the validator does
+%% not speak. Only the shape is normalised; values pass through.
+normalize_schema(Map) when is_map(Map) ->
+    maps:fold(
+        fun(K, V, Acc) -> Acc#{to_key(K) => normalize_schema(V)} end,
+        #{},
+        Map
+    );
+normalize_schema(List) when is_list(List) ->
+    [normalize_schema(V) || V <- List];
+normalize_schema(Other) ->
+    Other.
+
+to_key(K) when is_atom(K) -> atom_to_binary(K, utf8);
+to_key(K) -> K.
 
 add_metadata(Handler, Opts) ->
     Handler1 =

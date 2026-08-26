@@ -17,9 +17,19 @@
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([official_suite/1, no_network_dereference/1, bounds_are_enforced/1]).
+-export([invalid_schemas_are_refused_at_registration/1, output_schema_by_revision/1]).
+-export([a_tool/1]).
 
 all() ->
-    [official_suite, no_network_dereference, bounds_are_enforced].
+    [
+        official_suite,
+        no_network_dereference,
+        bounds_are_enforced,
+        invalid_schemas_are_refused_at_registration,
+        output_schema_by_revision
+    ].
+
+a_tool(_Args) -> <<"ok">>.
 
 init_per_suite(Config) ->
     [{remotes, load_remotes()} | Config].
@@ -92,6 +102,108 @@ bounds_are_enforced(_Config) ->
         lists:seq(1, 200)
     ),
     ?assertMatch({error, too_deep}, barrel_mcp_jsonschema:compile(Deep)).
+
+%% Instance validation does not prove schemas are rejected, so the entry
+%% points get their own matrix: anything that is not a schema has to be
+%% refused where it is registered rather than where it is used.
+invalid_schemas_are_refused_at_registration(_Config) ->
+    {ok, _} = application:ensure_all_started(barrel_mcp),
+    ok = barrel_mcp_registry:wait_for_ready(),
+    try
+        Bad = [
+            {<<"type is not a type">>, #{<<"type">> => <<"nope">>}},
+            {<<"required is not an array">>, #{
+                <<"type">> => <<"object">>, <<"required">> => <<"x">>
+            }},
+            {<<"properties is not an object">>, #{
+                <<"type">> => <<"object">>, <<"properties">> => [1, 2]
+            }},
+            {<<"unresolvable reference">>, #{
+                <<"type">> => <<"object">>,
+                <<"$ref">> => <<"https://example.invalid/nope.json">>
+            }},
+            {<<"minimum is not a number">>, #{
+                <<"type">> => <<"object">>,
+                <<"properties">> => #{<<"a">> => #{<<"minimum">> => <<"1">>}}
+            }}
+        ],
+        lists:foreach(
+            fun({Why, Schema}) ->
+                ?assertMatch(
+                    {Why, {error, {invalid_input_schema, _}}},
+                    {Why,
+                        barrel_mcp:reg_tool(<<"bad">>, ?MODULE, a_tool, #{
+                            input_schema => Schema
+                        })}
+                )
+            end,
+            Bad
+        ),
+        %% `inputSchema' is object rooted in every revision.
+        ?assertMatch(
+            {error, {invalid_input_schema, not_object_rooted}},
+            barrel_mcp:reg_tool(<<"bad">>, ?MODULE, a_tool, #{
+                input_schema => #{<<"type">> => <<"string">>}
+            })
+        ),
+        %% `outputSchema' is not: registration precedes negotiation, and
+        %% what a revision can render is decided when it is listed.
+        ?assertEqual(
+            ok,
+            barrel_mcp:reg_tool(<<"scalar_out">>, ?MODULE, a_tool, #{
+                input_schema => #{<<"type">> => <<"object">>},
+                output_schema => #{<<"type">> => <<"string">>}
+            })
+        ),
+        ?assertMatch(
+            {error, {invalid_output_schema, _}},
+            barrel_mcp:reg_tool(<<"bad_out">>, ?MODULE, a_tool, #{
+                input_schema => #{<<"type">> => <<"object">>},
+                output_schema => #{<<"type">> => <<"nope">>}
+            })
+        )
+    after
+        barrel_mcp_registry:unreg(tool, <<"scalar_out">>)
+    end.
+
+%% A field a revision never had is left out, and the tool stays listed
+%% and callable without it.
+output_schema_by_revision(_Config) ->
+    {ok, _} = application:ensure_all_started(barrel_mcp),
+    ok = barrel_mcp_registry:wait_for_ready(),
+    ok = barrel_mcp:reg_tool(<<"described">>, ?MODULE, a_tool, #{
+        input_schema => #{<<"type">> => <<"object">>},
+        output_schema => #{<<"type">> => <<"object">>},
+        title => <<"Described">>,
+        icons => [#{<<"src">> => <<"https://example.com/i.png">>}]
+    }),
+    try
+        Fields = fun(Revision) ->
+            Resp = barrel_mcp_protocol:handle(
+                #{
+                    <<"jsonrpc">> => <<"2.0">>,
+                    <<"id">> => 1,
+                    <<"method">> => <<"tools/list">>,
+                    <<"params">> => #{}
+                },
+                #{protocol_version => Revision}
+            ),
+            Tools = maps:get(<<"tools">>, maps:get(<<"result">>, Resp)),
+            [T] = [T0 || T0 <- Tools, maps:get(<<"name">>, T0) =:= <<"described">>],
+            {
+                maps:is_key(<<"outputSchema">>, T),
+                maps:is_key(<<"title">>, T),
+                maps:is_key(<<"icons">>, T)
+            }
+        end,
+        ?assertEqual({false, false, false}, Fields(<<"2024-11-05">>)),
+        ?assertEqual({false, false, false}, Fields(<<"2025-03-26">>)),
+        ?assertEqual({true, true, false}, Fields(<<"2025-06-18">>)),
+        ?assertEqual({true, true, true}, Fields(<<"2025-11-25">>)),
+        ?assertEqual({true, true, true}, Fields(<<"2026-07-28">>))
+    after
+        barrel_mcp_registry:unreg(tool, <<"described">>)
+    end.
 
 %%====================================================================
 %% Running one file

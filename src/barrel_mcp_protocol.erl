@@ -1303,7 +1303,7 @@ handle_request(<<"server/discover">>, _Params, Id, _Ctx) ->
 handle_request(<<"ping">>, _Params, Id, _State) ->
     success_response(Id, #{});
 %% Tools
-handle_request(<<"tools/list">>, Params, Id, _State) ->
+handle_request(<<"tools/list">>, Params, Id, Ctx) ->
     Cursor = maps:get(<<"cursor">>, Params, undefined),
     {Page, Next} = paginate(
         barrel_mcp_registry:all(tool),
@@ -1317,11 +1317,11 @@ handle_request(<<"tools/list">>, Params, Id, _State) ->
                 <<"description">> => maps:get(description, Handler, <<>>),
                 <<"inputSchema">> => maps:get(input_schema, Handler, #{<<"type">> => <<"object">>})
             },
-            with_optional_fields(Base, Handler, [
-                {<<"outputSchema">>, output_schema},
-                {<<"title">>, title},
-                {<<"icons">>, icons},
-                {<<"annotations">>, annotations}
+            with_optional_fields(Base, Handler, Ctx, [
+                {<<"outputSchema">>, output_schema, output_schema},
+                {<<"title">>, title, title},
+                {<<"icons">>, icons, icons},
+                {<<"annotations">>, annotations, always}
             ])
         end,
         Page
@@ -2086,6 +2086,31 @@ with_optional_fields(Envelope, Handler, Fields) ->
         Envelope,
         Fields
     ).
+
+%% As above, dropping any field the negotiated revision does not define.
+%% A tool whose `outputSchema' cannot be rendered is still listed and
+%% still callable; only the field it cannot carry is left out.
+with_optional_fields(Envelope, Handler, Ctx, Fields) ->
+    Revision = barrel_mcp_ctx:protocol_version(Ctx),
+    lists:foldl(
+        fun({WireKey, HandlerKey, Feature}, Acc) ->
+            case renderable(Feature, Revision) of
+                false -> Acc;
+                true -> with_optional_fields(Acc, Handler, [{WireKey, HandlerKey}])
+            end
+        end,
+        Envelope,
+        Fields
+    ).
+
+renderable(always, _Revision) ->
+    true;
+%% Before anything is negotiated there is no revision to render for, and
+%% dropping every optional field would make a probe look impoverished.
+renderable(_Feature, undefined) ->
+    true;
+renderable(Feature, Revision) ->
+    barrel_mcp_version:has(Feature, Revision).
 
 %%====================================================================
 %% Cursor pagination for `*/list' handlers
