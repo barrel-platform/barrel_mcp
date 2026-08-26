@@ -18,6 +18,7 @@
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([official_suite/1, no_network_dereference/1, bounds_are_enforced/1]).
 -export([invalid_schemas_are_refused_at_registration/1, output_schema_by_revision/1]).
+-export([vendored_metaschema_is_unchanged/1]).
 -export([a_tool/1]).
 
 all() ->
@@ -26,7 +27,8 @@ all() ->
         no_network_dereference,
         bounds_are_enforced,
         invalid_schemas_are_refused_at_registration,
-        output_schema_by_revision
+        output_schema_by_revision,
+        vendored_metaschema_is_unchanged
     ].
 
 a_tool(_Args) -> <<"ok">>.
@@ -102,6 +104,43 @@ bounds_are_enforced(_Config) ->
         lists:seq(1, 200)
     ),
     ?assertMatch({error, too_deep}, barrel_mcp_jsonschema:compile(Deep)).
+
+%% The metaschema decides what counts as a schema, so a swapped file
+%% would quietly change what every tool definition is measured against.
+%% The hashes are recorded in priv/jsonschema/VENDORED.md.
+vendored_metaschema_is_unchanged(_Config) ->
+    Dir = filename:join(code:priv_dir(barrel_mcp), "jsonschema"),
+    lists:foreach(
+        fun({File, Expected}) ->
+            ?assertEqual({File, Expected}, {File, sha256(filename:join(Dir, File))})
+        end,
+        vendored_hashes()
+    ),
+    %% And nothing else is in there posing as one of them.
+    Present = [filename:basename(F) || F <- filelib:wildcard(filename:join(Dir, "*.json"))],
+    ?assertEqual(lists:sort([F || {F, _} <- vendored_hashes()]), lists:sort(Present)).
+
+vendored_hashes() ->
+    [
+        {"meta_applicator.json",
+            <<"bf273b26f9f735b93ece78f2b61b36676e1d122ce78ab37ad5a2e45dfa1ca2b1">>},
+        {"meta_content.json",
+            <<"a10456605b2b5bb12a1b4dcfc0300f02f54d3e8bb3646bed7724583866627682">>},
+        {"meta_core.json", <<"21f79d143fab1f180245c331e5657057045b36794d41fe151e6e4fed65035299">>},
+        {"meta_format-annotation.json",
+            <<"5c79404f831dd905c0f40fefac7c6f3e51bf3729b4a876a5c2020178d97f3bcc">>},
+        {"meta_meta-data.json",
+            <<"c664d438a84d58889c8edecd248ce2f945a4bc0e3b087323b11303dc136abfbe">>},
+        {"meta_unevaluated.json",
+            <<"fc99f32188da41689a9382af174dd42e8b255e4374965c157b8286556b4ab2bc">>},
+        {"meta_validation.json",
+            <<"e921c5b79264d3689af01c1af1ffdf692e09f1c45df90a0f08eb7288c9acdeab">>},
+        {"schema.json", <<"41da76f5afb7ce062d248f762463a92f7ca47e4e0f905b224ba6afeef91ded0f">>}
+    ].
+
+sha256(Path) ->
+    {ok, Bin} = file:read_file(Path),
+    string:lowercase(binary:encode_hex(crypto:hash(sha256, Bin))).
 
 %% Instance validation does not prove schemas are rejected, so the entry
 %% points get their own matrix: anything that is not a schema has to be

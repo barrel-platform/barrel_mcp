@@ -90,7 +90,9 @@ request({put_chars, _Enc, M, F, A}, From, ReplyAs, S) ->
     reply(From, ReplyAs, ok),
     S;
 request({get_chars, _Enc, _Prompt, N}, From, ReplyAs, S) ->
-    serve(S#{pending := {From, ReplyAs, N}});
+    serve(S#{pending := {From, ReplyAs, {chars, N}}});
+request({get_line, _Enc, _Prompt}, From, ReplyAs, S) ->
+    serve(S#{pending := {From, ReplyAs, line}});
 request(_Other, From, ReplyAs, S) ->
     reply(From, ReplyAs, {error, request}),
     S.
@@ -105,7 +107,7 @@ emit(#{owner := Owner}, Chars) ->
 %% like it works here and deadlock against a real pipe.
 serve(#{pending := undefined} = S) ->
     S;
-serve(#{pending := {From, ReplyAs, N}, in := In, closed := Closed} = S) ->
+serve(#{pending := {From, ReplyAs, {chars, N}}, in := In, closed := Closed} = S) ->
     case {byte_size(In) >= N, Closed, In} of
         {true, _, _} ->
             <<Chunk:N/binary, Rest/binary>> = In,
@@ -118,6 +120,22 @@ serve(#{pending := {From, ReplyAs, N}, in := In, closed := Closed} = S) ->
             reply(From, ReplyAs, In),
             S#{pending := undefined, in := <<>>};
         {false, false, _} ->
+            S
+    end;
+%% `get_line' blocks until a newline or EOF, and the newline it returns
+%% is part of the line.
+serve(#{pending := {From, ReplyAs, line}, in := In, closed := Closed} = S) ->
+    case binary:split(In, <<"\n">>) of
+        [Line, Rest] ->
+            reply(From, ReplyAs, <<Line/binary, "\n">>),
+            S#{pending := undefined, in := Rest};
+        [<<>>] when Closed ->
+            reply(From, ReplyAs, eof),
+            S#{pending := undefined};
+        [Trailing] when Closed ->
+            reply(From, ReplyAs, Trailing),
+            S#{pending := undefined, in := <<>>};
+        _ ->
             S
     end.
 

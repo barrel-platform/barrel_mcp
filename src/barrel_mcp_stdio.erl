@@ -701,55 +701,49 @@ note_drop(#state{dropped = N, last_drop_log = Last} = State) ->
 %% for the coordinator's ack bounds how far ahead it may read; it never
 %% waits on handler code.
 reader_init(Coordinator) ->
-    reader_loop(Coordinator, <<>>, max_frame_bytes()).
+    reader_loop(Coordinator, max_frame_bytes()).
 
-reader_loop(Coordinator, Buf, Max) ->
-    case read_frame(Buf, Max) of
+reader_loop(Coordinator, Max) ->
+    case read_frame(Max) of
         eof ->
             Coordinator ! stdio_eof;
         {error, Reason} ->
             Coordinator ! {stdio_error, Reason};
-        {too_large, _Rest} ->
+        {too_large, _Line} ->
             Coordinator ! stdio_frame_too_large;
-        {ok, Line, Rest} ->
+        {ok, Line} ->
             Coordinator ! {stdio_frame, Line},
             receive
-                stdio_ack -> reader_loop(Coordinator, Rest, Max)
+                stdio_ack -> reader_loop(Coordinator, Max)
             end
     end.
 
-%% `io:get_line/2' returns the whole line however long, so a cap applied
-%% to its result comes after the allocation it was meant to prevent.
+%% One line per read. `io:get_chars/3' would let the frame cap apply
+%% before the allocation, but it blocks until it has the full count it
+%% was asked for: a request smaller than the chunk is never delivered,
+%% because the peer is waiting for an answer before it writes again.
+%% Asking for one character at a time does work and costs a round trip
+%% per byte, which measured at about sixteen seconds for a one-megabyte
+%% message.
 %%
-%% The reads are one character at a time because `io:get_chars/3' blocks
-%% until it has the full count: ask for a chunk and a request smaller
-%% than the chunk is never delivered, because the peer is waiting for an
-%% answer before it writes again. One round trip per byte is the price
-%% of framing a stream this API only exposes by count.
-read_frame(Buf, Max) ->
-    case binary:match(Buf, <<"\n">>) of
-        %% The length of the frame, not merely of what accumulated
-        %% without a newline: anything shorter than one read would
-        %% otherwise go unmeasured.
-        {Pos, 1} when Pos > Max ->
-            {too_large, Buf};
-        {Pos, 1} ->
-            <<Line:Pos/binary, _Nl:1/binary, Rest/binary>> = Buf,
-            {ok, Line, Rest};
-        nomatch when byte_size(Buf) > Max ->
-            {too_large, Buf};
-        nomatch ->
-            case io:get_chars(standard_io, '', 1) of
-                eof when Buf =:= <<>> -> eof;
-                %% Trailing frame with no newline before EOF.
-                eof -> {ok, Buf, <<>>};
-                {error, _} = Err -> Err;
-                Data -> read_more(Buf, to_binary(Data), Max)
+%% So the cap is applied to the line after it arrives rather than during
+%% the read. The exposure that buys is one oversized frame held in
+%% memory before it is refused, and on this transport the peer is the
+%% process that launched us or that we launched: it can end us far more
+%% cheaply than by sending a long line.
+read_frame(Max) ->
+    case io:get_line(standard_io, '') of
+        eof ->
+            eof;
+        {error, _} = Err ->
+            Err;
+        Data ->
+            Line = string:trim(to_binary(Data), trailing, "\n"),
+            case byte_size(Line) > Max of
+                true -> {too_large, Line};
+                false -> {ok, Line}
             end
     end.
-
-read_more(Buf, Data, Max) ->
-    read_frame(<<Buf/binary, Data/binary>>, Max).
 
 %% The device is set to `binary' mode, but a caller that did not set it
 %% would get a list back.
