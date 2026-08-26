@@ -495,8 +495,17 @@ resource_not_found_code(Ctx) ->
 ]).
 
 %% Add the freshness hints, unless the handler already set its own.
+%%
+%% Never on a multi round-trip retry: a result produced from
+%% `inputResponses' or a `requestState' "MUST NOT be cached, as they
+%% depend on inputs that are not part of the cache key"
+%% (2026-07-28/server/utilities/caching.mdx:34).
 with_cache_hints(Method, #{<<"result">> := Result} = Envelope, Ctx) when is_map(Result) ->
-    case barrel_mcp_ctx:is_modern(Ctx) andalso lists:member(Method, ?CACHEABLE_METHODS) of
+    Cacheable =
+        barrel_mcp_ctx:is_modern(Ctx) andalso
+            lists:member(Method, ?CACHEABLE_METHODS) andalso
+            not retried_with_input(Ctx),
+    case Cacheable of
         true -> Envelope#{<<"result">> => cacheable(Result)};
         false -> Envelope
     end;
@@ -514,8 +523,15 @@ cacheable(Result) ->
         false -> WithTtl#{<<"cacheScope">> => cache_scope()}
     end.
 
+retried_with_input(Ctx) ->
+    map_size(barrel_mcp_ctx:input_responses(Ctx)) > 0 orelse
+        barrel_mcp_ctx:request_state(Ctx) =/= undefined.
+
+%% "Servers MUST provide a `ttlMs' value that is >= 0"
+%% (caching.mdx:60), so a misconfigured negative is floored rather than
+%% put on the wire.
 cache_ttl_ms() ->
-    application:get_env(barrel_mcp, cache_ttl_ms, 60000).
+    max(0, application:get_env(barrel_mcp, cache_ttl_ms, 60000)).
 
 %% `private' by default, deliberately. `public' lets a shared
 %% intermediary serve one caller's response to another, which is only
@@ -1287,7 +1303,7 @@ handle_request(<<"server/discover">>, _Params, Id, _Ctx) ->
     Base = #{
         <<"supportedVersions">> => advertised_versions(),
         <<"capabilities">> => maybe_advertise_completions(modern_capabilities()),
-        <<"ttlMs">> => application:get_env(barrel_mcp, discover_ttl_ms, 60000),
+        <<"ttlMs">> => max(0, application:get_env(barrel_mcp, discover_ttl_ms, 60000)),
         <<"cacheScope">> =>
             application:get_env(barrel_mcp, discover_cache_scope, <<"public">>)
     },
@@ -1965,7 +1981,7 @@ resource_freshness(Type, Name, Result) ->
     case barrel_mcp_registry:find(Type, Name) of
         {ok, Handler} ->
             case maps:get(cache_ttl_ms, Handler, undefined) of
-                Ttl when is_integer(Ttl) -> Result#{<<"ttlMs">> => Ttl};
+                Ttl when is_integer(Ttl) -> Result#{<<"ttlMs">> => max(0, Ttl)};
                 _ -> Result
             end;
         error ->

@@ -41,6 +41,7 @@ era_test_() ->
         {"server/discover omits absent instructions", fun discover_no_instructions/0},
         {"server/discover carries instructions when set", fun discover_instructions/0},
         {"Cacheable results carry freshness hints", fun cache_hints/0},
+        {"A multi round-trip retry carries none", fun cache_hints_not_on_retries/0},
         {"Legacy results carry none", fun cache_hints_legacy/0},
         {"Freshness hints are configurable", fun cache_hints_configurable/0},
         {"Non-cacheable methods carry none", fun cache_hints_only_where_defined/0},
@@ -437,6 +438,37 @@ cacheable_methods() ->
         {<<"resources/templates/list">>, #{}},
         {<<"resources/read">>, #{<<"uri">> => <<"file:///present">>}}
     ].
+
+%% "Results produced by retrying a request through the multi round-trip
+%% requests mechanism, that is, requests carrying inputResponses or
+%% requestState, MUST NOT be cached, as they depend on inputs that are
+%% not part of the cache key" (2026-07-28/.../caching.mdx:34).
+cache_hints_not_on_retries() ->
+    Uri = <<"file:///present">>,
+    Retry = fun(Params) ->
+        result_of(modern(<<"resources/read">>, Params#{<<"uri">> => Uri}))
+    end,
+    %% The same request without either field is cacheable, so what
+    %% follows is the retry and not the method.
+    ?assert(maps:is_key(<<"ttlMs">>, Retry(#{}))),
+
+    WithResponses = Retry(#{
+        <<"inputResponses">> => #{<<"k">> => #{<<"action">> => <<"accept">>}}
+    }),
+    ?assertNot(maps:is_key(<<"ttlMs">>, WithResponses)),
+    ?assertNot(maps:is_key(<<"cacheScope">>, WithResponses)),
+
+    %% A real sealed state, since a forged one is refused before there
+    %% is a result to decorate.
+    Sealed = barrel_mcp_request_state:seal(
+        #{user => asked, methods => #{}},
+        barrel_mcp_request_state:binding(
+            anonymous, <<"resources/read">>, #{<<"uri">> => Uri}
+        )
+    ),
+    WithState = Retry(#{<<"requestState">> => Sealed}),
+    ?assertNot(maps:is_key(<<"ttlMs">>, WithState)),
+    ?assertNot(maps:is_key(<<"cacheScope">>, WithState)).
 
 cache_hints() ->
     lists:foreach(

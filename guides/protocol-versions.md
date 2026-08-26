@@ -174,7 +174,9 @@ in that range that the spec does not define.
 
 - Nothing was removed in 3.0. Every legacy path still works, and a 2.3.0
   deployment upgrades without configuration changes.
-- The HTTP+SSE transport from `2024-11-05` is still not implemented. Legacy
-  support here means Streamable HTTP carrying an older revision.
+- The HTTP+SSE transport from `2024-11-05` is off unless you configure it.
+  Pass `sse_path` and `sse_message_path` to `start_http_stream/1` to serve it
+  alongside Streamable HTTP on the same listener; without them a legacy client
+  reaches you over Streamable HTTP carrying an older revision.
 - `barrel_mcp_version` is the only place that orders revisions. Nothing else in
   the library compares version binaries, and neither should your code.

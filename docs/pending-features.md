@@ -14,8 +14,9 @@ Where to look instead:
   [Protocol Versions](../guides/protocol-versions.md).
 - **What the specification deprecated**, and what replaces it: the
   Deprecated section of [`CHANGELOG.md`](../CHANGELOG.md).
-- **What is deliberately out of scope**: the HTTP+SSE transport from
-  `2024-11-05`, which the specification itself deprecated, and durable
-  multi-node task storage. Tasks stay node-local.
+- **What is deliberately out of scope**: durable multi-node task
+  storage. Tasks stay node-local. The JSON Schema validator does not
+  implement ECMAScript regex property escapes or `$vocabulary` switching
+  keyword sets off; both are recorded in the schema suite's skip list.
 
 If you want something prioritised, open an issue.
