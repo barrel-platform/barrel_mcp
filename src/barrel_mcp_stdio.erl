@@ -64,10 +64,8 @@
 
 -include("barrel_mcp.hrl").
 
-%% Largest single stdio frame accepted from a peer, and the chunk the
-%% reader pulls at a time.
+%% Largest single stdio frame accepted from a peer.
 -define(DEFAULT_MAX_FRAME_BYTES, 16 * 1024 * 1024).
--define(READ_CHUNK_BYTES, 65536).
 
 %% Requests executing at once, and how many may wait behind them.
 -define(DEFAULT_MAX_WORKERS, 8).
@@ -722,6 +720,12 @@ reader_loop(Coordinator, Buf, Max) ->
 
 %% `io:get_line/2' returns the whole line however long, so a cap applied
 %% to its result comes after the allocation it was meant to prevent.
+%%
+%% The reads are one character at a time because `io:get_chars/3' blocks
+%% until it has the full count: ask for a chunk and a request smaller
+%% than the chunk is never delivered, because the peer is waiting for an
+%% answer before it writes again. One round trip per byte is the price
+%% of framing a stream this API only exposes by count.
 read_frame(Buf, Max) ->
     case binary:match(Buf, <<"\n">>) of
         %% The length of the frame, not merely of what accumulated
@@ -735,15 +739,22 @@ read_frame(Buf, Max) ->
         nomatch when byte_size(Buf) > Max ->
             {too_large, Buf};
         nomatch ->
-            Chunk = min(?READ_CHUNK_BYTES, Max - byte_size(Buf) + 1),
-            case io:get_chars(standard_io, '', Chunk) of
+            case io:get_chars(standard_io, '', 1) of
                 eof when Buf =:= <<>> -> eof;
                 %% Trailing frame with no newline before EOF.
                 eof -> {ok, Buf, <<>>};
                 {error, _} = Err -> Err;
-                Data -> read_frame(<<Buf/binary, Data/binary>>, Max)
+                Data -> read_more(Buf, to_binary(Data), Max)
             end
     end.
+
+read_more(Buf, Data, Max) ->
+    read_frame(<<Buf/binary, Data/binary>>, Max).
+
+%% The device is set to `binary' mode, but a caller that did not set it
+%% would get a list back.
+to_binary(B) when is_binary(B) -> B;
+to_binary(L) when is_list(L) -> list_to_binary(L).
 
 %%====================================================================
 %% Writer

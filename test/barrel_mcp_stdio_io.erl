@@ -99,20 +99,26 @@ emit(#{owner := Owner}, Chars) ->
     Owner ! {stdout, iolist_to_binary(Chars)},
     ok.
 
+%% A real `get_chars' blocks until it has the full count, and only
+%% returns short at EOF. Handing back whatever happens to be buffered
+%% would let a reader that asks for more than one message at a time look
+%% like it works here and deadlock against a real pipe.
 serve(#{pending := undefined} = S) ->
     S;
 serve(#{pending := {From, ReplyAs, N}, in := In, closed := Closed} = S) ->
-    case In of
-        <<>> when Closed ->
+    case {byte_size(In) >= N, Closed, In} of
+        {true, _, _} ->
+            <<Chunk:N/binary, Rest/binary>> = In,
+            reply(From, ReplyAs, Chunk),
+            S#{pending := undefined, in := Rest};
+        {false, true, <<>>} ->
             reply(From, ReplyAs, eof),
             S#{pending := undefined};
-        <<>> ->
-            S;
-        _ ->
-            Take = min(N, byte_size(In)),
-            <<Chunk:Take/binary, Rest/binary>> = In,
-            reply(From, ReplyAs, Chunk),
-            S#{pending := undefined, in := Rest}
+        {false, true, _} ->
+            reply(From, ReplyAs, In),
+            S#{pending := undefined, in := <<>>};
+        {false, false, _} ->
+            S
     end.
 
 reply(From, ReplyAs, Reply) ->

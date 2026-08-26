@@ -30,7 +30,8 @@
     notifications_are_never_answered/1,
     oversized_frame_closes_the_server/1,
     subscriptions_are_served/1,
-    eof_stops_the_server/1
+    eof_stops_the_server/1,
+    client_subscribes_over_real_stdio/1
 ]).
 
 -export([echo_tool/1, slow_tool/1, a_tool/1]).
@@ -49,7 +50,8 @@ all() ->
         notifications_are_never_answered,
         oversized_frame_closes_the_server,
         subscriptions_are_served,
-        eof_stops_the_server
+        eof_stops_the_server,
+        client_subscribes_over_real_stdio
     ].
 
 init_per_suite(Config) ->
@@ -233,6 +235,75 @@ eof_stops_the_server(_Config) ->
     after 5000 -> error(server_stayed_up)
     end,
     barrel_mcp_stdio_io:stop(Dev).
+
+%% Both ends over a real pipe, in a child OS process. The fake device
+%% cannot show that the reader frames an actual stream, and it was
+%% hiding a reader that only delivered a frame at EOF.
+client_subscribes_over_real_stdio(_Config) ->
+    {ok, Client} = barrel_mcp_client:start(#{
+        transport => {stdio, #{command => erl_executable(), args => child_args()}},
+        protocol_version => ?MODERN,
+        %% A cold VM plus the application answers later than a server
+        %% that is already up.
+        probe_timeout => 30000
+    }),
+    try
+        wait_until(fun() -> is_ready(Client) end, 30000),
+        ?assertEqual({ok, ?MODERN}, barrel_mcp_client:protocol_version(Client)),
+
+        {ok, Tools} = barrel_mcp_client:list_tools(Client),
+        ?assert(lists:member(<<"echo">>, [maps:get(<<"name">>, T) || T <- Tools])),
+
+        {ok, _} = barrel_mcp_client:subscribe(Client, <<"file:///watched">>),
+        %% The tool runs on the server and makes it emit the update, so
+        %% the notification and this call's response share one channel.
+        {ok, _} = barrel_mcp_client:call_tool(Client, <<"touch">>, #{}),
+        receive
+            {mcp_resource_updated, <<"file:///watched">>, _} -> ok
+        after 15000 -> error(no_resource_update)
+        end,
+
+        {ok, _} = barrel_mcp_client:unsubscribe(Client, <<"file:///watched">>),
+        {ok, Result} = barrel_mcp_client:call_tool(
+            Client, <<"echo">>, #{<<"input">> => <<"after">>}
+        ),
+        [Block] = maps:get(<<"content">>, Result),
+        ?assertEqual(<<"Echo: after">>, maps:get(<<"text">>, Block))
+    after
+        try
+            barrel_mcp_client:close(Client)
+        catch
+            _:_ -> ok
+        end
+    end.
+
+erl_executable() ->
+    filename:join([code:root_dir(), "bin", "erl"]).
+
+%% Logging has to go to stderr: the default handler writes stdout, which
+%% is the wire. The paths are reversed because each `-pa' prepends, so
+%% feeding them in order would leave the child searching this node's
+%% path backwards and picking up whichever profile was listed last.
+child_args() ->
+    Dirs = lists:reverse([D || D <- code:get_path(), filelib:is_dir(D)]),
+    Paths = lists:append([["-pa", D] || D <- Dirs]),
+    [
+        "-noshell",
+        "-boot",
+        "no_dot_erlang",
+        "-kernel",
+        "logger",
+        "[{handler,default,logger_std_h,#{config=>#{type=>standard_error}}}]"
+    ] ++ Paths ++
+        ["-eval", "barrel_mcp_stdio_child:start()"].
+
+is_ready(Pid) ->
+    try barrel_mcp_client:protocol_version(Pid) of
+        {ok, V} when is_binary(V) -> true;
+        _ -> false
+    catch
+        _:_ -> false
+    end.
 
 %%====================================================================
 %% Helpers
