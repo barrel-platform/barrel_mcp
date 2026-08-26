@@ -21,7 +21,21 @@
 
 -include("barrel_mcp.hrl").
 
--export([is_known/1, is_at_least/2, era/1, all/0, feature/2]).
+-export([is_known/1, is_at_least/2, era/1, all/0, feature/2, has/2]).
+
+%% Named so a caller cannot gate on a feature that does not exist: a
+%% typo is a function_clause here rather than a silent `disabled'.
+-type feature() ::
+    batch_receive
+    | roots_list_changed
+    | tasks
+    | tasks_extension
+    | output_schema
+    | output_schema_any_root
+    | elicitation
+    | elicitation_url.
+
+-export_type([feature/0]).
 
 %% @doc Whether this is a revision the library knows about at all.
 -spec is_known(binary()) -> boolean().
@@ -92,7 +106,7 @@ index_of(_Version, [], _N) -> -1.
 %% for a revision that has not been negotiated yet answers `disabled':
 %% we cannot know what the peer speaks, and guessing wrong on the
 %% permissive side is what a limit exists to prevent.
--spec feature(atom(), binary() | undefined) -> enabled | compatibility | disabled.
+-spec feature(feature(), binary() | undefined) -> enabled | compatibility | disabled.
 feature(_Feature, undefined) ->
     disabled;
 %% JSON-RPC batches. 2024-11-05 says nothing about them, so accepting
@@ -103,5 +117,64 @@ feature(batch_receive, <<"2025-03-26">>) ->
     enabled;
 feature(batch_receive, _Revision) ->
     disabled;
+%% Removed by 2026-07-28, which has no roots at all.
+feature(roots_list_changed, <<"2026-07-28">>) ->
+    disabled;
+feature(roots_list_changed, Revision) ->
+    known(Revision);
+%% Core from 2025-11-25; 2026-07-28 moved them into an extension, which
+%% is negotiated per request rather than by revision.
+feature(tasks, <<"2025-11-25">>) ->
+    enabled;
+feature(tasks, <<"2026-07-28">>) ->
+    disabled;
+feature(tasks, _Revision) ->
+    disabled;
+feature(tasks_extension, <<"2026-07-28">>) ->
+    enabled;
+feature(tasks_extension, _Revision) ->
+    disabled;
+%% `outputSchema' and `structuredContent' arrived at 2025-06-18, object
+%% rooted; 2026-07-28 allows any root.
+feature(output_schema, <<"2024-11-05">>) ->
+    disabled;
+feature(output_schema, <<"2025-03-26">>) ->
+    disabled;
+feature(output_schema, Revision) ->
+    known(Revision);
+feature(output_schema_any_root, <<"2026-07-28">>) ->
+    enabled;
+feature(output_schema_any_root, _Revision) ->
+    disabled;
+%% Elicitation arrived at 2025-06-18 in form mode; URL mode at
+%% 2025-11-25.
+feature(elicitation, <<"2024-11-05">>) ->
+    disabled;
+feature(elicitation, <<"2025-03-26">>) ->
+    disabled;
+feature(elicitation, Revision) ->
+    known(Revision);
+feature(elicitation_url, <<"2024-11-05">>) ->
+    disabled;
+feature(elicitation_url, <<"2025-03-26">>) ->
+    disabled;
+feature(elicitation_url, <<"2025-06-18">>) ->
+    disabled;
+feature(elicitation_url, Revision) ->
+    known(Revision);
 feature(_Feature, _Revision) ->
     disabled.
+
+%% A revision we do not recognise gets nothing, the same as one that
+%% has not been negotiated.
+known(Revision) ->
+    case is_known(Revision) of
+        true -> enabled;
+        false -> disabled
+    end.
+
+%% @doc {@link feature/2} as a boolean, for the callers that treat
+%% `compatibility' as yes.
+-spec has(feature(), binary() | undefined) -> boolean().
+has(Feature, Revision) ->
+    feature(Feature, Revision) =/= disabled.

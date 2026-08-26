@@ -109,3 +109,103 @@ latest_and_oldest_bracket_the_set_test() ->
 handshake_offer_is_never_modern_test() ->
     ?assertNot(lists:member(?MCP_LATEST_LEGACY_VERSION, ?MCP_MODERN_VERSIONS)),
     ?assertNot(lists:member(?MCP_LATEST_MODERN_VERSION, ?MCP_LEGACY_VERSIONS)).
+
+%%====================================================================
+%% Feature gating
+%%====================================================================
+
+%% The whole table, spelled out. Several of these features are not
+%% monotonic, so a threshold on `is_at_least/2' cannot express them and
+%% the only honest check is every cell.
+feature_table_test() ->
+    Table = [
+        {batch_receive, [
+            {<<"2024-11-05">>, compatibility},
+            {<<"2025-03-26">>, enabled},
+            {<<"2025-06-18">>, disabled},
+            {<<"2025-11-25">>, disabled},
+            {<<"2026-07-28">>, disabled}
+        ]},
+        {roots_list_changed, [
+            {<<"2024-11-05">>, enabled},
+            {<<"2025-03-26">>, enabled},
+            {<<"2025-06-18">>, enabled},
+            {<<"2025-11-25">>, enabled},
+            {<<"2026-07-28">>, disabled}
+        ]},
+        {tasks, [
+            {<<"2024-11-05">>, disabled},
+            {<<"2025-03-26">>, disabled},
+            {<<"2025-06-18">>, disabled},
+            {<<"2025-11-25">>, enabled},
+            {<<"2026-07-28">>, disabled}
+        ]},
+        {tasks_extension, [
+            {<<"2025-11-25">>, disabled},
+            {<<"2026-07-28">>, enabled}
+        ]},
+        {output_schema, [
+            {<<"2024-11-05">>, disabled},
+            {<<"2025-03-26">>, disabled},
+            {<<"2025-06-18">>, enabled},
+            {<<"2025-11-25">>, enabled},
+            {<<"2026-07-28">>, enabled}
+        ]},
+        {output_schema_any_root, [
+            {<<"2025-06-18">>, disabled},
+            {<<"2025-11-25">>, disabled},
+            {<<"2026-07-28">>, enabled}
+        ]},
+        {elicitation, [
+            {<<"2024-11-05">>, disabled},
+            {<<"2025-03-26">>, disabled},
+            {<<"2025-06-18">>, enabled},
+            {<<"2025-11-25">>, enabled},
+            {<<"2026-07-28">>, enabled}
+        ]},
+        {elicitation_url, [
+            {<<"2025-06-18">>, disabled},
+            {<<"2025-11-25">>, enabled},
+            {<<"2026-07-28">>, enabled}
+        ]}
+    ],
+    lists:foreach(
+        fun({Feature, Rows}) ->
+            lists:foreach(
+                fun({Revision, Expected}) ->
+                    ?assertEqual(
+                        {Feature, Revision, Expected},
+                        {Feature, Revision, barrel_mcp_version:feature(Feature, Revision)}
+                    )
+                end,
+                Rows
+            )
+        end,
+        Table
+    ).
+
+%% Nothing is granted to a revision we cannot place, or to one that has
+%% not been negotiated.
+unknown_revisions_have_no_features_test() ->
+    lists:foreach(
+        fun(Feature) ->
+            ?assertEqual(disabled, barrel_mcp_version:feature(Feature, undefined)),
+            ?assertEqual(disabled, barrel_mcp_version:feature(Feature, <<"2099-01-01">>))
+        end,
+        [
+            batch_receive,
+            roots_list_changed,
+            tasks,
+            tasks_extension,
+            output_schema,
+            output_schema_any_root,
+            elicitation,
+            elicitation_url
+        ]
+    ).
+
+%% `compatibility' counts as having the feature.
+has_treats_compatibility_as_yes_test() ->
+    ?assertEqual(compatibility, barrel_mcp_version:feature(batch_receive, <<"2024-11-05">>)),
+    ?assert(barrel_mcp_version:has(batch_receive, <<"2024-11-05">>)),
+    ?assertNot(barrel_mcp_version:has(batch_receive, <<"2025-06-18">>)).

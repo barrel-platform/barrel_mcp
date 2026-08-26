@@ -61,6 +61,11 @@
 %%       went away lingers: nothing reads the socket while a stream is
 %%       held open, so a client's disconnect surfaces on the next
 %%       write. Raise it and dropped subscribers are reaped later.</li>
+%%   <li>`sse_path' and `sse_message_path' — serve the deprecated
+%%       2024-11-05 HTTP+SSE transport on these two routes as well,
+%%       for clients that predate Streamable HTTP. Both must be given;
+%%       neither is served otherwise, because a GET on one of them and
+%%       a Streamable GET are indistinguishable.</li>
 %% </ul>
 -spec start(Opts) -> {ok, pid()} | {error, term()} when
     Opts :: #{
@@ -72,6 +77,8 @@
         allowed_origins => [binary()] | any,
         allow_missing_origin => boolean(),
         subscription_keepalive_ms => pos_integer(),
+        sse_path => binary(),
+        sse_message_path => binary(),
         max_connections => pos_integer()
     }.
 start(Opts) ->
@@ -102,7 +109,7 @@ start(Opts) ->
             AuthConfig = barrel_mcp_http_engine:inject_resource_metadata_url(
                 AuthConfig0, ResourceMetadata
             ),
-            EngineConfig = #{
+            EngineConfig0 = #{
                 mode => stream,
                 auth_config => AuthConfig,
                 session_enabled => SessionEnabled,
@@ -116,6 +123,7 @@ start(Opts) ->
                     application:get_env(barrel_mcp, subscription_keepalive_ms, 15000)
                 )
             },
+            EngineConfig = maps:merge(EngineConfig0, legacy_sse_routes(Opts)),
             ListenOpts = maps:merge(
                 #{port => Port, ip => Ip, ssl => normalize_ssl(Opts)},
                 maps:with([max_connections, acceptors], Opts)
@@ -123,6 +131,16 @@ start(Opts) ->
             barrel_mcp_listener_sup:start_listener(
                 ?STREAM_LISTENER, ListenOpts, EngineConfig
             )
+    end.
+
+%% Both routes or neither: half of the pair cannot serve the transport,
+%% and a lone GET route would shadow nothing useful.
+legacy_sse_routes(Opts) ->
+    case {maps:get(sse_path, Opts, undefined), maps:get(sse_message_path, Opts, undefined)} of
+        {Sse, Post} when is_binary(Sse), is_binary(Post) ->
+            #{sse_path => Sse, sse_message_path => Post};
+        _ ->
+            #{}
     end.
 
 %% @doc Stop the Streamable HTTP server.

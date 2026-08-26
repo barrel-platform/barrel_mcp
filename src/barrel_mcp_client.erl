@@ -115,7 +115,12 @@
         %% `Origin', so pass one here:
         %%   `http_headers => [{<<"origin">>, <<"https://app.example">>}]'
         %% Ignored by the stdio transport.
-        http_headers => [{binary() | string(), binary() | string()}]
+        http_headers => [{binary() | string(), binary() | string()}],
+        %% Where the deprecated 2024-11-05 SSE stream lives, if the
+        %% server hosts it somewhere other than the URL we probe. Used
+        %% only after a Streamable POST is refused in a way that says
+        %% the endpoint is not there; a path is never guessed.
+        legacy_sse_url => binary()
     }.
 
 -export_type([connect_spec/0]).
@@ -1616,7 +1621,8 @@ open_transport(#data{spec = Spec} = Data) ->
                         url => Url,
                         auth => Auth,
                         open_event_stream => true,
-                        headers => maps:get(http_headers, Spec, [])
+                        headers => maps:get(http_headers, Spec, []),
+                        legacy_sse_url => maps:get(legacy_sse_url, Spec, undefined)
                     },
                     case barrel_mcp_client_http:connect(self(), Opts) of
                         {ok, Pid} ->

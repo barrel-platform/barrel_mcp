@@ -86,6 +86,14 @@
     %% delivers the same traffic on the response to a
     %% `subscriptions/listen' POST.
     sse_mode = get :: get | {post, binary()},
+    %% Set once a Streamable POST is answered in a way only a
+    %% 2024-11-05 server answers. From then on the long-lived GET is the
+    %% inbound channel and sends go to the endpoint it named.
+    legacy_sse = false :: boolean(),
+    legacy_sse_url :: binary() | undefined,
+    endpoint :: binary() | undefined,
+    %% Sends issued before the endpoint event arrives.
+    queued = [] :: [binary()],
     %% Per-tool `x-mcp-header' bindings, learned from `tools/list'.
     %% Held here rather than passed per send: the headers are derived
     %% from the body about to go out, and this is where that happens.
@@ -174,7 +182,8 @@ init({Owner, Opts}) ->
         url = Url,
         extra_headers = Headers,
         auth = Auth,
-        sse_enabled = SseEnabled
+        sse_enabled = SseEnabled,
+        legacy_sse_url = maps:get(legacy_sse_url, Opts, undefined)
     }}.
 
 handle_call({send, Body}, _From, State) ->
@@ -322,12 +331,15 @@ code_change(_OldVsn, State, _Extra) ->
 %% POST request lifecycle
 %%====================================================================
 
+start_post(Body, _Retried, #state{legacy_sse = true, endpoint = undefined} = State) ->
+    %% Nowhere to send it yet: the endpoint event has not arrived.
+    {ok, State#state{queued = State#state.queued ++ [Body]}};
 start_post(Body, Retried, State) ->
     Headers = build_headers(State) ++ metadata_headers(Body, State#state.tool_headers),
     case
         hackney:request(
             post,
-            State#state.url,
+            post_url(State),
             Headers,
             Body,
             [async, {recv_timeout, infinity}]
@@ -407,15 +419,75 @@ finalize_request(
 %% JSON-RPC message means the peer stopped talking to us.
 finalize_request(
     Ref,
-    #req{status = Status, buffer = Buf},
+    #req{status = Status, buffer = Buf, body = Body},
     #state{requests = Reqs, owner = Owner} = State
 ) ->
-    _ =
-        case is_jsonrpc(Buf) of
-            true -> Owner ! {mcp_in, self(), Buf};
-            false -> Owner ! {mcp_closed, self(), {http_error, Status, Buf}}
+    State1 = State#state{requests = maps:remove(Ref, Reqs)},
+    case is_jsonrpc(Buf) of
+        true ->
+            Owner ! {mcp_in, self(), Buf},
+            State1;
+        false ->
+            case legacy_status(Status) andalso not State1#state.legacy_sse of
+                true -> fall_back_to_legacy_sse(Body, State1);
+                false -> settle_http_error(Status, Buf, State1)
+            end
+    end.
+
+settle_http_error(Status, Buf, #state{owner = Owner} = State) ->
+    Owner ! {mcp_closed, self(), {http_error, Status, Buf}},
+    State.
+
+%% "A 400, 404 or 405 ... indicates the server does not host the
+%% Streamable HTTP endpoint" (2026-07-28/.../streamable-http.mdx:274),
+%% which leaves the 2024-11-05 pair as the thing it does host.
+legacy_status(400) -> true;
+legacy_status(404) -> true;
+legacy_status(405) -> true;
+legacy_status(_Status) -> false.
+
+%% The URL we probed, or one named explicitly. Never a path guessed
+%% from the first: a server that does not host the endpoint has told us
+%% nothing about where anything else lives.
+fall_back_to_legacy_sse(Body, State) ->
+    Url =
+        case State#state.legacy_sse_url of
+            undefined -> State#state.url;
+            Configured -> Configured
         end,
-    State#state{requests = maps:remove(Ref, Reqs)}.
+    State1 = stop_stream(State),
+    start_stream(State1#state{
+        legacy_sse = true,
+        sse_enabled = true,
+        sse_mode = get,
+        url = Url,
+        endpoint = undefined,
+        queued = [Body]
+    }).
+
+post_url(#state{legacy_sse = true, endpoint = Endpoint, url = Url}) when
+    Endpoint =/= undefined
+->
+    resolve(Url, Endpoint);
+post_url(#state{url = Url}) ->
+    Url.
+
+%% The endpoint is a URI reference against the stream's URL, and is
+%% usually just a path.
+resolve(Base, <<"http://", _/binary>> = Absolute) ->
+    _ = Base,
+    Absolute;
+resolve(Base, <<"https://", _/binary>> = Absolute) ->
+    _ = Base,
+    Absolute;
+resolve(Base, Reference) ->
+    #{scheme := Scheme, host := Host} = Parsed = uri_string:parse(Base),
+    Port =
+        case maps:get(port, Parsed, undefined) of
+            undefined -> <<>>;
+            P -> <<":", (integer_to_binary(P))/binary>>
+        end,
+    <<Scheme/binary, "://", Host/binary, Port/binary, Reference/binary>>.
 
 is_jsonrpc(<<>>) ->
     false;
@@ -560,6 +632,12 @@ trim_leading_space(B) -> B.
 
 forward_sse_events([], State) ->
     State;
+%% "the server MUST send an `endpoint' event containing a URI for the
+%% client to use for sending messages"
+%% (2024-11-05/basic/transports.mdx:67). It is addressed to us, not to
+%% the owner.
+forward_sse_events([{_Id, <<"endpoint">>, Data} | Rest], #state{legacy_sse = true} = State) ->
+    forward_sse_events(Rest, flush_queued(State#state{endpoint = string:trim(Data)}));
 forward_sse_events([{Id, _Ev, Data} | Rest], #state{owner = Owner} = State) ->
     case Data of
         <<>> ->
@@ -574,6 +652,16 @@ forward_sse_events([{Id, _Ev, Data} | Rest], #state{owner = Owner} = State) ->
             _ -> State#state{sse_last_event_id = Id}
         end,
     forward_sse_events(Rest, State1).
+
+flush_queued(#state{queued = []} = State) ->
+    State;
+flush_queued(#state{queued = [Body | Rest]} = State) ->
+    State1 =
+        case start_post(Body, false, State#state{queued = Rest}) of
+            {ok, S} -> S;
+            {error, _} -> State#state{queued = Rest}
+        end,
+    flush_queued(State1).
 
 %%====================================================================
 %% Header helpers

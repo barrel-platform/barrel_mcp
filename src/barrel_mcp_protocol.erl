@@ -430,7 +430,7 @@ dispatch_checked(Method, Params, Id, Ctx) ->
                 <<"Invalid _meta field: ", Key/binary>>
             );
         ok ->
-            case serves(Method, barrel_mcp_ctx:era(Ctx)) of
+            case serves(Method, Ctx) of
                 false ->
                     error_response(
                         Id,
@@ -443,10 +443,30 @@ dispatch_checked(Method, Params, Id, Ctx) ->
             end
     end.
 
-serves(Method, legacy) ->
+serves(Method, Ctx) ->
+    serves_in_era(Method, barrel_mcp_ctx:era(Ctx)) andalso
+        serves_in_revision(Method, barrel_mcp_ctx:protocol_version(Ctx)).
+
+serves_in_era(Method, legacy) ->
     not lists:member(Method, ?MODERN_ONLY_METHODS);
-serves(Method, modern) ->
+serves_in_era(Method, modern) ->
     not lists:member(Method, ?LEGACY_ONLY_METHODS).
+
+%% The era says which family a method belongs to; the revision says
+%% whether it existed yet. Tasks are the case that needs both: they are
+%% legacy methods, but only from 2025-11-25.
+%%
+%% An un-negotiated connection is not gated. A limit defaults to the
+%% strict side because guessing wrong there costs nothing; refusing a
+%% method the peer does have is a different failure, and before
+%% `initialize' there is no evidence either way.
+serves_in_revision(_Method, undefined) ->
+    true;
+serves_in_revision(<<"tasks/", _/binary>>, Revision) ->
+    barrel_mcp_version:has(tasks, Revision) orelse
+        barrel_mcp_version:has(tasks_extension, Revision);
+serves_in_revision(_Method, _Revision) ->
+    true.
 
 %% 2026-07-28 realigned resource-not-found onto the JSON-RPC
 %% invalid-params code. Legacy clients still expect -32002, and the
@@ -564,29 +584,38 @@ server_info() ->
         <<"version">> => application:get_env(barrel_mcp, server_version, <<"1.0.0">>)
     }.
 
-%% What an `initialize' response advertises. `subscribe', `logging' and
-%% the blocking task methods only exist in the handshake-based
-%% revisions.
-legacy_capabilities() ->
-    #{
+%% What an `initialize' response advertises, for the revision that was
+%% just negotiated. `subscribe' and `logging' exist in every
+%% handshake-based revision; tasks arrived at 2025-11-25, so an older
+%% client must not be told the server has them.
+legacy_capabilities(Revision) ->
+    Base = #{
         <<"tools">> => #{<<"listChanged">> => true},
         <<"resources">> => #{
             <<"subscribe">> => true,
             <<"listChanged">> => true
         },
         <<"prompts">> => #{<<"listChanged">> => true},
-        <<"logging">> => #{},
-        %% Per the MCP tasks SEP (and as enforced by the reference
-        %% Python SDK), each operation key is an object whose presence
-        %% advertises support; only `listChanged' is a bare boolean.
-        <<"tasks">> => #{
-            <<"list">> => #{},
-            <<"get">> => #{},
-            <<"cancel">> => #{},
-            <<"result">> => #{},
-            <<"listChanged">> => true
-        }
-    }.
+        <<"logging">> => #{}
+    },
+    case barrel_mcp_version:has(tasks, Revision) of
+        false ->
+            Base;
+        true ->
+            %% Per the MCP tasks SEP (and as enforced by the reference
+            %% Python SDK), each operation key is an object whose
+            %% presence advertises support; only `listChanged' is a bare
+            %% boolean.
+            Base#{
+                <<"tasks">> => #{
+                    <<"list">> => #{},
+                    <<"get">> => #{},
+                    <<"cancel">> => #{},
+                    <<"result">> => #{},
+                    <<"listChanged">> => true
+                }
+            }
+    end.
 
 %% What `server/discover' advertises. Discovery is a modern-era method,
 %% so it describes the modern surface: no `subscribe' (subsumed by
@@ -1112,12 +1141,20 @@ missing_capabilities(Request, Ctx) ->
 %% supported by the client" (2026-07-28/client/elicitation.mdx:77).
 missing_mode(<<"elicitation/create">>, Request, Ctx) ->
     Mode = elicitation_mode(Request),
-    case lists:member(Mode, barrel_mcp_ctx:elicitation_modes(Ctx)) of
+    Declared = lists:member(Mode, barrel_mcp_ctx:elicitation_modes(Ctx)),
+    case Declared andalso mode_in_revision(Mode, Ctx) of
         true -> [];
         false -> [<<"elicitation.", Mode/binary>>]
     end;
 missing_mode(_Method, _Request, _Ctx) ->
     [].
+
+%% A client can only have declared a mode its revision defines, so a
+%% declaration that disagrees with the revision loses.
+mode_in_revision(<<"url">>, Ctx) ->
+    barrel_mcp_version:has(elicitation_url, barrel_mcp_ctx:protocol_version(Ctx));
+mode_in_revision(_Mode, Ctx) ->
+    barrel_mcp_version:has(elicitation, barrel_mcp_ctx:protocol_version(Ctx)).
 
 %% Absent `mode' is form mode (elicitation.mdx:97).
 elicitation_mode(Request) when is_map(Request) ->
@@ -1195,7 +1232,8 @@ handle_request(<<"initialize">>, Params, Id, Ctx) ->
         end,
     success_response(Id, #{
         <<"protocolVersion">> => NegotiatedVersion,
-        <<"capabilities">> => maybe_advertise_completions(legacy_capabilities()),
+        <<"capabilities">> =>
+            maybe_advertise_completions(legacy_capabilities(NegotiatedVersion)),
         <<"serverInfo">> => server_info()
     });
 %% Open a long-lived notification stream. The transport owns the

@@ -391,6 +391,40 @@ legacy_capabilities_intact_test() ->
     ?assert(maps:is_key(<<"tasks">>, Caps)),
     ?assertEqual(true, maps:get(<<"subscribe">>, maps:get(<<"resources">>, Caps))).
 
+%% Tasks arrived at 2025-11-25, so what `initialize' advertises depends
+%% on the revision it just settled on. Telling an older client the
+%% server has them would have it call methods that do not exist there.
+capabilities_follow_the_negotiated_revision_test() ->
+    Advertises = fun(Requested) ->
+        Result = maps:get(
+            <<"result">>,
+            barrel_mcp_protocol:handle(
+                legacy(<<"initialize">>, #{<<"protocolVersion">> => Requested})
+            )
+        ),
+        Caps = maps:get(<<"capabilities">>, Result),
+        {maps:get(<<"protocolVersion">>, Result), maps:is_key(<<"tasks">>, Caps)}
+    end,
+    ?assertEqual({<<"2024-11-05">>, false}, Advertises(<<"2024-11-05">>)),
+    ?assertEqual({<<"2025-03-26">>, false}, Advertises(<<"2025-03-26">>)),
+    ?assertEqual({<<"2025-06-18">>, false}, Advertises(<<"2025-06-18">>)),
+    ?assertEqual({<<"2025-11-25">>, true}, Advertises(<<"2025-11-25">>)).
+
+%% And a method that did not exist yet is not served either, however the
+%% client asks for it.
+task_methods_are_absent_before_2025_11_25_test() ->
+    Refused = fun(Revision) ->
+        Resp = barrel_mcp_protocol:handle(
+            legacy(<<"tasks/get">>, #{<<"taskId">> => <<"x">>}),
+            #{protocol_version => Revision}
+        ),
+        maps:get(<<"code">>, maps:get(<<"error">>, Resp))
+    end,
+    ?assertEqual(-32601, Refused(<<"2024-11-05">>)),
+    ?assertEqual(-32601, Refused(<<"2025-06-18">>)),
+    %% Present from here on: not found, rather than not a method.
+    ?assertEqual(-32602, Refused(<<"2025-11-25">>)).
+
 %%====================================================================
 %% Caching hints
 %%====================================================================

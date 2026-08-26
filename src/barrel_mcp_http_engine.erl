@@ -103,20 +103,27 @@ handle(Method, RawPath, Headers, Body, Responder, Config) ->
         _ ->
             case validate_origin(Headers, Config) of
                 ok ->
-                    dispatch(
-                        maps:get(mode, Config, stream),
-                        Method,
-                        Headers,
-                        Body,
-                        Responder,
-                        Config
-                    );
+                    route(Method, Path, RawPath, Headers, Body, Responder, Config);
                 {error, _Reason} ->
                     %% 403 with no CORS header so the browser surfaces
                     %% the rejection rather than retrying.
                     reply(Responder, 403, #{}, <<>>)
             end
     end.
+
+%% The 2024-11-05 transport lives on its own two routes, and only when
+%% they are configured: a GET there and a Streamable GET are otherwise
+%% indistinguishable.
+route(<<"GET">>, Path, _RawPath, Headers, _Body, Responder, Config) when
+    map_get(sse_path, Config) =:= Path
+->
+    legacy_sse_open(Headers, Responder, Config);
+route(<<"POST">>, Path, RawPath, Headers, Body, Responder, Config) when
+    map_get(sse_message_path, Config) =:= Path
+->
+    legacy_sse_post(RawPath, Headers, Body, Responder, Config);
+route(Method, _Path, _RawPath, Headers, Body, Responder, Config) ->
+    dispatch(maps:get(mode, Config, stream), Method, Headers, Body, Responder, Config).
 
 serve_prm(Responder, Doc) ->
     Body = iolist_to_binary(json:encode(Doc)),
@@ -1575,6 +1582,166 @@ stream_delete_authed(Headers, Responder, Config) ->
     end.
 
 %%====================================================================
+%% HTTP+SSE transport (2024-11-05)
+%%====================================================================
+
+%% "When a client connects, the server MUST send an `endpoint' event
+%% containing a URI for the client to use for sending messages"
+%% (2024-11-05/basic/transports.mdx:67).
+%%
+%% The URI carries the session id, which is crypto-random and so the
+%% capability for this connection. It is bound to the principal that
+%% opened it, so holding the URL is not on its own enough to post.
+legacy_sse_open(Headers, Responder, Config) ->
+    with_auth_info(Headers, Responder, Config, fun(AuthInfo) ->
+        {ok, SessionId} = barrel_mcp_session:create(#{}),
+        _ = barrel_mcp_session:set_principal(SessionId, principal_of(AuthInfo)),
+        Hdrs = cors_headers(Headers, Config, #{
+            <<"content-type">> => <<"text/event-stream">>,
+            <<"cache-control">> => <<"no-cache">>,
+            <<"connection">> => <<"keep-alive">>,
+            <<"x-accel-buffering">> => <<"no">>
+        }),
+        stream_start(Responder, 200, Hdrs),
+        _ = stream_chunk(Responder, endpoint_event(SessionId, Config)),
+        _ = barrel_mcp_session:set_sse_pid(SessionId, self()),
+        try
+            sse_loop(Responder, SessionId)
+        after
+            %% The stream is the session, and the last write on the way
+            %% out goes to a socket the peer has already closed. Letting
+            %% that raise past here would leak the session and leave its
+            %% endpoint answering.
+            barrel_mcp_session:delete(SessionId)
+        end
+    end).
+
+endpoint_event(SessionId, Config) ->
+    Path = maps:get(sse_message_path, Config),
+    iolist_to_binary([
+        <<"event: endpoint\ndata: ">>,
+        Path,
+        <<"?sessionId=">>,
+        SessionId,
+        <<"\n\n">>
+    ]).
+
+%% "All subsequent client messages MUST be sent as HTTP POST requests to
+%% this endpoint" (transports.mdx:67), and the answer goes back on the
+%% stream rather than in this response.
+legacy_sse_post(RawPath, Headers, Body, Responder, Config) ->
+    with_auth_info(Headers, Responder, Config, fun(AuthInfo) ->
+        case legacy_session_of(RawPath, AuthInfo) of
+            {error, Status, Message} ->
+                reply(
+                    Responder,
+                    Status,
+                    cors_headers(Headers, Config, #{}),
+                    json_encode(#{<<"error">> => Message})
+                );
+            {ok, SessionId} ->
+                legacy_dispatch(SessionId, Headers, Body, Responder, Config, AuthInfo)
+        end
+    end).
+
+legacy_session_of(RawPath, AuthInfo) ->
+    case query_param(<<"sessionId">>, RawPath) of
+        undefined ->
+            {error, 400, <<"sessionId required">>};
+        SessionId ->
+            case barrel_mcp_session:get_principal(SessionId) of
+                {error, not_found} ->
+                    {error, 404, <<"Unknown sessionId">>};
+                {ok, Principal} ->
+                    case Principal =:= principal_of(AuthInfo) of
+                        %% Same answer as an unknown id: whoever holds
+                        %% the URL learns nothing about whose it is.
+                        false -> {error, 404, <<"Unknown sessionId">>};
+                        true -> {ok, SessionId}
+                    end
+            end
+    end.
+
+legacy_dispatch(SessionId, Headers, Body, Responder, Config, AuthInfo) ->
+    case barrel_mcp_protocol:decode(Body) of
+        {error, _} ->
+            push_legacy(
+                SessionId,
+                barrel_mcp_protocol:error_response(
+                    null, ?JSONRPC_PARSE_ERROR, <<"Parse error">>
+                )
+            ),
+            reply(Responder, 202, cors_headers(Headers, Config, #{}), <<>>);
+        {ok, Request} ->
+            ProtocolState = #{
+                auth_info => AuthInfo,
+                protocol_version => negotiated_version(Headers, SessionId),
+                session_id => SessionId
+            },
+            Message =
+                case Request of
+                    M when is_map(M) -> with_auth(M, AuthInfo);
+                    Other -> Other
+                end,
+            _ = legacy_answer(SessionId, Message, ProtocolState),
+            reply(Responder, 202, cors_headers(Headers, Config, #{}), <<>>)
+    end.
+
+legacy_answer(SessionId, Message, ProtocolState) ->
+    case barrel_mcp_protocol:handle(Message, ProtocolState) of
+        no_response ->
+            ok;
+        {async, Plan} ->
+            %% Off this request: the POST answers 202 straight away and
+            %% the result goes out on the stream whenever it is ready.
+            AuthInfo = maps:get(auth_info, ProtocolState),
+            _ = spawn(fun() ->
+                Response = barrel_mcp_protocol:drive_async_plan(Plan, 60000, AuthInfo),
+                push_legacy(SessionId, Response)
+            end),
+            ok;
+        {subscribe, _Sub} ->
+            %% Modern-only, and this transport predates it.
+            ok;
+        Response ->
+            _ = maybe_capture_initialize_version(
+                SessionId, method_of(Message), Response
+            ),
+            push_legacy(SessionId, Response)
+    end.
+
+method_of(Message) when is_map(Message) -> maps:get(<<"method">>, Message, <<>>);
+method_of(_Message) -> <<>>.
+
+push_legacy(SessionId, Response) ->
+    case barrel_mcp_session:get_sse_pid(SessionId) of
+        {ok, Pid} when is_pid(Pid) ->
+            Pid ! {sse_send_message, Response},
+            ok;
+        _ ->
+            ok
+    end.
+
+principal_of(AuthInfo) when is_map(AuthInfo) ->
+    maps:get(principal, AuthInfo, anonymous);
+principal_of(_AuthInfo) ->
+    anonymous.
+
+query_param(Name, RawPath) ->
+    case binary:split(RawPath, <<"?">>) of
+        [_Path, Query] -> find_param(Name, binary:split(Query, <<"&">>, [global]));
+        _ -> undefined
+    end.
+
+find_param(_Name, []) ->
+    undefined;
+find_param(Name, [Pair | Rest]) ->
+    case binary:split(Pair, <<"=">>) of
+        [Name, Value] -> Value;
+        _ -> find_param(Name, Rest)
+    end.
+
+%%====================================================================
 %% SSE helpers
 %%====================================================================
 
@@ -1720,6 +1887,16 @@ authenticate(AuthConfig, Request) ->
 %% Used by the GET (SSE) and DELETE verbs so they enforce the same
 %% credential as POST instead of trusting the session id alone. With
 %% `barrel_mcp_auth_none' this admits every request unchanged.
+%% As `with_authenticated/4', but hands the caller what it authenticated
+%% as: the 2024-11-05 transport binds its endpoint to that identity.
+with_auth_info(Headers, Responder, Config, Fun) ->
+    AuthConfig = maps:get(auth_config, Config, #{provider => barrel_mcp_auth_none}),
+    AuthRequest = #{headers => extract_headers(Headers, AuthConfig)},
+    case authenticate(AuthConfig, AuthRequest) of
+        {ok, AuthInfo} -> Fun(AuthInfo);
+        {error, Reason} -> auth_error(Headers, Responder, AuthConfig, Reason)
+    end.
+
 with_authenticated(Headers, Responder, Config, Fun) ->
     AuthConfig = maps:get(
         auth_config,

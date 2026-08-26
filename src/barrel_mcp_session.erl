@@ -24,6 +24,8 @@
     cleanup_expired/1,
     %% Capability tracking (set during MCP `initialize').
     set_client_capabilities/2,
+    set_principal/2,
+    get_principal/1,
     has_sampling/1,
     list_sampling_capable/0,
     has_elicitation/1,
@@ -93,7 +95,11 @@
     %% Per-session log level set by `logging/setLevel'. Default
     %% `info' per the MCP spec. Filters `notifications/message' on
     %% emit.
-    log_level = info :: log_level()
+    log_level = info :: log_level(),
+    %% Who opened this session. The 2024-11-05 transport hands out an
+    %% endpoint URL and has to check that whoever posts to it is the
+    %% same caller.
+    principal = anonymous :: term()
 }).
 
 -type log_level() ::
@@ -184,6 +190,19 @@ list() ->
 -spec set_client_capabilities(binary(), map()) -> ok | {error, not_found}.
 set_client_capabilities(SessionId, Capabilities) when is_map(Capabilities) ->
     gen_server:call(?MODULE, {set_client_capabilities, SessionId, Capabilities}).
+
+%% @doc Record who opened a session.
+-spec set_principal(binary(), term()) -> ok | {error, not_found}.
+set_principal(SessionId, Principal) ->
+    gen_server:call(?MODULE, {set_principal, SessionId, Principal}).
+
+%% @doc Who opened a session.
+-spec get_principal(binary()) -> {ok, term()} | {error, not_found}.
+get_principal(SessionId) ->
+    case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, #mcp_session{principal = P}}] -> {ok, P};
+        [] -> {error, not_found}
+    end.
 
 %% @doc Record the negotiated protocol version on a session. Called
 %% by the HTTP transport after a successful `initialize' so later
@@ -672,6 +691,18 @@ handle_call({delete, SessionId}, _From, State) ->
     %% Its elicitations have nowhere left to deliver a completion.
     _ = barrel_mcp_elicitation:forget_session(SessionId),
     {reply, ok, State};
+handle_call({set_principal, SessionId, Principal}, _From, State) ->
+    Reply =
+        case ets:lookup(?SESSION_TABLE, SessionId) of
+            [{_, Session}] ->
+                true = ets:insert(
+                    ?SESSION_TABLE, {SessionId, Session#mcp_session{principal = Principal}}
+                ),
+                ok;
+            [] ->
+                {error, not_found}
+        end,
+    {reply, Reply, State};
 handle_call({set_client_capabilities, SessionId, Caps}, _From, State) ->
     Reply =
         case ets:lookup(?SESSION_TABLE, SessionId) of
