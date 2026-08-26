@@ -289,17 +289,11 @@ modern_direction_b(Python) ->
         %% sent to a server that would reject it.
         ?assertMatch({error, {unsupported, <<"ping">>}}, barrel_mcp_client:ping(Pid)),
 
-        %% A modern subscription is a held-open response stream, and
-        %% stdio has nowhere to put one. Saying so beats recording the
-        %% interest and never delivering anything.
-        ?assertMatch(
-            {error, {unsupported, <<"subscriptions/listen">>}},
-            barrel_mcp_client:subscribe(Pid, <<"mem://greeting">>)
-        ),
-        ?assertMatch(
-            {error, {unsupported, <<"subscriptions/listen">>}},
-            barrel_mcp_client:unsubscribe(Pid, <<"mem://greeting">>)
-        )
+        %% Subscriptions are deliberately not driven here: this SDK does
+        %% not implement `subscriptions/listen' and closes the pipe
+        %% rather than answering method-not-found. Both ends of that
+        %% exchange are covered in barrel_mcp_stdio_SUITE.
+        ok
     after
         try
             barrel_mcp_client:close(Pid)

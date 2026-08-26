@@ -184,7 +184,11 @@
     %% Multi round-trip rounds in flight, keyed by an opaque reference.
     %% Appended rather than inserted: a test reads `progress' out of
     %% this record by position.
-    mrtr = #{} :: #{reference() => #mrtr{}}
+    mrtr = #{} :: #{reference() => #mrtr{}},
+    %% The id of the `subscriptions/listen' request holding the current
+    %% stdio subscription. It has no request timeout: the response is
+    %% what ends the subscription, and that may be hours away.
+    sub_id :: integer() | undefined
 }).
 
 %%====================================================================
@@ -659,24 +663,11 @@ ready(cast, notify_roots_list_changed, Data) ->
 %% and takes the matching path. Doing it here rather than exposing the
 %% era keeps `subscribe/2' looking the same to callers.
 %%
-%% A modern subscription is a held-open response stream, which stdio has
-%% nowhere to put: it multiplexes everything onto one channel, which is
-%% why our server answers `subscriptions/listen' with method-not-found
-%% there. Saying so is the only honest answer; recording the interest
-%% and returning `ok' would promise notifications that never come.
-ready({call, From}, {subscribe, _Uri, _Pid}, #data{era = modern} = Data) when
-    element(1, Data#data.transport) =:= barrel_mcp_client_stdio
-->
-    {keep_state_and_data, [{reply, From, no_stream}]};
 ready({call, From}, {subscribe, Uri, Pid}, #data{era = modern} = Data) ->
     Data1 = add_sub(Uri, Pid, Data),
     {keep_state, refresh_subscription(Data1), [{reply, From, modern}]};
 ready({call, From}, {subscribe, _Uri, _Pid}, _Data) ->
     {keep_state_and_data, [{reply, From, legacy}]};
-ready({call, From}, {unsubscribe, _Uri, _Pid}, #data{era = modern} = Data) when
-    element(1, Data#data.transport) =:= barrel_mcp_client_stdio
-->
-    {keep_state_and_data, [{reply, From, no_stream}]};
 ready({call, From}, {unsubscribe, Uri, Pid}, #data{era = modern} = Data) ->
     Data1 = del_sub(Uri, Pid, Data),
     {keep_state, refresh_subscription(Data1), [{reply, From, modern}]};
@@ -779,6 +770,10 @@ handle_response(Id, Result, initializing, Data) ->
         _ ->
             keep_state_and_data
     end;
+%% The response to `subscriptions/listen' is what ends it, so it settles
+%% the retained id rather than a pending request.
+handle_response(Id, _Result, _State, #data{sub_id = Id} = Data) ->
+    {keep_state, Data#data{sub_id = undefined}};
 handle_response(Id, Result, _State, Data) ->
     case maps:take(Id, Data#data.pending) of
         {#pending{caller = ping} = P, Rest} ->
@@ -998,6 +993,19 @@ handle_server_notification(
 ) ->
     notify_progress(Params, Data),
     dispatch_notification(Method, Params, Data);
+%% The server tears a subscription down by cancelling its listen id, so
+%% the retained id goes with it rather than waiting for a response that
+%% now names nothing.
+handle_server_notification(
+    <<"notifications/cancelled">> = Method,
+    Params,
+    _State,
+    #data{sub_id = SubId} = Data
+) when SubId =/= undefined ->
+    case maps:get(<<"requestId">>, Params, undefined) of
+        SubId -> dispatch_notification(Method, Params, Data#data{sub_id = undefined});
+        _ -> dispatch_notification(Method, Params, Data)
+    end;
 handle_server_notification(Method, Params, _State, Data) ->
     dispatch_notification(Method, Params, Data).
 
@@ -1121,10 +1129,37 @@ refresh_subscription(#data{transport = {barrel_mcp_client_http, Pid}} = Data) ->
             ok = barrel_mcp_client_http:open_subscription(Pid, Body),
             Data1
     end;
-%% Only the HTTP transport can hold a subscription stream open; a
-%% modern stdio connection is refused before it reaches here.
+%% stdio has one channel, so the listen request is sent like any other
+%% and its notifications arrive interleaved. Changing the filter means
+%% cancelling first: two overlapping streams would deliver twice.
+refresh_subscription(#data{transport = {barrel_mcp_client_stdio, _}} = Data) ->
+    Data1 = cancel_stdio_subscription(Data),
+    case maps:keys(Data1#data.subscriptions) of
+        [] ->
+            Data1;
+        Uris ->
+            {Id, Data2} = next_id(Data1),
+            Params = #{
+                <<"notifications">> => #{<<"resourceSubscriptions">> => Uris}
+            },
+            send_envelope(
+                Data2,
+                barrel_mcp_protocol:encode_request(
+                    Id, <<"subscriptions/listen">>, with_request_meta(Params, Data2)
+                )
+            ),
+            %% Retained without a request timeout: the response is the
+            %% end of the subscription, not a late answer.
+            Data2#data{sub_id = Id}
+    end;
 refresh_subscription(Data) ->
     Data.
+
+cancel_stdio_subscription(#data{sub_id = undefined} = Data) ->
+    Data;
+cancel_stdio_subscription(#data{sub_id = Id} = Data) ->
+    send_cancelled(Id, <<"filter changed">>, Data),
+    Data#data{sub_id = undefined}.
 
 %%====================================================================
 %% Multi round-trip requests
