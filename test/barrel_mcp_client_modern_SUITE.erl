@@ -1299,6 +1299,13 @@ catalogue() ->
             <<"outputSchema">> => #{<<"type">> => <<"object">>, <<"required">> => <<"x">>}
         },
         #{<<"name">> => <<"not_a_schema">>, <<"inputSchema">> => #{<<"type">> => <<"nope">>}},
+        #{
+            <<"name">> => <<"old_dialect">>,
+            <<"inputSchema">> => #{
+                <<"$schema">> => <<"http://json-schema.org/draft-07/schema#">>,
+                <<"type">> => <<"object">>
+            }
+        },
         #{<<"name">> => <<"not_an_object">>, <<"inputSchema">> => <<"a string">>},
         #{
             <<"name">> => <<"unresolvable">>,

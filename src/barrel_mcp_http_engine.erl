@@ -1293,18 +1293,28 @@ tool_outcome_envelope(Reply, RequestId, {validation_failed, Errors}) ->
         },
         #{}
     );
-tool_outcome_envelope(_Reply, RequestId, {failed, _Reason}) ->
+tool_outcome_envelope(Reply, RequestId, {failed, _Reason}) ->
     barrel_mcp_protocol:error_response(
         RequestId,
-        ?MCP_TOOL_ERROR,
+        internal_error_code(Reply),
         <<"Internal tool error">>
     );
-tool_outcome_envelope(_Reply, RequestId, timeout) ->
+tool_outcome_envelope(Reply, RequestId, timeout) ->
     barrel_mcp_protocol:error_response(
         RequestId,
-        ?MCP_TOOL_ERROR,
+        internal_error_code(Reply),
         <<"Tool timed out">>
     ).
+
+%% `-32000' is in the sub-range 2026-07-28 reserved as legacy and told
+%% new implementations not to use (basic/index.mdx:117).
+internal_error_code(#{ctx := Ctx}) when Ctx =/= undefined ->
+    case barrel_mcp_ctx:is_modern(Ctx) of
+        true -> ?JSONRPC_INTERNAL_ERROR;
+        false -> ?MCP_TOOL_ERROR
+    end;
+internal_error_code(_Reply) ->
+    ?MCP_TOOL_ERROR.
 
 %% A modern result is decorated here rather than in the protocol core,
 %% because this envelope is built by the transport.

@@ -18,7 +18,7 @@
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([official_suite/1, no_network_dereference/1, bounds_are_enforced/1]).
 -export([invalid_schemas_are_refused_at_registration/1, output_schema_by_revision/1]).
--export([vendored_metaschema_is_unchanged/1]).
+-export([vendored_metaschema_is_unchanged/1, dialects_other_than_2020_12_are_refused/1]).
 -export([a_tool/1]).
 
 all() ->
@@ -28,7 +28,8 @@ all() ->
         bounds_are_enforced,
         invalid_schemas_are_refused_at_registration,
         output_schema_by_revision,
-        vendored_metaschema_is_unchanged
+        vendored_metaschema_is_unchanged,
+        dialects_other_than_2020_12_are_refused
     ].
 
 a_tool(_Args) -> <<"ok">>.
@@ -67,8 +68,6 @@ official_suite(Config) ->
 %% pass.
 skips() ->
     [
-        {<<"pattern.json">>, <<"pattern with Unicode property escape requires unicode mode">>,
-            <<"ECMAScript regex, not PCRE: \\p{Letter} is not a PCRE property name">>},
         {<<"vocabulary.json">>,
             <<"schema that uses custom metaschema with with no validation vocabulary">>,
             <<"$vocabulary does not switch keyword sets off">>}
@@ -104,6 +103,68 @@ bounds_are_enforced(_Config) ->
         lists:seq(1, 200)
     ),
     ?assertMatch({error, too_deep}, barrel_mcp_jsonschema:compile(Deep)).
+
+%% "Clients and servers MUST validate schemas according to their
+%% declared or default dialect. They MUST handle unsupported dialects
+%% gracefully by returning an appropriate error indicating the dialect
+%% is not supported" (2026-07-28/basic/index.mdx:292). Validating a
+%% draft-07 schema under these rules would apply the wrong ones to
+%% `items', `exclusiveMinimum' and `definitions'.
+dialects_other_than_2020_12_are_refused(_Config) ->
+    {ok, _} = application:ensure_all_started(barrel_mcp),
+    ok = barrel_mcp_registry:wait_for_ready(),
+    Object = fun(Dialect) ->
+        maps:merge(#{<<"type">> => <<"object">>}, Dialect)
+    end,
+    Accepted = [
+        {<<"absent">>, #{}},
+        {<<"2020-12">>, #{<<"$schema">> => <<"https://json-schema.org/draft/2020-12/schema">>}},
+        {<<"2020-12 with a fragment">>, #{
+            <<"$schema">> => <<"https://json-schema.org/draft/2020-12/schema#">>
+        }}
+    ],
+    lists:foreach(
+        fun({Why, Dialect}) ->
+            ?assertMatch({Why, {ok, _}}, {Why, barrel_mcp_jsonschema:compile(Object(Dialect))})
+        end,
+        Accepted
+    ),
+    Refused = [
+        {<<"draft-07">>, <<"http://json-schema.org/draft-07/schema#">>},
+        {<<"draft-06">>, <<"http://json-schema.org/draft-06/schema#">>},
+        {<<"2019-09">>, <<"https://json-schema.org/draft/2019-09/schema">>}
+    ],
+    lists:foreach(
+        fun({Why, Uri}) ->
+            ?assertMatch(
+                {Why, {error, {unsupported_dialect, _}}},
+                {Why, barrel_mcp_jsonschema:compile(Object(#{<<"$schema">> => Uri}))}
+            )
+        end,
+        Refused
+    ),
+
+    %% A metaschema the caller supplied is a dialect we can evaluate: it
+    %% is built on these vocabularies, and refusing it would refuse
+    %% something we can in fact run.
+    Custom = <<"https://example.com/my-metaschema">>,
+    ?assertMatch(
+        {ok, _},
+        barrel_mcp_jsonschema:compile(
+            Object(#{<<"$schema">> => Custom}),
+            #{Custom => #{<<"$id">> => Custom}}
+        )
+    ),
+
+    %% And it is refused where a schema enters, not only in the library.
+    ?assertMatch(
+        {error, {invalid_input_schema, {unsupported_dialect, _}}},
+        barrel_mcp:reg_tool(<<"old_dialect">>, ?MODULE, a_tool, #{
+            input_schema => Object(#{
+                <<"$schema">> => <<"http://json-schema.org/draft-07/schema#">>
+            })
+        })
+    ).
 
 %% The metaschema decides what counts as a schema, so a swapped file
 %% would quietly change what every tool definition is measured against.

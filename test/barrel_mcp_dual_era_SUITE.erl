@@ -37,6 +37,7 @@
     resource_not_found_status/1,
     modern_notification_returns_202/1,
     modern_tool_error_stays_200/1,
+    legacy_tool_error_keeps_its_code/1,
     modern_progress_on_response_stream/1,
     modern_without_progress_token_is_plain_json/1,
     discover_over_http/1,
@@ -90,6 +91,7 @@ all() ->
         resource_not_found_status,
         modern_notification_returns_202,
         modern_tool_error_stays_200,
+        legacy_tool_error_keeps_its_code,
         modern_progress_on_response_stream,
         modern_without_progress_token_is_plain_json,
         discover_over_http,
@@ -390,10 +392,29 @@ modern_notification_returns_202(Config) ->
 
 %% A tool that crashes is an application failure, not a malformed
 %% request: it stays 200 with the error in the body.
+%%
+%% The code is the JSON-RPC one, not `-32000': that sits in the range
+%% 2026-07-28 reserved as legacy and told new implementations not to use
+%% (basic/index.mdx:117).
 modern_tool_error_stays_200(Config) ->
     Port = ?config(port, Config),
     Params = #{<<"name">> => <<"boom">>, <<"arguments">> => #{}},
     {200, _, Body} = post_modern(Port, modern_request(1, <<"tools/call">>, Params), []),
+    ?assertEqual(-32603, maps:get(<<"code">>, error_of(Body))),
+    ok.
+
+%% The same crash on a handshake-era connection keeps `-32000', which is
+%% what a client written against those revisions expects.
+legacy_tool_error_keeps_its_code(Config) ->
+    Port = ?config(port, Config),
+    {200, InitHeaders, _} = post(Port, init_body(), []),
+    SessionId = header(<<"mcp-session-id">>, InitHeaders),
+    Params = #{<<"name">> => <<"boom">>, <<"arguments">> => #{}},
+    {200, _, Body} = post(
+        Port,
+        legacy_request(2, <<"tools/call">>, Params),
+        [{<<"mcp-session-id">>, SessionId}]
+    ),
     ?assertEqual(?MCP_TOOL_ERROR, maps:get(<<"code">>, error_of(Body))),
     ok.
 

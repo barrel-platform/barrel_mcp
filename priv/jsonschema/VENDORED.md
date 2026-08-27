@@ -21,6 +21,14 @@ the dialect's identity, so a change would be a new dialect.
 | `meta_validation.json` | `e921c5b79264d3689af01c1af1ffdf692e09f1c45df90a0f08eb7288c9acdeab` |
 | `schema.json` | `41da76f5afb7ce062d248f762463a92f7ca47e4e0f905b224ba6afeef91ded0f` |
 
+## Dialects
+
+A schema declaring a `$schema` other than 2020-12 is refused, unless the
+caller supplied that metaschema: a custom one built on these
+vocabularies is still this dialect. A `$ref` that lands in a document of
+another draft is still evaluated under 2020-12, which is the cross-draft
+case the suite keeps in `optional/` and we do not claim.
+
 ## Updating
 
 There is no reason to, short of a new dialect. If you do, re-fetch

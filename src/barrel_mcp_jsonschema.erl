@@ -102,6 +102,7 @@ compile(Schema, Registry0) when is_map(Registry0) ->
             Registry
         ),
         Ids = collect(Schema, Base, Ids0),
+        ok = check_dialect(Schema, Ids),
         Dynamic = collect_dynamic(Ids),
         Compiled = #schema{root = Schema, ids = Ids, dynamic = Dynamic, base = Base},
         ok = check_refs(Schema, Base, Compiled),
@@ -117,6 +118,36 @@ is_valid_schema(Schema) ->
     case compile(Schema) of
         {ok, _} -> true;
         {error, _} -> false
+    end.
+
+%% "Clients and servers MUST validate schemas according to their
+%% declared or default dialect. They MUST handle unsupported dialects
+%% gracefully by returning an appropriate error indicating the dialect
+%% is not supported" (2026-07-28/basic/index.mdx:292).
+%%
+%% Supported means 2020-12, or a metaschema the caller supplied: a
+%% custom metaschema built on these vocabularies is still this dialect,
+%% and refusing it would refuse something we can in fact evaluate. An
+%% earlier draft is neither, and validating it here would apply the
+%% wrong rules to `items', `exclusiveMinimum' and `definitions'.
+%%
+%% Only the root of the schema being compiled. A registry entry is a
+%% reference target rather than something we were asked to validate.
+check_dialect(Schema, Ids) when is_map(Schema) ->
+    case maps:get(<<"$schema">>, Schema, undefined) of
+        undefined -> ok;
+        Uri when is_binary(Uri) -> supported_dialect(strip_fragment(Uri), Ids);
+        Other -> error({schema_error, {unsupported_dialect, Other}})
+    end;
+check_dialect(_Schema, _Ids) ->
+    ok.
+
+supported_dialect(?DIALECT, _Ids) ->
+    ok;
+supported_dialect(Uri, Ids) ->
+    case maps:is_key(Uri, Ids) of
+        true -> ok;
+        false -> error({schema_error, {unsupported_dialect, Uri}})
     end.
 
 base_of(Schema) when is_map(Schema) ->
@@ -914,7 +945,7 @@ pattern_properties(Value, Schema, Base, Path, Ctx) ->
 %% ECMA-262 is the dialect's regex language and PCRE is not quite it, so
 %% a pattern we cannot compile asserts nothing rather than raising.
 matches(Value, Pattern) when is_binary(Pattern) ->
-    try re:run(Value, Pattern, [unicode, ucp, {capture, none}]) of
+    try re:run(Value, ecma_properties(Pattern), [unicode, ucp, {capture, none}]) of
         match -> true;
         nomatch -> false;
         {error, _} -> false
@@ -1023,6 +1054,74 @@ contains(Value, Schema, Base, Path, Ctx) ->
 %% never be met exactly by a count, so it is compared numerically.
 bounded(N) when is_number(N) -> N;
 bounded(_N) -> undefined.
+
+%% ECMAScript spells a Unicode general category out; PCRE wants the
+%% abbreviation and rejects the long form outright. Script names are
+%% spelled the same in both and pass through.
+ecma_properties(Pattern) ->
+    case binary:match(Pattern, <<"\\p{">>) of
+        nomatch ->
+            case binary:match(Pattern, <<"\\P{">>) of
+                nomatch -> Pattern;
+                _ -> rewrite_properties(Pattern)
+            end;
+        _ ->
+            rewrite_properties(Pattern)
+    end.
+
+rewrite_properties(Pattern) ->
+    lists:foldl(
+        fun({Long, Short}, Acc) ->
+            binary:replace(
+                Acc, <<"{", Long/binary, "}">>, <<"{", Short/binary, "}">>, [global]
+            )
+        end,
+        Pattern,
+        general_categories()
+    ).
+
+%% Table 66 of ECMA-262, which is closed.
+general_categories() ->
+    [
+        {<<"Cased_Letter">>, <<"LC">>},
+        {<<"Close_Punctuation">>, <<"Pe">>},
+        {<<"Connector_Punctuation">>, <<"Pc">>},
+        {<<"Control">>, <<"Cc">>},
+        {<<"Currency_Symbol">>, <<"Sc">>},
+        {<<"Dash_Punctuation">>, <<"Pd">>},
+        {<<"Decimal_Number">>, <<"Nd">>},
+        {<<"Enclosing_Mark">>, <<"Me">>},
+        {<<"Final_Punctuation">>, <<"Pf">>},
+        {<<"Format">>, <<"Cf">>},
+        {<<"Initial_Punctuation">>, <<"Pi">>},
+        {<<"Letter_Number">>, <<"Nl">>},
+        {<<"Letter">>, <<"L">>},
+        {<<"Line_Separator">>, <<"Zl">>},
+        {<<"Lowercase_Letter">>, <<"Ll">>},
+        {<<"Mark">>, <<"M">>},
+        {<<"Math_Symbol">>, <<"Sm">>},
+        {<<"Modifier_Letter">>, <<"Lm">>},
+        {<<"Modifier_Symbol">>, <<"Sk">>},
+        {<<"Nonspacing_Mark">>, <<"Mn">>},
+        {<<"Number">>, <<"N">>},
+        {<<"Open_Punctuation">>, <<"Ps">>},
+        {<<"Other_Letter">>, <<"Lo">>},
+        {<<"Other_Number">>, <<"No">>},
+        {<<"Other_Punctuation">>, <<"Po">>},
+        {<<"Other_Symbol">>, <<"So">>},
+        {<<"Other">>, <<"C">>},
+        {<<"Paragraph_Separator">>, <<"Zp">>},
+        {<<"Private_Use">>, <<"Co">>},
+        {<<"Punctuation">>, <<"P">>},
+        {<<"Separator">>, <<"Z">>},
+        {<<"Space_Separator">>, <<"Zs">>},
+        {<<"Spacing_Mark">>, <<"Mc">>},
+        {<<"Surrogate">>, <<"Cs">>},
+        {<<"Symbol">>, <<"S">>},
+        {<<"Titlecase_Letter">>, <<"Lt">>},
+        {<<"Unassigned">>, <<"Cn">>},
+        {<<"Uppercase_Letter">>, <<"Lu">>}
+    ].
 
 %%====================================================================
 %% unevaluated*

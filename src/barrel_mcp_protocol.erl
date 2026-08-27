@@ -477,6 +477,26 @@ resource_not_found_code(Ctx) ->
         false -> ?MCP_RESOURCE_NOT_FOUND
     end.
 
+%% `-32000' and `-32001' sit in the `-32000' to `-32019' sub-range that
+%% 2026-07-28 reserved as legacy and that new implementations "SHOULD
+%% NOT use ... at all" (basic/index.mdx:117). A server error is a
+%% protocol error (server/tools.mdx:742), so modern gets the JSON-RPC
+%% code for one. Legacy keeps what its clients expect.
+internal_error_code(Ctx) ->
+    case is_modern_ctx(Ctx) of
+        true -> ?JSONRPC_INTERNAL_ERROR;
+        false -> ?MCP_TOOL_ERROR
+    end.
+
+resource_error_code(Ctx) ->
+    case is_modern_ctx(Ctx) of
+        true -> ?JSONRPC_INTERNAL_ERROR;
+        false -> ?MCP_RESOURCE_ERROR
+    end.
+
+is_modern_ctx(Ctx) when is_map(Ctx) -> barrel_mcp_ctx:is_modern(Ctx);
+is_modern_ctx(_Ctx) -> false.
+
 %% How long a task collector waits to be told which process it is
 %% collecting for. The handoff happens immediately after the worker is
 %% spawned; this only bounds the case where spawning failed.
@@ -1851,6 +1871,7 @@ drive_as_task(Plan, _ToolName, Ctx, AuthInfo, TaskId) ->
 
 run_async_plan(Plan, Timeout, AuthInfo) ->
     Self = self(),
+    PlanCtx = maps:get(ctx, Plan, undefined),
     RequestId = maps:get(request_id, Plan),
     Spawn = maps:get(spawn, Plan),
     Meta = maps:get(meta, Plan, #{}),
@@ -1933,11 +1954,11 @@ run_async_plan(Plan, Timeout, AuthInfo) ->
             %% paths, file paths, or secret-bearing exception terms).
             error_response(
                 RequestId,
-                ?MCP_TOOL_ERROR,
+                internal_error_code(PlanCtx),
                 <<"Internal tool error">>
             )
     after Timeout ->
-        error_response(RequestId, ?MCP_TOOL_ERROR, <<"Tool timed out">>)
+        error_response(RequestId, internal_error_code(PlanCtx), <<"Tool timed out">>)
     end.
 
 format_tool_result(Result) when is_binary(Result) ->
@@ -1971,7 +1992,7 @@ run_resource_read(Type, Name, Args, Uri, Id, Bind) ->
             );
         {error, Crash} ->
             log_handler_crash(resource, Name, Id, Crash),
-            error_response(Id, ?MCP_RESOURCE_ERROR, <<"Internal resource error">>)
+            error_response(Id, resource_error_code(Ctx), <<"Internal resource error">>)
     end.
 
 %% A resource registered with its own `cache_ttl_ms' overrides the
