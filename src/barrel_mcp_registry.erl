@@ -259,7 +259,7 @@ run(Type, Name, Args, Ctx) when is_map(Ctx) ->
                 %% Mirror invoke_tool_handler/5: prefer the arity-2 form so
                 %% a local invoke reaches the same handlers the wire does.
                 Result =
-                    case erlang:function_exported(M, F, 2) of
+                    case exported(M, F, 2) of
                         true -> M:F(Args, Ctx#{tool_name => Name});
                         false -> M:F(Args)
                     end,
@@ -353,7 +353,7 @@ invoke_tool_handler(
 ) ->
     try
         Result =
-            case erlang:function_exported(M, F, 2) of
+            case exported(M, F, 2) of
                 true -> M:F(Args, Ctx);
                 false -> M:F(Args)
             end,
@@ -617,10 +617,15 @@ do_reg(Type, Name, Module, Function, Opts) ->
     end.
 
 any_exported(Module, Function, Arities) ->
-    lists:any(
-        fun(A) -> erlang:function_exported(Module, Function, A) end,
-        Arities
-    ).
+    lists:any(fun(A) -> exported(Module, Function, A) end, Arities).
+
+%% `function_exported/3' answers for loaded modules only, and under
+%% interactive code loading a handler module is loaded on first call,
+%% which is this one. Without the load a valid registration is refused
+%% and an arity-2 handler is invoked as arity 1.
+exported(Module, Function, Arity) ->
+    _ = code:ensure_loaded(Module),
+    erlang:function_exported(Module, Function, Arity).
 
 do_unreg(Type, Name) ->
     true = ets:delete(?REGISTRY_TABLE, {Type, Name}),

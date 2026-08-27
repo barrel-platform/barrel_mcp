@@ -214,7 +214,7 @@ principal(#{provider := Provider} = Config, AuthInfo) ->
 %% silent fallback to anonymous.
 with_principal(#{provider := Provider} = Config, ProviderState, AuthInfo) ->
     Derived =
-        case erlang:function_exported(Provider, principal, 2) of
+        case exported(Provider, principal, 2) of
             true -> Provider:principal(AuthInfo, ProviderState);
             false -> principal(Config, AuthInfo)
         end,
@@ -262,7 +262,7 @@ challenge_response(#{provider := Provider} = Config, Reason) ->
 auth_headers(#{provider := barrel_mcp_auth_none}) ->
     [];
 auth_headers(#{provider := Provider} = Config) ->
-    case erlang:function_exported(Provider, auth_headers, 1) of
+    case exported(Provider, auth_headers, 1) of
         true ->
             ProviderState = maps:get(provider_state, Config, undefined),
             Provider:auth_headers(ProviderState);
@@ -450,3 +450,10 @@ check_scopes(_RequiredScopes, _AuthInfo) ->
     %% scopes list (or surfaced a non-list). Fail closed: a missing
     %% claim is not implicit consent.
     {error, insufficient_scope}.
+
+%% Providers are dispatched by name and their optional callbacks are
+%% discovered, so the module has to be loaded before it is asked what it
+%% exports.
+exported(Provider, Function, Arity) ->
+    _ = code:ensure_loaded(Provider),
+    erlang:function_exported(Provider, Function, Arity).

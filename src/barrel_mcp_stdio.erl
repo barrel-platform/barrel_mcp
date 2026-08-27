@@ -766,7 +766,11 @@ drain_notifications(State) ->
                     try
                         barrel_mcp_protocol:handle(Message, Ctx)
                     catch
-                        _:_ -> ok
+                        Class:Reason:Stack ->
+                            logger:error(
+                                "barrel_mcp stdio: notification crashed: ~p:~p~n~p",
+                                [Class, Reason, Stack]
+                            )
                     end,
                 Self ! stdio_notified
             end),

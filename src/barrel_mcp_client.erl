@@ -1971,6 +1971,7 @@ terminate(
         _ ->
             ok
     end,
+    _ = code:ensure_loaded(Mod),
     case erlang:function_exported(Mod, terminate, 2) of
         true ->
             try

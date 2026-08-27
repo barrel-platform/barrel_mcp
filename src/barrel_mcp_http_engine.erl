@@ -1873,6 +1873,7 @@ match_pos(Bin, Needle) ->
 %%====================================================================
 
 init_auth(#{provider := Provider} = AuthOpts) ->
+    _ = code:ensure_loaded(Provider),
     ProviderOpts = maps:get(provider_opts, AuthOpts, #{}),
     ProviderState =
         case erlang:function_exported(Provider, init, 1) of
