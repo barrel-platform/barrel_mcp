@@ -460,7 +460,7 @@ default_content_for(Data) ->
 %% @returns `{ok, HandlerMap}' if found, `error' otherwise
 -spec find(Type :: handler_type(), Name :: binary()) -> {ok, map()} | error.
 find(Type, Name) ->
-    Handlers = persistent_term:get(?REGISTRY_KEY, #{}),
+    {Handlers, _} = snapshot(),
     case maps:find({Type, Name}, Handlers) of
         {ok, Handler} -> {ok, Handler};
         error -> error
@@ -484,7 +484,7 @@ find(Type, Name) ->
 %% @returns Map of type => handlers
 -spec all() -> #{handler_type() => [{binary(), map()}]}.
 all() ->
-    Handlers = persistent_term:get(?REGISTRY_KEY, #{}),
+    {Handlers, _} = snapshot(),
     lists:foldl(
         fun({{Type, Name}, Handler}, Acc) ->
             TypeHandlers = maps:get(Type, Acc, []),
@@ -519,9 +519,7 @@ init([]) ->
         set,
         {read_concurrency, true}
     ]),
-    %% Initialize persistent_term with empty map
-    persistent_term:put(?REGISTRY_KEY, #{}),
-    persistent_term:put(?PARAM_HEADERS_KEY, []),
+    persistent_term:put(?REGISTRY_KEY, {#{}, []}),
 
     %% Check if we should wait for an external process
     case application:get_env(barrel_mcp, wait_for_proc) of
@@ -568,8 +566,7 @@ ready({call, From}, _, _Data) ->
 %% @private
 terminate(_Reason, _State, _Data) ->
     try
-        persistent_term:erase(?REGISTRY_KEY),
-        persistent_term:erase(?PARAM_HEADERS_KEY)
+        persistent_term:erase(?REGISTRY_KEY)
     catch
         _:_ -> ok
     end,
@@ -796,8 +793,15 @@ opt_field(Key, Opts) ->
 %% `Access-Control-Allow-Headers'.
 -spec param_header_names() -> [binary()].
 param_header_names() ->
-    persistent_term:get(?PARAM_HEADERS_KEY, []).
+    {_, Headers} = snapshot(),
+    Headers.
 
+snapshot() ->
+    persistent_term:get(?REGISTRY_KEY, {#{}, []}).
+
+%% One `put' rather than two: each one scans every process in the node
+%% for references into the literal area, and this runs on every
+%% registration.
 sync_persistent_term() ->
     Handlers = ets:foldl(
         fun({Key, Handler}, Acc) ->
@@ -806,8 +810,7 @@ sync_persistent_term() ->
         #{},
         ?REGISTRY_TABLE
     ),
-    persistent_term:put(?REGISTRY_KEY, Handlers),
-    persistent_term:put(?PARAM_HEADERS_KEY, collect_param_headers(Handlers)).
+    persistent_term:put(?REGISTRY_KEY, {Handlers, collect_param_headers(Handlers)}).
 
 %% The union of `Mcp-Param-{Name}' headers any registered tool asks a
 %% client to send. Cached alongside the registry because CORS needs it

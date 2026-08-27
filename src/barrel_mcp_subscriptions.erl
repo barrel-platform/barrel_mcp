@@ -176,34 +176,43 @@ task_changed(TaskId, Owner, Task) ->
 %% clean shutdown from a dropped connection.
 -spec close_all() -> ok.
 close_all() ->
-    lists:foreach(
-        fun({{Pid, SubId}, _Filter}) -> Pid ! {mcp_subscription_close, SubId} end,
-        entries()
-    ).
+    each(fun({{Pid, SubId}, _Filter}) -> Pid ! {mcp_subscription_close, SubId} end).
 
 -spec count() -> non_neg_integer().
 count() ->
-    length(entries()).
+    case ets:whereis(?TABLE) of
+        undefined -> 0;
+        Tid -> ets:info(Tid, size)
+    end.
 
 %%====================================================================
 %% Fan-out
 %%====================================================================
 
 deliver(Wants, Build) ->
-    lists:foreach(
-        fun({{Pid, SubId}, Filter}) ->
-            case Wants(Filter) of
-                true -> Pid ! {mcp_notification, SubId, Build(SubId)};
-                false -> ok
-            end
-        end,
-        entries()
-    ).
+    each(fun({{Pid, SubId}, Filter}) ->
+        case Wants(Filter) of
+            true -> Pid ! {mcp_notification, SubId, Build(SubId)};
+            false -> ok
+        end
+    end).
 
-entries() ->
+%% A fold rather than a `tab2list': every notification broadcast reaches
+%% this, and copying the whole table into the broadcasting process each
+%% time is the copy, not the traversal, that costs.
+each(Fun) ->
     case ets:whereis(?TABLE) of
-        undefined -> [];
-        _ -> ets:tab2list(?TABLE)
+        undefined ->
+            ok;
+        Tid ->
+            ets:foldl(
+                fun(Entry, ok) ->
+                    _ = Fun(Entry),
+                    ok
+                end,
+                ok,
+                Tid
+            )
     end.
 
 %% Every message on a subscription carries its id, so a client sharing
@@ -289,16 +298,11 @@ demonitor_if_last(Pid, #{monitors := Monitors} = State) ->
             end
     end.
 
+%% Both of these are answerable from the key alone, so neither has to
+%% look at an entry that is not this holder's.
 holds_any(Pid) ->
-    lists:any(fun({{P, _}, _}) -> P =:= Pid end, entries()).
+    ets:select_count(?TABLE, [{{{Pid, '_'}, '_'}, [], [true]}]) > 0.
 
 drop_holder(Pid) ->
-    lists:foreach(
-        fun({{P, _} = Key, _}) ->
-            case P =:= Pid of
-                true -> ets:delete(?TABLE, Key);
-                false -> ok
-            end
-        end,
-        entries()
-    ).
+    true = ets:match_delete(?TABLE, {{Pid, '_'}, '_'}),
+    ok.

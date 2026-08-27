@@ -799,7 +799,8 @@ mirrors_tool_parameters(Config) ->
 %% edited where it is served from to stand in for that.
 excludes_tools_with_bad_annotations(Config) ->
     ok = barrel_mcp_registry:reg(tool, <<"unusable">>, ?MODULE, region_tool, #{}),
-    Handlers = persistent_term:get(barrel_mcp_handlers),
+    %% Installed behind the registry, which would refuse this schema.
+    {Handlers, Headers} = persistent_term:get(barrel_mcp_handlers),
     Handler = maps:get({tool, <<"unusable">>}, Handlers),
     Bad = #{
         <<"type">> => <<"object">>,
@@ -812,7 +813,7 @@ excludes_tools_with_bad_annotations(Config) ->
     },
     persistent_term:put(
         barrel_mcp_handlers,
-        Handlers#{{tool, <<"unusable">>} => Handler#{input_schema => Bad}}
+        {Handlers#{{tool, <<"unusable">>} => Handler#{input_schema => Bad}}, Headers}
     ),
     try
         Client = connect(Config, ?MODERN),

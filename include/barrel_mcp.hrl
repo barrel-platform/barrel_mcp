@@ -203,12 +203,12 @@
 
 -type mcp_content() :: text_content() | image_content() | resource_content().
 
-%% Registry key for persistent_term
+%% Registry snapshot in persistent_term: the handler map, and the union
+%% of the `Mcp-Param-{Name}' headers registered tools ask for so CORS can
+%% enumerate them without walking every handler on every response. One
+%% key rather than two because each `persistent_term:put' costs a global
+%% scan of every process in the node.
 -define(REGISTRY_KEY, barrel_mcp_handlers).
-%% Union of the `Mcp-Param-{Name}' headers registered tools ask for,
-%% kept in step with the registry so CORS can enumerate them without
-%% walking every handler on every response.
--define(PARAM_HEADERS_KEY, barrel_mcp_param_headers).
 
 %% ETS table name
 -define(REGISTRY_TABLE, barrel_mcp_registry).
