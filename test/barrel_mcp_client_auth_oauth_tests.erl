@@ -549,3 +549,393 @@ test_register_client_protected_unauth() ->
         #{<<"client_name">> => <<"protected">>}
     ),
     ?assertMatch({error, {http_error, 401, _}}, Result).
+
+%%====================================================================
+%% Authorization response validation (RFC 9207)
+%%====================================================================
+
+expected() ->
+    #{state => <<"st-1">>, issuer => <<"https://idp.example">>}.
+
+callback_accepts_matching_iss_test() ->
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"st-1">>, <<"iss">> => <<"https://idp.example">>},
+            expected()
+        )
+    ).
+
+%% A server that says nothing about iss is only asked to send it, so
+%% its absence cannot be an error or half the servers in the world
+%% become unusable.
+callback_accepts_absent_iss_test() ->
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"st-1">>},
+            expected()
+        )
+    ).
+
+%% The attack this prevents: a client talking to two authorization
+%% servers is handed a code minted by one at the other's endpoint.
+callback_rejects_wrong_iss_test() ->
+    ?assertMatch(
+        {error, {issuer_mismatch, <<"https://evil.example">>, <<"https://idp.example">>}},
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"st-1">>, <<"iss">> => <<"https://evil.example">>},
+            expected()
+        )
+    ).
+
+callback_rejects_wrong_state_test() ->
+    ?assertMatch(
+        {error, {state_mismatch, <<"other">>, <<"st-1">>}},
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"other">>, <<"iss">> => <<"https://idp.example">>},
+            expected()
+        )
+    ).
+
+%% Nothing to compare against is a caller bug, not a pass.
+callback_requires_expectations_test() ->
+    ?assertEqual(
+        {error, no_expected_state},
+        barrel_mcp_client_auth_oauth:validate_callback(#{<<"state">> => <<"x">>}, #{})
+    ),
+    ?assertEqual(
+        {error, no_expected_issuer},
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"st-1">>, <<"iss">> => <<"https://idp.example">>},
+            #{state => <<"st-1">>}
+        )
+    ).
+
+%% Hosts parse query strings into whichever key type they favour.
+callback_accepts_atom_keys_test() ->
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{state => <<"st-1">>, iss => <<"https://idp.example">>},
+            expected()
+        )
+    ).
+
+promising() ->
+    (expected())#{
+        as_metadata => #{<<"authorization_response_iss_parameter_supported">> => true}
+    }.
+
+%% A server that advertises iss and then omits it is not an old server
+%% we are tolerating: something stripped the parameter, and the whole
+%% point of the check is gone.
+callback_rejects_absent_iss_when_advertised_test() ->
+    ?assertEqual(
+        {error, missing_iss},
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"st-1">>},
+            promising()
+        )
+    ).
+
+callback_accepts_advertised_iss_test() ->
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"st-1">>, <<"iss">> => <<"https://idp.example">>},
+            promising()
+        )
+    ).
+
+%% Metadata that says false, or says nothing, leaves absence tolerated.
+callback_tolerates_absent_iss_when_not_advertised_test() ->
+    NotPromising = (expected())#{
+        as_metadata => #{<<"authorization_response_iss_parameter_supported">> => false}
+    },
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"st-1">>}, NotPromising
+        )
+    ),
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"st-1">>}, (expected())#{as_metadata => #{}}
+        )
+    ).
+
+%% Each of these is a distinct issuer. Normalising any of them away
+%% would let a code from one server be redeemed against another.
+callback_compares_issuers_exactly_test() ->
+    lists:foreach(
+        fun(Iss) ->
+            ?assertMatch(
+                {error, {issuer_mismatch, _, _}},
+                barrel_mcp_client_auth_oauth:validate_callback(
+                    #{<<"state">> => <<"st-1">>, <<"iss">> => Iss},
+                    expected()
+                )
+            )
+        end,
+        [
+            %% Trailing slash.
+            <<"https://idp.example/">>,
+            %% Host case folding.
+            <<"https://IDP.example">>,
+            %% Default-port elision.
+            <<"https://idp.example:443">>,
+            %% Percent-encoding.
+            <<"https://idp%2Eexample">>
+        ]
+    ).
+
+%%====================================================================
+%% Choosing a registration mechanism
+%%====================================================================
+
+cimd_as() ->
+    #{
+        <<"client_id_metadata_document_supported">> => true,
+        <<"registration_endpoint">> => <<"https://idp.example/register">>
+    }.
+
+%% A relationship that already exists beats anything discoverable.
+strategy_prefers_pre_registration_test() ->
+    ?assertEqual(
+        {pre_registered, <<"cid-1">>},
+        barrel_mcp_client_auth_oauth:registration_strategy(
+            cimd_as(),
+            #{
+                client_id => <<"cid-1">>,
+                client_id_metadata_url => <<"https://app.example/c.json">>
+            }
+        )
+    ).
+
+strategy_prefers_cimd_over_registration_test() ->
+    ?assertEqual(
+        {client_id_metadata_document, <<"https://app.example/c.json">>},
+        barrel_mcp_client_auth_oauth:registration_strategy(
+            cimd_as(),
+            #{client_id_metadata_url => <<"https://app.example/c.json">>}
+        )
+    ).
+
+%% Hosting a document is no use against a server that will not fetch
+%% one, so this has to fall through rather than fail.
+strategy_falls_back_when_cimd_unsupported_test() ->
+    ?assertEqual(
+        {dynamic_registration, <<"https://idp.example/register">>},
+        barrel_mcp_client_auth_oauth:registration_strategy(
+            #{<<"registration_endpoint">> => <<"https://idp.example/register">>},
+            #{client_id_metadata_url => <<"https://app.example/c.json">>}
+        )
+    ).
+
+strategy_uses_registration_endpoint_test() ->
+    ?assertEqual(
+        {dynamic_registration, <<"https://idp.example/register">>},
+        barrel_mcp_client_auth_oauth:registration_strategy(
+            #{<<"registration_endpoint">> => <<"https://idp.example/register">>},
+            #{}
+        )
+    ).
+
+%% A client cannot invent an identity, so someone has to supply one.
+strategy_prompts_when_nothing_available_test() ->
+    ?assertEqual(
+        prompt_user,
+        barrel_mcp_client_auth_oauth:registration_strategy(#{}, #{})
+    ),
+    ?assertEqual(
+        prompt_user,
+        barrel_mcp_client_auth_oauth:registration_strategy(
+            #{<<"client_id_metadata_document_supported">> => false}, #{}
+        )
+    ).
+
+%% Empty is not a client id.
+strategy_ignores_blank_values_test() ->
+    ?assertEqual(
+        prompt_user,
+        barrel_mcp_client_auth_oauth:registration_strategy(
+            (cimd_as())#{<<"registration_endpoint">> => <<>>},
+            #{client_id => <<>>, client_id_metadata_url => <<>>}
+        )
+    ).
+
+%%====================================================================
+%% Client ID Metadata Documents
+%%====================================================================
+
+cimd_doc() ->
+    #{
+        <<"client_id">> => <<"https://app.example/oauth/client.json">>,
+        <<"client_name">> => <<"Example MCP Client">>,
+        <<"redirect_uris">> => [<<"http://127.0.0.1:3000/callback">>]
+    }.
+
+cimd_document_fills_public_client_defaults_test() ->
+    {ok, Doc} = barrel_mcp_client_auth_oauth:client_id_metadata_document(cimd_doc()),
+    ?assertEqual([<<"authorization_code">>], maps:get(<<"grant_types">>, Doc)),
+    ?assertEqual([<<"code">>], maps:get(<<"response_types">>, Doc)),
+    ?assertEqual(<<"none">>, maps:get(<<"token_endpoint_auth_method">>, Doc)),
+    %% What the caller supplied survives.
+    ?assertEqual(
+        <<"https://app.example/oauth/client.json">>,
+        maps:get(<<"client_id">>, Doc)
+    ).
+
+cimd_document_keeps_caller_values_test() ->
+    Given = (cimd_doc())#{
+        <<"grant_types">> => [<<"authorization_code">>, <<"refresh_token">>],
+        <<"token_endpoint_auth_method">> => <<"private_key_jwt">>,
+        <<"logo_uri">> => <<"https://app.example/logo.png">>
+    },
+    {ok, Doc} = barrel_mcp_client_auth_oauth:client_id_metadata_document(Given),
+    ?assertEqual(
+        [<<"authorization_code">>, <<"refresh_token">>],
+        maps:get(<<"grant_types">>, Doc)
+    ),
+    ?assertEqual(<<"private_key_jwt">>, maps:get(<<"token_endpoint_auth_method">>, Doc)),
+    ?assertEqual(<<"https://app.example/logo.png">>, maps:get(<<"logo_uri">>, Doc)).
+
+%% The server rejects a document missing any of these, having already
+%% sent the user to a consent page. Better to fail here.
+cimd_document_requires_the_mandatory_fields_test() ->
+    ?assertEqual(
+        {error, {missing, <<"client_id">>}},
+        barrel_mcp_client_auth_oauth:client_id_metadata_document(
+            maps:remove(<<"client_id">>, cimd_doc())
+        )
+    ),
+    ?assertEqual(
+        {error, {missing, <<"client_name">>}},
+        barrel_mcp_client_auth_oauth:client_id_metadata_document(
+            maps:remove(<<"client_name">>, cimd_doc())
+        )
+    ),
+    ?assertEqual(
+        {error, {missing, <<"redirect_uris">>}},
+        barrel_mcp_client_auth_oauth:client_id_metadata_document(
+            maps:remove(<<"redirect_uris">>, cimd_doc())
+        )
+    ),
+    ?assertEqual(
+        {error, {missing, <<"redirect_uris">>}},
+        barrel_mcp_client_auth_oauth:client_id_metadata_document(
+            (cimd_doc())#{<<"redirect_uris">> => []}
+        )
+    ).
+
+cimd_document_rejects_a_non_url_client_id_test() ->
+    lists:foreach(
+        fun(ClientId) ->
+            ?assertEqual(
+                {error, {invalid_client_id, ClientId}},
+                barrel_mcp_client_auth_oauth:client_id_metadata_document(
+                    (cimd_doc())#{<<"client_id">> => ClientId}
+                )
+            )
+        end,
+        [
+            <<"cid-1">>,
+            <<"http://app.example/c.json">>,
+            <<"https://app.example">>,
+            <<"https://app.example/">>
+        ]
+    ).
+
+client_id_metadata_url_test() ->
+    ?assert(
+        barrel_mcp_client_auth_oauth:is_client_id_metadata_url(
+            <<"https://app.example/c.json">>
+        )
+    ),
+    ?assert(
+        barrel_mcp_client_auth_oauth:is_client_id_metadata_url(
+            <<"https://app.example/oauth/client-metadata.json">>
+        )
+    ),
+    %% No path: an origin is not an identity.
+    ?assertNot(
+        barrel_mcp_client_auth_oauth:is_client_id_metadata_url(
+            <<"https://app.example">>
+        )
+    ),
+    %% Not https, so the document could be swapped in transit.
+    ?assertNot(
+        barrel_mcp_client_auth_oauth:is_client_id_metadata_url(
+            <<"http://app.example/c.json">>
+        )
+    ),
+    ?assertNot(barrel_mcp_client_auth_oauth:is_client_id_metadata_url(<<"cid-1">>)),
+    ?assertNot(barrel_mcp_client_auth_oauth:is_client_id_metadata_url(<<>>)),
+    ?assertNot(barrel_mcp_client_auth_oauth:is_client_id_metadata_url(not_a_binary)).
+
+%%====================================================================
+%% Authorization server binding
+%%====================================================================
+
+binding_accepts_the_issuing_server_test() ->
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:check_issuer_binding(
+            #{client_id => <<"cid-1">>, issuer => <<"https://idp.example">>},
+            <<"https://idp.example">>
+        )
+    ).
+
+%% The credentials name a client at the old server. Sending them to
+%% the new one hands it an identity it was never given, and fails in a
+%% way that reads like a bad token.
+binding_rejects_a_changed_server_test() ->
+    ?assertEqual(
+        {error, {issuer_changed, <<"https://old.example">>, <<"https://new.example">>}},
+        barrel_mcp_client_auth_oauth:check_issuer_binding(
+            #{client_id => <<"cid-1">>, issuer => <<"https://old.example">>},
+            <<"https://new.example">>
+        )
+    ).
+
+%% Credentials that never recorded where they came from cannot be
+%% checked, which is itself the problem.
+binding_rejects_unbound_credentials_test() ->
+    ?assertEqual(
+        {error, unbound_credentials},
+        barrel_mcp_client_auth_oauth:check_issuer_binding(
+            #{client_id => <<"cid-1">>}, <<"https://idp.example">>
+        )
+    ).
+
+%% A CIMD client id is a URL any server resolves for itself, so it is
+%% not bound to one and survives the server changing.
+binding_accepts_a_cimd_client_id_anywhere_test() ->
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:check_issuer_binding(
+            #{client_id => <<"https://app.example/c.json">>},
+            <<"https://new.example">>
+        )
+    ),
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:check_issuer_binding(
+            #{
+                client_id => <<"https://app.example/c.json">>,
+                issuer => <<"https://old.example">>
+            },
+            <<"https://new.example">>
+        )
+    ).
+
+binding_accepts_binary_keys_test() ->
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:check_issuer_binding(
+            #{<<"client_id">> => <<"cid-1">>, <<"issuer">> => <<"https://idp.example">>},
+            <<"https://idp.example">>
+        )
+    ).

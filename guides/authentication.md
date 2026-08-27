@@ -435,6 +435,46 @@ auth => {oauth, #{
 The host drives the browser dance and feeds the resulting tokens
 in. The library handles the refresh.
 
+#### Validate the authorization response
+
+Before you send the code to any token endpoint, check what came back
+against what you recorded when you built the authorization URL:
+
+```erlang
+validate(Query, State, Issuer, AsMetadata) ->
+    barrel_mcp_client_auth_oauth:validate_callback(Query, #{
+        state => State,
+        issuer => Issuer,
+        as_metadata => AsMetadata
+    }).
+```
+
+`state` ties the response to the request you started. `iss` (RFC 9207)
+says which authorization server minted the code, and it is the only
+thing that catches a code from one server being replayed at another's
+endpoint, which a client talking to more than one otherwise cannot
+detect.
+
+| AS advertises `iss` | `iss` present | Result |
+|---|---|---|
+| yes | yes | compared |
+| yes | no | rejected |
+| no / unstated | yes | compared |
+| no / unstated | no | accepted |
+
+A present `iss` is compared whatever the metadata says, so a server that
+emits it before advertising it still gets checked. An absent one is only
+fatal when the server said it would send one, where its absence means
+the parameter went missing rather than was never sent.
+
+Comparison is exact. Do not case-fold, drop a default port, add or strip
+a trailing slash, or decode percent-encoding first; each of those merges
+two distinct issuers into one.
+
+Validate error responses too. On a mismatch the `error`,
+`error_description` and `error_uri` are not yours to act on or display,
+since you cannot tell who wrote them.
+
 ### Client Credentials — unattended (M2M)
 
 For agent hosts running without a human. The host already has
@@ -520,9 +560,10 @@ stays a host concern.
 
 ### Dynamic Client Registration — pre-step
 
-Not a grant. Used **before** any of the others when the host
-doesn't have a `client_id` yet (fresh deployment, distributed
-host, dev sandbox). RFC 7591.
+Not a grant. One of three ways to get a `client_id` before any of the
+others; see [Client registration](#client-registration) for choosing
+between them. RFC 7591, and now deprecated in favour of Client ID
+Metadata Documents.
 
 ```
 Host                                    AS
@@ -556,13 +597,98 @@ the AS-issued initial access token via `register_client/3`:
 Feed the returned credentials into one of the grants above. The
 library does not persist them; that's a host concern.
 
+`application_type` is always sent, inferred from `redirect_uris` unless
+you set one. Omitting it defaults to `web` under OIDC, which rejects the
+loopback URIs a local client needs, and the registration error rarely
+explains why. Loopback or non-https redirects infer `native`; remote
+https infers `web`.
+
+Registration can still be refused over redirect-URI rules. Surface that
+to the user or developer rather than swallowing it; retrying with a
+different `application_type` or a conforming redirect URI is reasonable,
+guessing repeatedly is not.
+
+## Client registration
+
+A client needs a `client_id` before it can start any flow. There are
+three ways to have one, and the choice is not free-form:
+
+```erlang
+choose(AsMetadata) ->
+    barrel_mcp_client_auth_oauth:registration_strategy(AsMetadata, #{
+        client_id              => <<"pre-registered-if-you-have-one">>,
+        client_id_metadata_url => <<"https://app.example/oauth/client.json">>
+    }).
+```
+
+Returns, in the specification's priority order:
+
+| Result | When | Why it ranks there |
+|---|---|---|
+| `{pre_registered, ClientId}` | you already have one | it names a relationship that exists; nothing discovered improves on it |
+| `{client_id_metadata_document, Url}` | the AS advertises `client_id_metadata_document_supported` and you host a document | no credential to store, and none to go stale |
+| `{dynamic_registration, Endpoint}` | the AS has a `registration_endpoint` | deprecated; the only branch that mints a credential you must then keep |
+| `prompt_user` | none of the above | a client cannot invent an identity |
+
+### Client ID Metadata Documents
+
+With CIMD the `client_id` **is** an HTTPS URL, and the authorization
+server fetches your metadata from it at authorization time. That removes
+the registration round trip and the per-server credential with it: the
+same URL works at every authorization server, because whoever needs the
+metadata reads it.
+
+Build the document and serve it at exactly that URL:
+
+```erlang
+document() ->
+    barrel_mcp_client_auth_oauth:client_id_metadata_document(#{
+        <<"client_id">> => <<"https://app.example/oauth/client.json">>,
+        <<"client_name">> => <<"Example MCP Client">>,
+        <<"redirect_uris">> => [<<"http://127.0.0.1:3000/callback">>]
+    }).
+```
+
+`client_id`, `client_name` and `redirect_uris` are required.
+`grant_types`, `response_types` and `token_endpoint_auth_method` default
+to the public-client-with-PKCE shape; set them yourself for anything
+else, including adding `refresh_token` to `grant_types` if you want
+refresh tokens.
+
+The `client_id` must be https and carry a path. A bare origin is not an
+identity, and the value in the document must equal the URL you serve it
+from, because servers compare the two and reject a document naming a
+different client than the one they fetched.
+
+### Binding credentials to an authorization server
+
+A `client_id` from pre-registration or dynamic registration belongs to
+the server that issued it. The authorization server can change under a
+client at any time, since it comes from the resource's metadata and that
+is refetched, so check before reusing anything you stored:
+
+```erlang
+check(Stored, Issuer) ->
+    barrel_mcp_client_auth_oauth:check_issuer_binding(Stored, Issuer).
+```
+
+`ok`, `{error, unbound_credentials}` if what you stored never recorded
+where it came from, or `{error, {issuer_changed, Was, Now}}`. Re-register
+against the new server rather than trying the old credentials there:
+sending them hands a client identity to a party never given it, and
+fails in a way that reads like a bad token.
+
+A CIMD `client_id` passes against any issuer. It is a URL the server
+resolves for itself, so it was never bound to one and needs no
+re-registration when the server changes.
+
 ### Where they overlap on the wire
 
 All grants hit the same OAuth-server token endpoint with
 `application/x-www-form-urlencoded` bodies. Confidential clients
 authenticate with HTTP Basic; `private_key_jwt` clients pass a
 `client_assertion` instead. RFC 8707 `resource` is attached on
-every grant. The MCP `2025-11-25` auth sub-spec layers
+every grant. The MCP auth sub-spec layers
 [RFC 9728 PRM](#oauth-protected-resource-metadata-rfc-9728) on
 top so any of the grants can be auto-discovered from a `401`
 response.
@@ -574,7 +700,7 @@ response.
 | Real user, browser available, host wants their identity | `auth_code` (`{oauth, ...}`) |
 | Background agent / cron / unattended host | `client_credentials` (`{oauth_client_credentials, ...}`) |
 | Enterprise SSO; user identity must flow to MCP | `enterprise_managed` (`{oauth_enterprise, ...}`) |
-| No `client_id` yet | `register_client/2` first, then one of the above |
+| No `client_id` yet | [Client registration](#client-registration) first, then one of the above |
 
 ## OAuth Protected Resource Metadata (RFC 9728)
 

@@ -1,10 +1,14 @@
 # barrel_mcp
 
-MCP (Model Context Protocol) library for Erlang. Implements the
-MCP specification (protocol `2025-11-25` with downward negotiation
-through `2024-11-05`) for both server and client modes, including
-the Streamable HTTP transport for Claude Code and any other MCP
-client.
+MCP (Model Context Protocol) library for Erlang. Implements every
+released revision of the specification, `2026-07-28` back through
+`2024-11-05`, for both server and client modes, including the
+Streamable HTTP transport for Claude Code and any other MCP client.
+
+`2026-07-28` is a stateless rewrite and keeps the older revisions
+valid as a "legacy" era. One server answers both, decided per request
+rather than per deployment, so upgrading needs no configuration
+change. See [Protocol Versions](guides/protocol-versions.md).
 
 ## Features
 
@@ -47,7 +51,7 @@ Add to your `rebar.config`:
 {deps, [
     {barrel_mcp,
         {git, "https://github.com/barrel-platform/barrel_mcp.git",
-              {tag, "v2.2.0"}}}
+              {tag, "v3.0.0"}}}
 ]}.
 ```
 
@@ -636,8 +640,9 @@ Your application's entry point should call `barrel_mcp:start_stdio()`.
 ### Supported Methods
 
 **Lifecycle:**
-- `initialize` / `initialized`
-- `ping`
+- `server/discover` (both eras)
+- `initialize` / `initialized` (legacy)
+- `ping` (legacy)
 
 **Tools:**
 - `tools/list`
@@ -647,26 +652,32 @@ Your application's entry point should call `barrel_mcp:start_stdio()`.
 - `resources/list`
 - `resources/read`
 - `resources/templates/list`
-- `resources/subscribe` / `resources/unsubscribe`
+- `resources/subscribe` / `resources/unsubscribe` (legacy)
+- `subscriptions/listen` (modern)
 
 **Prompts:**
 - `prompts/list`
 - `prompts/get`
 
 **Sampling:**
-- `sampling/createMessage`
+- `sampling/createMessage` (legacy; modern servers ask through
+  `inputRequests` on the result instead)
 
 **Logging:**
-- `logging/setLevel`
+- `logging/setLevel` (legacy; modern clients opt in per request)
+
+**Tasks:**
+- `tasks/get`, `tasks/cancel` (both eras)
+- `tasks/list`, `tasks/result` (legacy)
+- `tasks/update` (modern, `io.modelcontextprotocol/tasks` extension)
 
 ## Pending features
 
-Design notes and scoped sketches for things not yet implemented
-live in [`docs/pending-features.md`](docs/pending-features.md).
-First entry: **Enterprise-Managed Authorization** (the second
-half of the MCP `ext-auth` extension — RFC 8693 token-exchange
-chained through an org IdP for SSO-driven MCP access). Open an
-issue if you want one prioritised.
+Nothing is pending as of 3.0.0: the library implements every released
+revision of the specification, and both halves of the `ext-auth`
+extension. [`docs/pending-features.md`](docs/pending-features.md)
+records what is deliberately out of scope. Open an issue if you want
+something prioritised.
 
 ## Development
 

@@ -24,6 +24,8 @@
     cleanup_expired/1,
     %% Capability tracking (set during MCP `initialize').
     set_client_capabilities/2,
+    set_principal/2,
+    get_principal/1,
     has_sampling/1,
     list_sampling_capable/0,
     has_elicitation/1,
@@ -53,6 +55,7 @@
     %% Server -> client notifications.
     broadcast_list_changed/1,
     notify_progress/4,
+    send_notification/3,
     %% In-flight tool tracking (used by `notifications/cancelled').
     record_in_flight/4,
     cancel_in_flight/2,
@@ -92,7 +95,11 @@
     %% Per-session log level set by `logging/setLevel'. Default
     %% `info' per the MCP spec. Filters `notifications/message' on
     %% emit.
-    log_level = info :: log_level()
+    log_level = info :: log_level(),
+    %% Who opened this session. The 2024-11-05 transport hands out an
+    %% endpoint URL and has to check that whoever posts to it is the
+    %% same caller.
+    principal = anonymous :: term()
 }).
 
 -type log_level() ::
@@ -184,6 +191,19 @@ list() ->
 set_client_capabilities(SessionId, Capabilities) when is_map(Capabilities) ->
     gen_server:call(?MODULE, {set_client_capabilities, SessionId, Capabilities}).
 
+%% @doc Record who opened a session.
+-spec set_principal(binary(), term()) -> ok | {error, not_found}.
+set_principal(SessionId, Principal) ->
+    gen_server:call(?MODULE, {set_principal, SessionId, Principal}).
+
+%% @doc Who opened a session.
+-spec get_principal(binary()) -> {ok, term()} | {error, not_found}.
+get_principal(SessionId) ->
+    case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, #mcp_session{principal = P}}] -> {ok, P};
+        [] -> {error, not_found}
+    end.
+
 %% @doc Record the negotiated protocol version on a session. Called
 %% by the HTTP transport after a successful `initialize' so later
 %% requests on the same session can fall back to it when the client
@@ -199,7 +219,7 @@ get_protocol_version(SessionId) ->
         [{_, #mcp_session{protocol_version = V}}] when is_binary(V) ->
             {ok, V};
         [{_, _}] ->
-            {ok, ?MCP_PROTOCOL_VERSION};
+            {ok, ?MCP_LATEST_LEGACY_VERSION};
         [] ->
             {error, not_found}
     end.
@@ -554,6 +574,23 @@ collect_after(Buf, LastId) ->
 set_sse_buffer_max(SessionId, Max) when is_integer(Max), Max > 0 ->
     gen_server:call(?MODULE, {set_sse_buffer_max, SessionId, Max}).
 
+%% @doc Push one notification to a single session over its SSE channel.
+%% Dropped when that session has no channel open.
+-spec send_notification(binary(), binary(), map()) -> ok.
+send_notification(SessionId, Method, Params) ->
+    case get_sse_pid(SessionId) of
+        {ok, Pid} ->
+            Pid !
+                {sse_send_message, #{
+                    <<"jsonrpc">> => <<"2.0">>,
+                    <<"method">> => Method,
+                    <<"params">> => Params
+                }},
+            ok;
+        _ ->
+            ok
+    end.
+
 %% @doc Push a `notifications/progress' envelope to a specific
 %% session over its SSE channel. `Token' is the progressToken the
 %% client supplied on the originating request.
@@ -651,7 +688,21 @@ handle_call({delete, SessionId}, _From, State) ->
             ok
     end,
     true = ets:delete(?SESSION_TABLE, SessionId),
+    %% Its elicitations have nowhere left to deliver a completion.
+    _ = barrel_mcp_elicitation:forget_session(SessionId),
     {reply, ok, State};
+handle_call({set_principal, SessionId, Principal}, _From, State) ->
+    Reply =
+        case ets:lookup(?SESSION_TABLE, SessionId) of
+            [{_, Session}] ->
+                true = ets:insert(
+                    ?SESSION_TABLE, {SessionId, Session#mcp_session{principal = Principal}}
+                ),
+                ok;
+            [] ->
+                {error, not_found}
+        end,
+    {reply, Reply, State};
 handle_call({set_client_capabilities, SessionId, Caps}, _From, State) ->
     Reply =
         case ets:lookup(?SESSION_TABLE, SessionId) of

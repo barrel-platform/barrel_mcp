@@ -230,7 +230,7 @@ Headers attached on every outgoing request:
 | `mcp-session-id: <id>` | after the initialize POST returns one | echoed on every subsequent POST/GET/DELETE. |
 | `mcp-protocol-version: <version>` | after init completes | the negotiated version. |
 | `authorization: Bearer ...` | when an auth handle attaches one | bearer or OAuth-fronted. |
-| `last-event-id: <id>` | reconnecting the GET SSE | not yet a full replay path; tracked but not yet replayed. |
+| `last-event-id: <id>` | reconnecting the GET SSE | the server replays what it buffered past that id. Legacy only: `2026-07-28` has no resumable streams. |
 
 The POST endpoint may answer with a JSON envelope or with an SSE
 stream. The transport classifies on `content-type` and either

@@ -230,7 +230,9 @@ test_read_resource_not_found() ->
     Response = barrel_mcp_protocol:handle(Request),
     ?assert(maps:is_key(<<"error">>, Response)),
     Error = maps:get(<<"error">>, Response),
-    ?assertEqual(-32601, maps:get(<<"code">>, Error)).
+    %% Resource not found is -32002, not "method not found". The
+    %% 2026-07-28 revision moves this to -32602.
+    ?assertEqual(-32002, maps:get(<<"code">>, Error)).
 
 test_resource_mime_type() ->
     ok = barrel_mcp_registry:reg(resource, <<"html_res">>, ?MODULE, text_resource, #{

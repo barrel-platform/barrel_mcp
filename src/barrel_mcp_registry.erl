@@ -59,7 +59,9 @@
     reg/5,
     unreg/2,
     run/3,
+    run/4,
     run_tool/3,
+    param_header_names/0,
     run_completion/3,
     find/2,
     all/0,
@@ -181,7 +183,8 @@ reg(Type, Name, Module, Function) ->
 %% @param Type Handler type
 %% @param Name Unique name
 %% @param Module Handler module
-%% @param Function Handler function (must be exported with arity 1)
+%% @param Function Handler function (exported with arity 1, or arity 2
+%%        to receive the request `Ctx')
 %% @param Opts Type-specific options
 %% @returns `ok' on success, `{error, {function_not_exported, M, F, 1}}'
 %%          if the function doesn't exist
@@ -234,6 +237,22 @@ unreg(Type, Name) ->
     Name :: binary(),
     Args :: map().
 run(Type, Name, Args) ->
+    run(Type, Name, Args, #{}).
+
+%% @doc Variant of {@link run/3} that threads a context to arity-2
+%% handlers.
+%%
+%% `Ctx' is merged under the `tool_name' every handler already gets, so
+%% a caller that has a request context (the wire path) can pass the
+%% `mcp_ctx' and `mrtr' keys `barrel_mcp:input/2' and
+%% `client_supports/2' read, and one that does not (a local invoke)
+%% passes nothing and sees today's behaviour.
+-spec run(Type, Name, Args, Ctx) -> {ok, term()} | {error, term()} when
+    Type :: handler_type(),
+    Name :: binary(),
+    Args :: map(),
+    Ctx :: map().
+run(Type, Name, Args, Ctx) when is_map(Ctx) ->
     case find(Type, Name) of
         {ok, #{module := M, function := F}} ->
             try
@@ -241,7 +260,7 @@ run(Type, Name, Args) ->
                 %% a local invoke reaches the same handlers the wire does.
                 Result =
                     case erlang:function_exported(M, F, 2) of
-                        true -> M:F(Args, #{tool_name => Name});
+                        true -> M:F(Args, Ctx#{tool_name => Name});
                         false -> M:F(Args)
                     end,
                 {ok, Result}
@@ -353,6 +372,13 @@ invoke_tool_handler(
             ReplyTo ! {tool_failed, RequestId, internal_error}
     end.
 
+%% The handler cannot finish without more from the client. Under MRTR
+%% it says so by returning rather than blocking, and the request ends
+%% here; the client retries with what it gathered.
+deliver_tool_result({input_required, Requests, State}, _Handler, ReplyTo, RequestId) when
+    is_map(Requests)
+->
+    ReplyTo ! {tool_input_required, RequestId, Requests, State};
 deliver_tool_result({tool_error, Content}, _Handler, ReplyTo, RequestId) ->
     ReplyTo ! {tool_error, RequestId, Content};
 deliver_tool_result({tool_error, Content, Meta}, _Handler, ReplyTo, RequestId) when
@@ -495,6 +521,7 @@ init([]) ->
     ]),
     %% Initialize persistent_term with empty map
     persistent_term:put(?REGISTRY_KEY, #{}),
+    persistent_term:put(?PARAM_HEADERS_KEY, []),
 
     %% Check if we should wait for an external process
     case application:get_env(barrel_mcp, wait_for_proc) of
@@ -541,7 +568,8 @@ ready({call, From}, _, _Data) ->
 %% @private
 terminate(_Reason, _State, _Data) ->
     try
-        persistent_term:erase(?REGISTRY_KEY)
+        persistent_term:erase(?REGISTRY_KEY),
+        persistent_term:erase(?PARAM_HEADERS_KEY)
     catch
         _:_ -> ok
     end,
@@ -564,22 +592,26 @@ wait_for_proc(Parent, Proc) ->
     end.
 
 do_reg(Type, Name, Module, Function, Opts) ->
-    %% Tools may register handlers as arity 1 (legacy) or arity 2
-    %% (new, accepts Ctx with progress and cancel hooks). Resources,
-    %% prompts and resource templates remain arity 1.
+    %% Every handler but a completion may be arity 1 or arity 2. The
+    %% arity-2 form takes a `Ctx': progress and cancel hooks for a tool,
+    %% and for any of them the request context that multi round-trip
+    %% requests need to ask the client for input.
     Arities =
         case Type of
-            tool -> [2, 1];
             completion -> [2];
-            _ -> [1]
+            _ -> [2, 1]
         end,
     case any_exported(Module, Function, Arities) of
         true ->
-            Handler = build_handler(Type, Module, Function, Opts),
-            true = ets:insert(?REGISTRY_TABLE, {{Type, Name}, Handler}),
-            sync_persistent_term(),
-            barrel_mcp_session:broadcast_list_changed(Type),
-            ok;
+            case build_handler(Type, Module, Function, Opts) of
+                {error, _} = Err ->
+                    Err;
+                Handler ->
+                    true = ets:insert(?REGISTRY_TABLE, {{Type, Name}, Handler}),
+                    sync_persistent_term(),
+                    broadcast_list_changed(Type),
+                    ok
+            end;
         false ->
             {error, {function_not_exported, Module, Function, lists:max(Arities)}}
     end.
@@ -593,22 +625,26 @@ any_exported(Module, Function, Arities) ->
 do_unreg(Type, Name) ->
     true = ets:delete(?REGISTRY_TABLE, {Type, Name}),
     sync_persistent_term(),
-    barrel_mcp_session:broadcast_list_changed(Type),
+    broadcast_list_changed(Type),
     ok.
 
+%% Legacy clients hear this on their session's SSE stream, modern ones
+%% on a `subscriptions/listen' stream. One catalogue, two deliveries.
+broadcast_list_changed(Type) ->
+    barrel_mcp_session:broadcast_list_changed(Type),
+    barrel_mcp_subscriptions:list_changed(Type).
+
 build_handler(tool, Module, Function, Opts) ->
-    Base = #{
-        module => Module,
-        function => Function,
-        description => maps:get(description, Opts, <<>>),
-        input_schema => maps:get(input_schema, Opts, #{type => <<"object">>}),
-        validate_input => maps:get(validate_input, Opts, false),
-        long_running => maps:get(long_running, Opts, false),
-        validate_output => maps:get(validate_output, Opts, false)
-    },
-    Merged = maps:merge(Base, opt_field(output_schema, Opts)),
-    Merged1 = maps:merge(Merged, opt_field(annotations, Opts)),
-    add_metadata(Merged1, Opts);
+    InputSchema = maps:get(input_schema, Opts, #{type => <<"object">>}),
+    %% Both schemas are checked here rather than on every call: a schema
+    %% that is not one would otherwise fail at the worst moment, and a
+    %% caller registering it can still do something about it.
+    case check_schemas(InputSchema, Opts) of
+        {error, _} = SchemaErr ->
+            SchemaErr;
+        ok ->
+            build_tool(Module, Function, Opts, InputSchema)
+    end;
 build_handler(resource, Module, Function, Opts) ->
     Base = #{
         module => Module,
@@ -618,7 +654,8 @@ build_handler(resource, Module, Function, Opts) ->
         description => maps:get(description, Opts, <<>>),
         mime_type => maps:get(mime_type, Opts, <<"text/plain">>)
     },
-    add_metadata(maps:merge(Base, opt_field(annotations, Opts)), Opts);
+    Merged = maps:merge(Base, opt_field(cache_ttl_ms, Opts)),
+    add_metadata(maps:merge(Merged, opt_field(annotations, Opts)), Opts);
 build_handler(prompt, Module, Function, Opts) ->
     Base = #{
         module => Module,
@@ -637,11 +674,100 @@ build_handler(resource_template, Module, Function, Opts) ->
         description => maps:get(description, Opts, <<>>),
         mime_type => maps:get(mime_type, Opts, <<"text/plain">>)
     },
-    add_metadata(maps:merge(Base, opt_field(annotations, Opts)), Opts);
+    Merged = maps:merge(Base, opt_field(cache_ttl_ms, Opts)),
+    add_metadata(maps:merge(Merged, opt_field(annotations, Opts)), Opts);
 build_handler(completion, Module, Function, _Opts) ->
     %% Completion handlers are arity 2: (PartialValue, Ctx) ->
     %%   {ok, [Suggestion]} | {ok, [Suggestion], #{has_more => true}}.
     #{module => Module, function => Function}.
+
+build_tool(Module, Function, Opts, InputSchema) ->
+    %% An invalid `x-mcp-header' annotation makes the whole tool
+    %% definition invalid, so it fails registration rather than every
+    %% later call. Scanning once here also keeps the per-request
+    %% validation off the schema-walking path.
+    case barrel_mcp_headers:scan_header_params(InputSchema) of
+        {error, Reason} ->
+            {error, {invalid_input_schema, Reason}};
+        {ok, HeaderParams} ->
+            Base = #{
+                module => Module,
+                function => Function,
+                description => maps:get(description, Opts, <<>>),
+                input_schema => InputSchema,
+                header_params => HeaderParams,
+                validate_input => maps:get(validate_input, Opts, false),
+                long_running => maps:get(long_running, Opts, false),
+                validate_output => maps:get(validate_output, Opts, false)
+            },
+            Merged = maps:merge(Base, opt_field(output_schema, Opts)),
+            Merged1 = maps:merge(Merged, opt_field(annotations, Opts)),
+            add_metadata(Merged1, Opts)
+    end.
+
+%% `inputSchema' is object rooted in every revision. `outputSchema' is
+%% accepted with any root: registration happens before any revision is
+%% negotiated, and what a given revision can render is decided when the
+%% tool is listed.
+check_schemas(InputSchema, Opts) ->
+    case check_schema(input_schema, InputSchema) of
+        {error, _} = Err ->
+            Err;
+        ok ->
+            case object_rooted(InputSchema) of
+                false ->
+                    {error, {invalid_input_schema, not_object_rooted}};
+                true ->
+                    case maps:find(output_schema, Opts) of
+                        error -> ok;
+                        {ok, Output} -> check_schema(output_schema, Output)
+                    end
+            end
+    end.
+
+check_schema(Which, Schema) ->
+    case barrel_mcp_jsonschema:validate_schema(normalize_schema(Schema)) of
+        {error, Errors} ->
+            {error, {list_to_atom("invalid_" ++ atom_to_list(Which)), Errors}};
+        ok ->
+            case barrel_mcp_jsonschema:compile(normalize_schema(Schema)) of
+                {ok, _} ->
+                    ok;
+                {error, Reason} ->
+                    {error, {list_to_atom("invalid_" ++ atom_to_list(Which)), Reason}}
+            end
+    end.
+
+object_rooted(Schema) when is_map(Schema) ->
+    case type_of(Schema) of
+        undefined -> true;
+        Type -> Type =:= <<"object">>
+    end;
+object_rooted(_Schema) ->
+    false.
+
+type_of(Schema) ->
+    case maps:get(<<"type">>, Schema, maps:get(type, Schema, undefined)) of
+        T when is_binary(T) -> T;
+        T when is_atom(T), T =/= undefined -> atom_to_binary(T, utf8);
+        _ -> undefined
+    end.
+
+%% Handlers may be registered with atom keys, which the validator does
+%% not speak. Only the shape is normalised; values pass through.
+normalize_schema(Map) when is_map(Map) ->
+    maps:fold(
+        fun(K, V, Acc) -> Acc#{to_key(K) => normalize_schema(V)} end,
+        #{},
+        Map
+    );
+normalize_schema(List) when is_list(List) ->
+    [normalize_schema(V) || V <- List];
+normalize_schema(Other) ->
+    Other.
+
+to_key(K) when is_atom(K) -> atom_to_binary(K, utf8);
+to_key(K) -> K.
 
 add_metadata(Handler, Opts) ->
     Handler1 =
@@ -660,6 +786,13 @@ opt_field(Key, Opts) ->
         V -> #{Key => V}
     end.
 
+%% @doc The `Mcp-Param-{Name}' headers registered tools ask clients to
+%% send, lowercased. Used by the transport to build
+%% `Access-Control-Allow-Headers'.
+-spec param_header_names() -> [binary()].
+param_header_names() ->
+    persistent_term:get(?PARAM_HEADERS_KEY, []).
+
 sync_persistent_term() ->
     Handlers = ets:foldl(
         fun({Key, Handler}, Acc) ->
@@ -668,4 +801,22 @@ sync_persistent_term() ->
         #{},
         ?REGISTRY_TABLE
     ),
-    persistent_term:put(?REGISTRY_KEY, Handlers).
+    persistent_term:put(?REGISTRY_KEY, Handlers),
+    persistent_term:put(?PARAM_HEADERS_KEY, collect_param_headers(Handlers)).
+
+%% The union of `Mcp-Param-{Name}' headers any registered tool asks a
+%% client to send. Cached alongside the registry because CORS needs it
+%% on every response and `Access-Control-Allow-Headers' cannot express
+%% a prefix.
+collect_param_headers(Handlers) ->
+    Names = maps:fold(
+        fun
+            ({tool, _}, Handler, Acc) ->
+                [N || {N, _Path} <- maps:get(header_params, Handler, [])] ++ Acc;
+            (_Key, _Handler, Acc) ->
+                Acc
+        end,
+        [],
+        Handlers
+    ),
+    lists:usort([<<"mcp-param-", (string:lowercase(N))/binary>> || N <- Names]).

@@ -22,7 +22,10 @@ http_stream_test_() ->
         {"Session ID in response header", fun test_session_header/0},
         {"DELETE terminates session", fun test_delete_session/0},
         {"Auth required when configured", fun test_auth_required/0},
-        {"Auth passes with valid key", fun test_auth_valid/0}
+        {"Auth passes with valid key", fun test_auth_valid/0},
+        {"Batch accepted on a revision that has it", fun test_batch_accepted/0},
+        {"Batch refused once the revision removed it", fun test_batch_refused/0},
+        {"Batch of responses is accepted silently", fun test_batch_responses/0}
     ]}.
 
 setup() ->
@@ -314,3 +317,62 @@ test_auth_valid() ->
     ?assertEqual(200, Status),
 
     barrel_mcp:stop_http_stream().
+
+%%====================================================================
+%% Batches over the wire
+%%
+%% 2025-03-26 requires receiving them; 2025-06-18 removed them. The
+%% header names the revision, so one listener answers both ways.
+%%====================================================================
+
+%% Each case owns its listener, as the rest of this suite does.
+with_batch_server(Port, Fun) ->
+    {ok, _} = barrel_mcp:start_http_stream(#{port => Port, session_enabled => false}),
+    try
+        Fun()
+    after
+        barrel_mcp:stop_http_stream()
+    end.
+
+batch_post(Port, Revision, Body) ->
+    hackney:request(
+        post,
+        iolist_to_binary(io_lib:format("http://localhost:~B/mcp", [Port])),
+        [
+            {<<"content-type">>, <<"application/json">>},
+            {<<"accept">>, <<"application/json, text/event-stream">>},
+            {<<"mcp-protocol-version">>, Revision}
+        ],
+        iolist_to_binary(json:encode(Body)),
+        []
+    ).
+
+ping(Id) ->
+    #{<<"jsonrpc">> => <<"2.0">>, <<"id">> => Id, <<"method">> => <<"ping">>}.
+
+test_batch_accepted() ->
+    with_batch_server(19096, fun() ->
+        {ok, 200, _, Body} = batch_post(19096, <<"2025-03-26">>, [ping(1), ping(2)]),
+        Decoded = json:decode(Body),
+        ?assert(is_list(Decoded)),
+        ?assertEqual([1, 2], [maps:get(<<"id">>, R) || R <- Decoded])
+    end).
+
+test_batch_refused() ->
+    with_batch_server(19097, fun() ->
+        {ok, 400, _, Body} = batch_post(19097, <<"2025-11-25">>, [ping(1)]),
+        Error = maps:get(<<"error">>, json:decode(Body)),
+        ?assertEqual(-32600, maps:get(<<"code">>, Error))
+    end).
+
+%% Nothing to answer, so the acceptance is the status alone.
+test_batch_responses() ->
+    Responses = [
+        #{<<"jsonrpc">> => <<"2.0">>, <<"id">> => 1, <<"result">> => #{}},
+        #{<<"jsonrpc">> => <<"2.0">>, <<"id">> => 2, <<"result">> => #{}}
+    ],
+    with_batch_server(19098, fun() ->
+        {ok, Status, _, Body} = batch_post(19098, <<"2025-03-26">>, Responses),
+        ?assertEqual(202, Status),
+        ?assertEqual(<<>>, Body)
+    end).

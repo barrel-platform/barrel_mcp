@@ -84,6 +84,9 @@ start_client(Extras) ->
     Spec = maps:merge(
         #{
             transport => {http, ?URL},
+            %% ping is a handshake-era method, so pin the era it
+            %% belongs to rather than probing into one without it.
+            protocol_version => <<"2025-11-25">>,
             handler => {barrel_mcp_client_handler_default, []}
         },
         Extras
@@ -139,7 +142,9 @@ wait_progress_absent(Pid, Tok, N) ->
 
 progress_map(Pid) ->
     {_State, Data} = sys:get_state(Pid),
-    %% data record: progress is the 9th field (1-based: 1=record_tag,
+    %% data record: progress is the 10th element (1-based: 1=record_tag,
     %% 2=spec, 3=transport, 4=request_id, 5=pending, 6=handler_mod,
     %% 7=handler_state, 8=async_replies, 9=subscriptions, 10=progress).
+    %% This layout is load-bearing: new fields go at the end of the
+    %% record, or this reads the wrong one.
     element(10, Data).
