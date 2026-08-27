@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- stdio now serves the legacy server-to-client surface. The transport
+  advertised `resources.subscribe` and `listChanged` but had no session
+  to hang them on, so `resources/subscribe` failed with `-32602` and no
+  `notifications/*/list_changed` ever arrived. The one channel is now
+  one session, attached once a handshake revision is negotiated; a
+  modern connection is unaffected and keeps using
+  `subscriptions/listen`.
+
 ## [3.0.0] - 2026-08-15
 
 MCP `2026-07-28` support. That revision is a stateless rewrite: no

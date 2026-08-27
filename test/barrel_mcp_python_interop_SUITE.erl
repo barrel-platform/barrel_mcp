@@ -38,7 +38,9 @@
     erlang_client_against_python_server/1,
     modern_python_client_against_erlang_server/1,
     modern_erlang_client_against_python_server/1,
-    modern_erlang_client_drives_input_required/1
+    modern_erlang_client_drives_input_required/1,
+    sse_python_client_against_erlang_server/1,
+    stdio_python_client_against_erlang_server/1
 ]).
 
 %% Tool / resource / prompt handlers exported for the registry.
@@ -62,12 +64,14 @@
     touch_tool/1,
     region_tool/1,
     insatiable_tool/2,
+    noisy_tool/2,
     gated_prompt/2,
     gated_resource/2
 ]).
 
 -define(PORT, 22451).
 -define(MODERN_PORT, 22452).
+-define(SSE_PORT, 22453).
 -define(MODERN, <<"2026-07-28">>).
 
 all() ->
@@ -76,7 +80,9 @@ all() ->
         erlang_client_against_python_server,
         modern_python_client_against_erlang_server,
         modern_erlang_client_against_python_server,
-        modern_erlang_client_drives_input_required
+        modern_erlang_client_drives_input_required,
+        sse_python_client_against_erlang_server,
+        stdio_python_client_against_erlang_server
     ].
 
 %% The two SDK generations live in separate virtualenvs: v1 speaks the
@@ -226,6 +232,77 @@ modern_python_client_against_erlang_server(Config) ->
     with_python(python_modern, Config, "INTEROP_PYTHON_MODERN", fun(Python) ->
         modern_direction_a(Python)
     end).
+
+%% The transport Streamable HTTP replaced. The SDK opens a GET stream,
+%% reads the endpoint out of the first event and posts there; nothing
+%% about that endpoint is known in advance, so a client that gets an
+%% answer proves the whole handshake.
+sse_python_client_against_erlang_server(Config) ->
+    with_python(python, Config, "INTEROP_PYTHON", fun(Python) ->
+        sse_direction_a(Python)
+    end).
+
+sse_direction_a(Python) ->
+    ok = ensure_fixture(),
+    {ok, _} = barrel_mcp:start_http_stream(#{
+        port => ?SSE_PORT,
+        sse_path => <<"/sse">>,
+        sse_message_path => <<"/messages">>
+    }),
+    Url = lists:flatten(io_lib:format("http://127.0.0.1:~B/sse", [?SSE_PORT])),
+    Script = filename:join(["test", "interop", "client_sse.py"]),
+    try
+        case run_python(Python, [Script, Url], root_dir()) of
+            {0, Output} ->
+                ?assertNotEqual(nomatch, string:find(Output, "OK"));
+            {Status, Output} ->
+                ct:fail({sse_python_client_failed, Status, Output})
+        end
+    after
+        try
+            barrel_mcp:stop_http_stream()
+        catch
+            _:_ -> ok
+        end,
+        cleanup_fixture()
+    end,
+    ok.
+
+%% The stdio server behind a real OS pipe, driven by a foreign client.
+%% The SDK owns the child process, so framing is the only contract
+%% between the two ends.
+stdio_python_client_against_erlang_server(Config) ->
+    with_python(python, Config, "INTEROP_PYTHON", fun(Python) ->
+        stdio_direction_a(Python)
+    end).
+
+stdio_direction_a(Python) ->
+    Script = filename:join(["test", "interop", "client_stdio.py"]),
+    Args = [Script, erl_executable() | child_args()],
+    case run_python(Python, Args, root_dir()) of
+        {0, Output} ->
+            ?assertNotEqual(nomatch, string:find(Output, "OK"));
+        {Status, Output} ->
+            ct:fail({stdio_python_client_failed, Status, Output})
+    end.
+
+erl_executable() ->
+    filename:join([code:root_dir(), "bin", "erl"]).
+
+%% Logging has to go to stderr: the default handler writes stdout, which
+%% is the wire. The paths are reversed because each `-pa' prepends.
+child_args() ->
+    Dirs = lists:reverse([D || D <- code:get_path(), filelib:is_dir(D)]),
+    Paths = lists:append([["-pa", D] || D <- Dirs]),
+    [
+        "-noshell",
+        "-boot",
+        "no_dot_erlang",
+        "-kernel",
+        "logger",
+        "[{handler,default,logger_std_h,#{config=>#{type=>standard_error}}}]"
+    ] ++ Paths ++
+        ["-eval", "barrel_mcp_stdio_child:start()"].
 
 modern_direction_a(Python) ->
     ok = ensure_modern_fixture(),
@@ -382,6 +459,27 @@ ensure_modern_fixture() ->
         description => <<"Never satisfied">>,
         input_schema => #{<<"type">> => <<"object">>}
     }),
+    ok = barrel_mcp_registry:reg(tool, <<"progress">>, ?MODULE, progress_tool, #{
+        description => <<"Emits three progress notifications">>,
+        input_schema => #{<<"type">> => <<"object">>}
+    }),
+    ok = barrel_mcp_registry:reg(tool, <<"noisy">>, ?MODULE, noisy_tool, #{
+        description => <<"Logs at info and debug">>,
+        input_schema => #{<<"type">> => <<"object">>}
+    }),
+    _ = [
+        barrel_mcp_registry:reg(
+            tool,
+            iolist_to_binary(io_lib:format("filler_~2..0B", [N])),
+            ?MODULE,
+            echo_tool,
+            #{
+                description => <<"Padding, so tools/list needs more than one page">>,
+                input_schema => #{<<"type">> => <<"object">>}
+            }
+        )
+     || N <- lists:seq(1, 60)
+    ],
     ok = barrel_mcp_registry:reg(prompt, <<"gated">>, ?MODULE, gated_prompt, #{
         description => <<"Asks who to greet before rendering">>
     }),
@@ -412,17 +510,24 @@ cleanup_modern_fixture() ->
         catch
             _:_ -> ok
         end
-     || {Kind, Name} <- [
-            {tool, <<"echo">>},
-            {tool, <<"confirm">>},
-            {tool, <<"touch">>},
-            {tool, <<"regional">>},
-            {tool, <<"insatiable">>},
-            {resource, <<"greeting">>},
-            {resource, <<"gated_res">>},
-            {prompt, <<"hello_prompt">>},
-            {prompt, <<"gated">>}
-        ]
+     || {Kind, Name} <-
+            [
+                {tool, <<"echo">>},
+                {tool, <<"confirm">>},
+                {tool, <<"touch">>},
+                {tool, <<"regional">>},
+                {tool, <<"insatiable">>},
+                {tool, <<"progress">>},
+                {tool, <<"noisy">>},
+                {resource, <<"greeting">>},
+                {resource, <<"gated_res">>},
+                {prompt, <<"hello_prompt">>},
+                {prompt, <<"gated">>}
+            ] ++
+                [
+                    {tool, iolist_to_binary(io_lib:format("filler_~2..0B", [N]))}
+                 || N <- lists:seq(1, 60)
+                ]
     ],
     ok.
 
@@ -884,6 +989,13 @@ progress_tool(_Args, Ctx) ->
     Emit(3, 3, undefined),
     timer:sleep(50),
     <<"progressed">>.
+
+%% Modern logging is per-request opt-in, so a client that never named a
+%% level gets nothing from this.
+noisy_tool(_Args, Ctx) ->
+    ok = barrel_mcp:log(Ctx, info, <<"interop">>, <<"loud">>),
+    ok = barrel_mcp:log(Ctx, debug, <<"interop">>, <<"quiet">>),
+    <<"logged">>.
 
 %% Returns structuredContent on the wire.
 structured_tool(_) ->

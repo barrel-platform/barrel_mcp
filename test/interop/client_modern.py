@@ -231,16 +231,83 @@ async def prompt_and_resource_ask_too(client: Client) -> None:
         fail(f"gated resource returned {read.contents[0].text!r}")
 
 
+async def pages_are_walked(client: Client) -> None:
+    """A cursor the client treats as opaque has to carry across pages."""
+    names: list[str] = []
+    pages = 0
+    cursor = None
+    while True:
+        page = await client.list_tools(cursor=cursor)
+        names.extend(t.name for t in page.tools)
+        pages += 1
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+    if pages < 2:
+        fail(f"the fixture paginates, but tools/list came back in {pages} page")
+    if len(names) != len(set(names)):
+        fail("a tool appeared on more than one page")
+    for expected in (EXPECTED_TOOL, "confirm", "regional"):
+        if expected not in names:
+            fail(f"walking the cursor missed {expected}")
+
+
+async def progress_reaches_the_caller(client: Client) -> None:
+    seen: list[tuple[float, float | None]] = []
+
+    async def on_progress(progress: float, total: float | None, message: str | None) -> None:
+        seen.append((progress, total))
+
+    result = await client.call_tool("progress", {}, progress_callback=on_progress)
+    if result.content[0].text != "progressed":
+        fail(f"progress tool returned {result.content[0].text!r}")
+    if [p for p, _ in seen] != [1, 2, 3]:
+        fail(f"progress notifications arrived as {seen}")
+
+
+async def logs_are_opt_in(url: str) -> None:
+    """Modern logging is per-request: no `logLevel` in `_meta`, no logs.
+
+    The same tool is called twice, once by a client that opted in at
+    info and once by one that did not, so silence is measured against a
+    run that is known to produce output.
+    """
+    quiet: list[str] = []
+    loud: list[str] = []
+
+    def collect(into: list[str]):
+        async def handler(params: types.LoggingMessageNotificationParams) -> None:
+            into.append(params.level)
+
+        return handler
+
+    async with Client(url, mode="auto", logging_callback=collect(quiet)) as client:
+        await client.call_tool("noisy", {})
+    if quiet:
+        fail(f"a client that never opted in received {quiet}")
+
+    async with Client(
+        url, mode="auto", log_level="info", logging_callback=collect(loud)
+    ) as client:
+        await client.call_tool("noisy", {})
+    # `debug` is below the level we asked for.
+    if loud != ["info"]:
+        fail(f"opting in at info delivered {loud}")
+
+
 async def run(url: str) -> None:
     await probe(url)
     async with Client(url, mode="auto", elicitation_callback=elicit) as client:
         await catalogue(client)
+        await pages_are_walked(client)
         await results_are_stamped(client)
         await multi_round_trip(client)
         await prompt_and_resource_ask_too(client)
         await mirrored_header_round_trip(client)
+        await progress_reaches_the_caller(client)
         await subscription_stream(client)
         await unsubscribed_types_stay_quiet(client)
+    await logs_are_opt_in(url)
     await undeclared_capability_is_refused(url)
     await input_rounds_are_capped(url)
     print("OK")

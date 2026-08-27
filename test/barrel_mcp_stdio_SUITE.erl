@@ -30,13 +30,16 @@
     notifications_are_never_answered/1,
     oversized_frame_closes_the_server/1,
     subscriptions_are_served/1,
+    legacy_subscribe_is_served/1,
     eof_stops_the_server/1,
     client_subscribes_over_real_stdio/1
 ]).
 
--export([echo_tool/1, slow_tool/1, a_tool/1]).
+-export([echo_tool/1, slow_tool/1, a_tool/1, a_resource/1]).
 
 -define(MODERN, <<"2026-07-28">>).
+-define(LEGACY, <<"2025-11-25">>).
+-define(WATCHED, <<"file:///watched">>).
 
 all() ->
     [
@@ -50,6 +53,7 @@ all() ->
         notifications_are_never_answered,
         oversized_frame_closes_the_server,
         subscriptions_are_served,
+        legacy_subscribe_is_served,
         eof_stops_the_server,
         client_subscribes_over_real_stdio
     ].
@@ -88,6 +92,8 @@ slow_tool(Args) ->
     <<"slept">>.
 
 a_tool(_Args) -> <<"ok">>.
+
+a_resource(_Args) -> <<"body">>.
 
 %%====================================================================
 %% Cases
@@ -226,6 +232,34 @@ subscriptions_are_served(_Config) ->
     wait_until(fun() -> barrel_mcp_subscriptions:count() =:= 0 end, 5000),
     ?assertEqual(0, barrel_mcp_subscriptions:count()).
 
+%% `resources/subscribe' needs a session, and stdio has exactly one.
+%% The capability is advertised on every handshake revision, so a client
+%% that subscribes has to get the update.
+legacy_subscribe_is_served(_Config) ->
+    ok = barrel_mcp:reg_resource(<<"watched">>, ?MODULE, a_resource, #{uri => ?WATCHED}),
+    {Dev, Server} = start_server(),
+    try
+        send(Dev, legacy_request(1, <<"initialize">>, initialize_params())),
+        Init = barrel_mcp_stdio_io:next_line(Dev),
+        ?assertEqual(?LEGACY, maps:get(<<"protocolVersion">>, maps:get(<<"result">>, Init))),
+
+        send(Dev, legacy_request(2, <<"resources/subscribe">>, #{<<"uri">> => ?WATCHED})),
+        ?assertMatch(#{<<"id">> := 2, <<"result">> := _}, barrel_mcp_stdio_io:next_line(Dev)),
+
+        ok = barrel_mcp:notify_resource_updated(?WATCHED),
+        Note = barrel_mcp_stdio_io:next_line(Dev),
+        ?assertEqual(<<"notifications/resources/updated">>, maps:get(<<"method">>, Note)),
+        ?assertEqual(?WATCHED, maps:get(<<"uri">>, maps:get(<<"params">>, Note))),
+
+        send(Dev, legacy_request(3, <<"resources/unsubscribe">>, #{<<"uri">> => ?WATCHED})),
+        ?assertMatch(#{<<"id">> := 3, <<"result">> := _}, barrel_mcp_stdio_io:next_line(Dev)),
+        ok = barrel_mcp:notify_resource_updated(?WATCHED),
+        ?assertEqual(timeout, barrel_mcp_stdio_io:next_line(Dev))
+    after
+        stop_server(Dev, Server),
+        barrel_mcp_registry:unreg(resource, <<"watched">>)
+    end.
+
 eof_stops_the_server(_Config) ->
     {Dev, Server} = start_server(),
     MRef = monitor(process, Server),
@@ -353,6 +387,22 @@ request(Id, Method, Params) ->
         <<"id">> => Id,
         <<"method">> => Method,
         <<"params">> => Params#{<<"_meta">> => modern_meta()}
+    }.
+
+%% No `_meta' protocol stamp: the era comes from the handshake instead.
+legacy_request(Id, Method, Params) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => Id,
+        <<"method">> => Method,
+        <<"params">> => Params
+    }.
+
+initialize_params() ->
+    #{
+        <<"protocolVersion">> => ?LEGACY,
+        <<"capabilities">> => #{},
+        <<"clientInfo">> => #{<<"name">> => <<"ct">>, <<"version">> => <<"0">>}
     }.
 
 cancelled(Id) ->

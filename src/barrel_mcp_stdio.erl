@@ -88,6 +88,7 @@
     reader :: pid() | undefined,
     writer :: pid() | undefined,
     version :: binary() | undefined,
+    session :: binary() | undefined,
     requests = #{} :: #{term() => #entry{}},
     %% Monitor and result-tag indexes into `requests'.
     by_mref = #{} :: #{reference() => term()},
@@ -126,13 +127,18 @@ start_link() ->
 %% Coordinator
 %%====================================================================
 
+%% The one channel is one session, so `resources/subscribe' and the rest
+%% of the legacy server-to-client surface have somewhere to live. The
+%% channel is only attached once a handshake revision is negotiated; see
+%% bind_session/2.
 init([]) ->
     process_flag(trap_exit, true),
     ok = io:setopts(standard_io, [binary, {encoding, latin1}]),
     Self = self(),
     Writer = spawn_link(?MODULE, writer_init, []),
     Reader = spawn_link(?MODULE, reader_init, [Self]),
-    {ok, #state{reader = Reader, writer = Writer}}.
+    {ok, SessionId} = barrel_mcp_session:create(#{}),
+    {ok, #state{reader = Reader, writer = Writer, session = SessionId}}.
 
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
@@ -160,6 +166,9 @@ handle_info({stdio_error, _Reason}, State) ->
     {stop, normal, State};
 handle_info({stdio_result, Tag, Response}, State) ->
     {noreply, settle(Tag, Response, State)};
+handle_info({sse_send_message, Message}, State) ->
+    write(State, Message),
+    {noreply, State};
 handle_info(stdio_notified, State) ->
     {noreply, drain_notifications(State#state{notifying = 0})};
 handle_info({'DOWN', MRef, process, _Pid, Reason}, State) ->
@@ -172,10 +181,21 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, State) ->
+    _ = delete_session(State#state.session),
     maps:foreach(fun(_Id, Entry) -> stop_entry(Entry) end, State#state.requests),
     stop_child(State#state.reader),
     flush_writer(State#state.writer),
     stop_child(State#state.writer),
+    ok.
+
+delete_session(SessionId) when is_binary(SessionId) ->
+    try
+        barrel_mcp_session:delete(SessionId)
+    catch
+        _:_ -> ok
+    end,
+    ok;
+delete_session(_) ->
     ok.
 
 %% The last answer is often written on the way out, and the writer's
@@ -251,7 +271,7 @@ classify(Line, State) ->
 %% must not queue behind the request it cancels.
 route(Message, State) ->
     case classify_message(Message) of
-        {response, Id} -> drop_response(Id, State);
+        {response, Id} -> deliver_response(Id, Message, State);
         {cancel, Id} -> cancel(Id, State);
         {notification, _Method} -> enqueue_notification(Message, State);
         {request, Id} -> enqueue_request(Id, Message, State);
@@ -293,10 +313,14 @@ reject_malformed(Message, State) ->
     end,
     State.
 
-%% We issue no outbound requests over stdio, so every response is
-%% unmatched. Dispatching one would risk an error-response loop.
-drop_response(_Id, State) ->
-    note_drop(State).
+%% The answer to a `sampling/createMessage', `elicitation/create' or
+%% `roots/list' we sent. An id nobody is waiting on is dropped rather
+%% than answered: JSON-RPC forbids replying to a response.
+deliver_response(Id, Message, State) ->
+    case barrel_mcp_session:deliver_response(Id, Message) of
+        ok -> State;
+        {error, _} -> note_drop(State)
+    end.
 
 %%====================================================================
 %% Requests
@@ -346,8 +370,8 @@ enqueue_batch(Line, State) ->
         true ->
             Self = self(),
             Tag = make_ref(),
-            Version = State#state.version,
-            {Pid, MRef} = spawn_monitor(fun() -> run_batch(Self, Tag, Line, Version) end),
+            Ctx = protocol_state(State),
+            {Pid, MRef} = spawn_monitor(fun() -> run_batch(Self, Tag, Line, Ctx) end),
             Id = {batch, Tag},
             Entry = #entry{state = running, pid = Pid, mref = MRef, tag = Tag},
             State#state{
@@ -361,8 +385,8 @@ enqueue_batch(Line, State) ->
 start_worker(Id, Message, State) ->
     Self = self(),
     Tag = make_ref(),
-    Version = State#state.version,
-    {Pid, MRef} = spawn_monitor(fun() -> run_request(Self, Tag, Id, Message, Version) end),
+    Ctx = protocol_state(State),
+    {Pid, MRef} = spawn_monitor(fun() -> run_request(Self, Tag, Id, Message, Ctx) end),
     Entry = #entry{state = running, pid = Pid, mref = MRef, tag = Tag},
     State#state{
         requests = (State#state.requests)#{Id => Entry},
@@ -371,10 +395,10 @@ start_worker(Id, Message, State) ->
         running = State#state.running + 1
     }.
 
-run_request(Coordinator, Tag, Id, Message, Version) ->
+run_request(Coordinator, Tag, Id, Message, Ctx) ->
     Result =
         try
-            barrel_mcp_protocol:handle(Message, protocol_state(Version))
+            barrel_mcp_protocol:handle(Message, Ctx)
         catch
             Class:Reason:Stack ->
                 logger:error(
@@ -388,11 +412,11 @@ run_request(Coordinator, Tag, Id, Message, Version) ->
     Coordinator ! {stdio_result, Tag, settle_result(Result, Id)},
     ok.
 
-run_batch(Coordinator, Tag, Line, Version) ->
+run_batch(Coordinator, Tag, Line, Ctx) ->
     Result =
         try
             {ok, Batch} = barrel_mcp_protocol:decode(Line),
-            barrel_mcp_protocol:handle(Batch, protocol_state(Version))
+            barrel_mcp_protocol:handle(Batch, Ctx)
         catch
             _:_ ->
                 barrel_mcp_protocol:error_response(
@@ -405,8 +429,8 @@ run_batch(Coordinator, Tag, Line, Version) ->
 %% stdio holds one long-lived channel, so a response stream is
 %% something it can serve: `subscriptions/listen' is answered here
 %% rather than refused as it is on a transport that answers once.
-protocol_state(Version) ->
-    #{protocol_version => Version, streaming => true}.
+protocol_state(#state{version = Version, session = SessionId}) ->
+    #{protocol_version => Version, session_id => SessionId, streaming => true}.
 
 settle_result(no_response, _Id) ->
     no_response;
@@ -434,7 +458,23 @@ settle(Tag, Response, State) ->
 
 answer(Id, Response, State) ->
     write(State, Response),
-    State#state{version = negotiated(Response, State#state.version), requests = keep(Id, State)}.
+    Version = negotiated(Response, State#state.version),
+    _ = bind_session(Version, State),
+    State#state{version = Version, requests = keep(Id, State)}.
+
+%% Server-to-client traffic through the session is the legacy surface:
+%% `resources/subscribe', the log stream, list_changed. A modern
+%% connection gets the same things through `subscriptions/listen', so
+%% attaching there too would deliver each notification twice.
+bind_session(Version, #state{version = Version}) ->
+    ok;
+bind_session(Version, #state{session = SessionId}) when is_binary(Version), is_binary(SessionId) ->
+    case barrel_mcp_version:era(Version) of
+        legacy -> barrel_mcp_session:set_sse_pid(SessionId, self());
+        _ -> ok
+    end;
+bind_session(_Version, _State) ->
+    ok.
 
 keep(Id, State) ->
     maps:remove(Id, State#state.requests).
@@ -664,11 +704,11 @@ drain_notifications(State) ->
             State;
         {{value, Message}, Rest} ->
             Self = self(),
-            Version = State#state.version,
+            Ctx = protocol_state(State),
             _ = spawn(fun() ->
                 _ =
                     try
-                        barrel_mcp_protocol:handle(Message, protocol_state(Version))
+                        barrel_mcp_protocol:handle(Message, Ctx)
                     catch
                         _:_ -> ok
                     end,
