@@ -945,15 +945,42 @@ pattern_properties(Value, Schema, Base, Path, Ctx) ->
 %% ECMA-262 is the dialect's regex language and PCRE is not quite it, so
 %% a pattern we cannot compile asserts nothing rather than raising.
 matches(Value, Pattern) when is_binary(Pattern) ->
-    try re:run(Value, ecma_properties(Pattern), [unicode, ucp, {capture, none}]) of
-        match -> true;
-        nomatch -> false;
-        {error, _} -> false
-    catch
-        _:_ -> false
+    case compiled_pattern(Pattern) of
+        error ->
+            false;
+        {ok, MP} ->
+            try re:run(Value, MP, [{capture, none}]) of
+                match -> true;
+                _ -> false
+            catch
+                _:_ -> false
+            end
     end;
 matches(_Value, _Pattern) ->
     false.
+
+%% `re:run/3' given a binary pattern compiles it on every call, and a
+%% `patternProperties' entry is applied once per property of every
+%% object it sees. Memoised in the process dictionary rather than a
+%% shared table: the validating process serves one request, so the cache
+%% cannot outlive it, and the subschema budget bounds how many distinct
+%% patterns a peer can reach.
+compiled_pattern(Pattern) ->
+    Key = {?MODULE, pattern, Pattern},
+    case get(Key) of
+        undefined ->
+            Result =
+                try re:compile(ecma_properties(Pattern), [unicode, ucp]) of
+                    {ok, MP} -> {ok, MP};
+                    {error, _} -> error
+                catch
+                    _:_ -> error
+                end,
+            put(Key, Result),
+            Result;
+        Cached ->
+            Cached
+    end.
 
 additional_properties(Value, Schema, Base, Path, Ctx, Evaluated) ->
     case maps:find(<<"additionalProperties">>, Schema) of
