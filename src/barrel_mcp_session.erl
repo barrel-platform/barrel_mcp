@@ -629,8 +629,10 @@ cleanup_expired(TTL) ->
 trim(List, Max) when length(List) =< Max -> List;
 trim(List, Max) -> lists:sublist(List, Max).
 
-%% Inline session delete, only called from inside the gen_server.
-delete_inline(SessionId) ->
+%% A session owns rows in three other tables and none of them are keyed
+%% by anything that expires on its own, so everything it owns goes with
+%% it. Only called from inside the gen_server.
+purge_session(SessionId) ->
     case ets:lookup(?SESSION_TABLE, SessionId) of
         [{_, #mcp_session{sse_pid = Pid}}] when is_pid(Pid) ->
             Pid ! session_terminated;
@@ -638,7 +640,49 @@ delete_inline(SessionId) ->
             ok
     end,
     true = ets:delete(?SESSION_TABLE, SessionId),
+    true = ets:match_delete(?SUBSCRIPTIONS_TABLE, {{SessionId, '_'}}),
+    true = ets:match_delete(?INFLIGHT_TABLE, {{SessionId, '_'}, '_'}),
+    ok = fail_pending(SessionId),
+    %% Its elicitations have nowhere left to deliver a completion.
+    _ = barrel_mcp_elicitation:forget_session(SessionId),
     ok.
+
+%% A row is normally removed by the caller's own `after Timeout', which
+%% never runs when the transport killed the caller first. The grace
+%% margin keeps this off that race, so a caller still waiting reports
+%% `timeout' rather than an error it never saw.
+sweep_pending() ->
+    Cutoff = erlang:system_time(millisecond) - ?CLEANUP_INTERVAL,
+    Stale = ets:foldl(
+        fun
+            ({Key, #pending{expires_at = Exp}}, Acc) when Exp < Cutoff -> [Key | Acc];
+            (_, Acc) -> Acc
+        end,
+        [],
+        ?PENDING_TABLE
+    ),
+    lists:foreach(fun(Key) -> ets:delete(?PENDING_TABLE, Key) end, Stale),
+    ok.
+
+%% A caller blocked on `sampling/createMessage' or `elicitation/create'
+%% would otherwise sit out its whole timeout waiting for a client that
+%% is already gone. The shape is the one its own receive expects.
+fail_pending(SessionId) ->
+    Rows = ets:foldl(
+        fun
+            ({_, #pending{session_id = Sid}} = Row, Acc) when Sid =:= SessionId -> [Row | Acc];
+            (_, Acc) -> Acc
+        end,
+        [],
+        ?PENDING_TABLE
+    ),
+    lists:foreach(
+        fun({Key, #pending{caller = Caller, caller_ref = Ref, tag = Tag}}) ->
+            true = ets:delete(?PENDING_TABLE, Key),
+            Caller ! {Tag, Ref, #{<<"error">> => #{<<"message">> => <<"Session closed">>}}}
+        end,
+        Rows
+    ).
 
 %%====================================================================
 %% gen_server callbacks
@@ -681,15 +725,7 @@ handle_call({update_activity, SessionId}, _From, State) ->
         end,
     {reply, Reply, State};
 handle_call({delete, SessionId}, _From, State) ->
-    case ets:lookup(?SESSION_TABLE, SessionId) of
-        [{_, #mcp_session{sse_pid = Pid}}] when is_pid(Pid) ->
-            Pid ! session_terminated;
-        _ ->
-            ok
-    end,
-    true = ets:delete(?SESSION_TABLE, SessionId),
-    %% Its elicitations have nowhere left to deliver a completion.
-    _ = barrel_mcp_elicitation:forget_session(SessionId),
+    ok = purge_session(SessionId),
     {reply, ok, State};
 handle_call({set_principal, SessionId, Principal}, _From, State) ->
     Reply =
@@ -847,7 +883,7 @@ handle_call({cleanup_expired, TTL}, _From, State) ->
         [],
         ?SESSION_TABLE
     ),
-    lists:foreach(fun delete_inline/1, Expired),
+    lists:foreach(fun purge_session/1, Expired),
     {reply, length(Expired), State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
@@ -857,8 +893,9 @@ handle_cast(_Msg, State) ->
 
 handle_info(cleanup, State) ->
     %% Inline the cleanup. We can't call the public `cleanup_expired/1'
-    %% because it goes through `gen_server:call(?MODULE, …)' — a
+    %% because it goes through `gen_server:call(?MODULE, ...)', a
     %% self-call that would deadlock.
+    ok = sweep_pending(),
     TTL = application:get_env(barrel_mcp, session_ttl, 1800000),
     Now = erlang:system_time(millisecond),
     Cutoff = Now - TTL,
@@ -874,7 +911,7 @@ handle_info(cleanup, State) ->
         [],
         ?SESSION_TABLE
     ),
-    lists:foreach(fun delete_inline/1, Expired),
+    lists:foreach(fun purge_session/1, Expired),
     case Expired of
         [] ->
             ok;
