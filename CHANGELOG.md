@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Deleting a session now drops the rows it owns in the subscription,
+  in-flight and pending tables. They were keyed by the session id and
+  nothing else expired them, so a session that subscribed to a resource
+  and then dropped left its row behind for the life of the node. The
+  periodic sweep and the explicit delete had also diverged: only the
+  latter forgot the session's elicitations. A caller blocked on a
+  server-to-client request is now failed when its session goes rather
+  than left to sit out its timeout, and pending rows whose caller died
+  before its own timeout are reclaimed by the sweep.
+- stdio bounds what it writes and how many subscriptions it serves. The
+  writer blocks when the peer stops draining its pipe and its mailbox
+  was not a bound, so a subscription firing against a stalled reader
+  grew it without limit; past `stdio_max_outbound_notifications`
+  (default 256) a notification is now dropped, as on the inbound side.
+  A subscription holds no worker slot, so `stdio_max_workers` never
+  bounded them either; `stdio_max_subscriptions` (default 32) does.
 - stdio now serves the legacy server-to-client surface. The transport
   advertised `resources.subscribe` and `listChanged` but had no session
   to hang them on, so `resources/subscribe` failed with `-32602` and no

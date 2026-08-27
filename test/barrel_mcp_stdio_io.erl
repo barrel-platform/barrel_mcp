@@ -11,12 +11,20 @@
 -module(barrel_mcp_stdio_io).
 
 -export([start/0, feed/2, close/1, stop/1, next_line/1, next_line/2, silent/2]).
+-export([stall/1, resume/1]).
 
 %% @doc Start a device owned by the calling process.
 start() ->
     Owner = self(),
     spawn(fun() ->
-        loop(#{owner => Owner, in => <<>>, pending => undefined, closed => false})
+        loop(#{
+            owner => Owner,
+            in => <<>>,
+            pending => undefined,
+            closed => false,
+            stalled => false,
+            held => []
+        })
     end).
 
 %% @doc Hand bytes to the reader, as a peer writing to our stdin.
@@ -31,6 +39,16 @@ close(Dev) ->
 
 stop(Dev) ->
     Dev ! stop,
+    ok.
+
+%% @doc Stop answering writes, as a peer that has stopped draining its
+%% end of the pipe. Held writes are released in order by `resume/1'.
+stall(Dev) ->
+    Dev ! stall,
+    ok.
+
+resume(Dev) ->
+    Dev ! resume,
     ok.
 
 %% @doc The next decoded JSON envelope written to stdout.
@@ -71,6 +89,18 @@ loop(S) ->
             loop(serve(S#{in := <<In/binary, Data/binary>>}));
         close ->
             loop(serve(S#{closed := true}));
+        stall ->
+            loop(S#{stalled := true});
+        resume ->
+            #{held := Held} = S,
+            lists:foreach(
+                fun({From, ReplyAs, Chars}) ->
+                    emit(S, Chars),
+                    reply(From, ReplyAs, ok)
+                end,
+                lists:reverse(Held)
+            ),
+            loop(S#{stalled := false, held := []});
         stop ->
             ok
     end.
@@ -81,6 +111,8 @@ request({setopts, _Opts}, From, ReplyAs, S) ->
 request(getopts, From, ReplyAs, S) ->
     reply(From, ReplyAs, []),
     S;
+request({put_chars, _Enc, Chars}, From, ReplyAs, #{stalled := true, held := Held} = S) ->
+    S#{held := [{From, ReplyAs, Chars} | Held]};
 request({put_chars, _Enc, Chars}, From, ReplyAs, S) ->
     emit(S, Chars),
     reply(From, ReplyAs, ok),

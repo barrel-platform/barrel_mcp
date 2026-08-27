@@ -73,6 +73,12 @@
 %% Notifications waiting to be handled. They produce no response, so an
 %% overflow is dropped rather than refused.
 -define(DEFAULT_MAX_NOTIFICATIONS, 256).
+%% Notifications written but not yet on stdout. The writer blocks when
+%% the peer stops draining its pipe, and its mailbox is not a bound.
+-define(DEFAULT_MAX_OUTBOUND, 256).
+%% Response streams one peer may hold open. A subscription holds no
+%% worker slot, so nothing else counts them.
+-define(DEFAULT_MAX_SUBSCRIPTIONS, 32).
 
 -define(WORKER_TIMEOUT, 60000).
 -define(DROP_LOG_INTERVAL_MS, 5000).
@@ -99,6 +105,8 @@
     notifications = queue:new() :: queue:queue(),
     notifying = 0 :: non_neg_integer(),
     notif_len = 0 :: non_neg_integer(),
+    %% Notifications handed to the writer and not yet on stdout.
+    outbound = 0 :: non_neg_integer(),
     dropped = 0 :: non_neg_integer(),
     last_drop_log = 0 :: integer()
 }).
@@ -166,9 +174,22 @@ handle_info({stdio_error, _Reason}, State) ->
     {stop, normal, State};
 handle_info({stdio_result, Tag, Response}, State) ->
     {noreply, settle(Tag, Response, State)};
-handle_info({sse_send_message, Message}, State) ->
-    write(State, Message),
-    {noreply, State};
+%% With an id this is a `sampling/createMessage', `elicitation/create'
+%% or `roots/list' we are waiting on, bounded already by the worker
+%% count; dropping one would strand the tool that sent it. Without an id
+%% it is a notification and takes the bounded path.
+handle_info({sse_send_message, Message}, State) when is_map(Message) ->
+    case maps:is_key(<<"id">>, Message) of
+        true ->
+            write(State, Message),
+            {noreply, State};
+        false ->
+            {noreply, notify(Message, State)}
+    end;
+handle_info({stdio_notify, Envelope}, State) ->
+    {noreply, notify(Envelope, State)};
+handle_info(stdio_written, #state{outbound = N} = State) ->
+    {noreply, State#state{outbound = max(0, N - 1)}};
 handle_info(stdio_notified, State) ->
     {noreply, drain_notifications(State#state{notifying = 0})};
 handle_info({'DOWN', MRef, process, _Pid, Reason}, State) ->
@@ -450,7 +471,7 @@ settle(Tag, Response, State) ->
         {Id, ByTag} ->
             State1 = State#state{by_tag = ByTag},
             case Response of
-                {subscribe, Sub} -> open_subscription(Id, Sub, State1);
+                {subscribe, Sub} -> admit_subscription(Id, Sub, State1);
                 no_response -> State1;
                 _ -> answer(Id, Response, State1)
             end
@@ -483,6 +504,36 @@ keep(Id, State) ->
 %% Subscriptions
 %%====================================================================
 
+%% A subscription holds no worker slot, so `max_workers' does not bound
+%% these. Refused with the same answer an overloaded server gives a
+%% request it cannot start.
+admit_subscription(Id, Sub, State) ->
+    case live_subscriptions(State) >= max_subscriptions() of
+        true ->
+            answer(
+                Id,
+                barrel_mcp_protocol:error_response(
+                    Id, ?JSONRPC_INTERNAL_ERROR, <<"Server is overloaded">>
+                ),
+                State
+            );
+        false ->
+            open_subscription(Id, Sub, State)
+    end.
+
+%% Counted from `requests' rather than kept in a field: both removal
+%% paths already maintain that map, and a second counter would only add
+%% a way for the two to disagree.
+live_subscriptions(#state{requests = Requests}) ->
+    maps:fold(
+        fun
+            (_Id, #entry{state = subscription}, N) -> N + 1;
+            (_Id, _Entry, N) -> N
+        end,
+        0,
+        Requests
+    ).
+
 %% Done in one step rather than handed back through the mailbox: the
 %% worker's `DOWN' is already queued behind its result, and a two-step
 %% swap would let it remove the entry the subscription is about to take.
@@ -495,7 +546,7 @@ open_subscription(Id, Sub, State) ->
             _ ->
                 undefined
         end,
-    {Pid, MRef} = spawn_monitor(?MODULE, subscription_init, [State#state.writer, Sub]),
+    {Pid, MRef} = spawn_monitor(?MODULE, subscription_init, [self(), Sub]),
     Entry = #entry{state = subscription, pid = Pid, mref = MRef},
     State#state{
         requests = (State#state.requests)#{Id => Entry},
@@ -504,28 +555,30 @@ open_subscription(Id, Sub, State) ->
         running = max(0, State#state.running - 1)
     }.
 
-%% @private Owns one `subscriptions/listen' stream: everything for this
-%% id goes out through the single writer, tagged with its subscription
-%% id so a client on one channel can demultiplex.
-subscription_init(Writer, Sub) ->
+%% @private Owns one `subscriptions/listen' stream, tagged with its
+%% subscription id so a client on one channel can demultiplex. Output
+%% goes through the coordinator rather than straight to the writer: it
+%% is the only process that can see the whole outbound backlog. Order
+%% still holds, one sender to one coordinator to one writer.
+subscription_init(Coordinator, Sub) ->
     SubId = maps:get(id, Sub),
     Filter = maps:get(filter, Sub),
     ok = barrel_mcp_subscriptions:subscribe(SubId, Filter),
-    Writer ! {stdio_write, acknowledgment(SubId, Filter)},
-    subscription_loop(Writer, SubId).
+    Coordinator ! {stdio_notify, acknowledgment(SubId, Filter)},
+    subscription_loop(Coordinator, SubId).
 
-subscription_loop(Writer, SubId) ->
+subscription_loop(Coordinator, SubId) ->
     receive
         {mcp_notification, SubId, Envelope} ->
-            Writer ! {stdio_write, Envelope},
-            subscription_loop(Writer, SubId);
+            Coordinator ! {stdio_notify, Envelope},
+            subscription_loop(Coordinator, SubId);
         {mcp_subscription_close, SubId} ->
-            Writer ! {stdio_write, subscription_cancelled(SubId)},
-            Writer ! {stdio_write, subscription_closed(SubId)},
+            Coordinator ! {stdio_notify, subscription_cancelled(SubId)},
+            Coordinator ! {stdio_notify, subscription_closed(SubId)},
             _ = barrel_mcp_subscriptions:unsubscribe(SubId),
             ok;
         _Other ->
-            subscription_loop(Writer, SubId)
+            subscription_loop(Coordinator, SubId)
     end.
 
 acknowledgment(SubId, Filter) ->
@@ -609,7 +662,10 @@ cancel(Id, State) ->
             };
         {#entry{state = subscription} = Entry, Rest} ->
             drop_entry(Entry),
-            State#state{requests = Rest};
+            State#state{
+                requests = Rest,
+                by_mref = maps:remove(Entry#entry.mref, State#state.by_mref)
+            };
         {#entry{} = Entry, Rest} ->
             drop_entry(Entry),
             take_next(State#state{
@@ -804,6 +860,10 @@ writer_loop() ->
         {stdio_write, Envelope} ->
             io:format("~s~n", [barrel_mcp_protocol:encode(Envelope)]),
             writer_loop();
+        {stdio_write, Envelope, Ack} ->
+            io:format("~s~n", [barrel_mcp_protocol:encode(Envelope)]),
+            Ack ! stdio_written,
+            writer_loop();
         {stdio_flush, From, Ref} ->
             From ! {stdio_flushed, Ref},
             writer_loop();
@@ -816,6 +876,21 @@ write(#state{writer = Writer}, Envelope) when is_pid(Writer) ->
     ok;
 write(_State, _Envelope) ->
     ok.
+
+%% A notification produces no response, so an overflow is dropped rather
+%% than refused, as on the inbound side. The writer acknowledges each
+%% one it puts on stdout, which is what keeps the count honest when the
+%% peer has stopped reading.
+notify(Envelope, #state{writer = Writer, outbound = N} = State) when is_pid(Writer) ->
+    case N >= max_outbound() of
+        true ->
+            note_drop(State);
+        false ->
+            Writer ! {stdio_write, Envelope, self()},
+            State#state{outbound = N + 1}
+    end;
+notify(_Envelope, State) ->
+    State.
 
 %%====================================================================
 %% Helpers
@@ -839,3 +914,9 @@ max_queue() ->
 
 max_notifications() ->
     application:get_env(barrel_mcp, stdio_max_notifications, ?DEFAULT_MAX_NOTIFICATIONS).
+
+max_outbound() ->
+    application:get_env(barrel_mcp, stdio_max_outbound_notifications, ?DEFAULT_MAX_OUTBOUND).
+
+max_subscriptions() ->
+    application:get_env(barrel_mcp, stdio_max_subscriptions, ?DEFAULT_MAX_SUBSCRIPTIONS).

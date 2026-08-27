@@ -30,6 +30,8 @@
     notifications_are_never_answered/1,
     oversized_frame_closes_the_server/1,
     subscriptions_are_served/1,
+    subscriptions_are_capped/1,
+    outbound_notifications_are_bounded/1,
     legacy_subscribe_is_served/1,
     eof_stops_the_server/1,
     client_subscribes_over_real_stdio/1
@@ -53,6 +55,8 @@ all() ->
         notifications_are_never_answered,
         oversized_frame_closes_the_server,
         subscriptions_are_served,
+        subscriptions_are_capped,
+        outbound_notifications_are_bounded,
         legacy_subscribe_is_served,
         eof_stops_the_server,
         client_subscribes_over_real_stdio
@@ -82,6 +86,8 @@ end_per_testcase(_TC, _Config) ->
     application:unset_env(barrel_mcp, stdio_max_workers),
     application:unset_env(barrel_mcp, stdio_max_queue),
     application:unset_env(barrel_mcp, stdio_max_frame_bytes),
+    application:unset_env(barrel_mcp, stdio_max_subscriptions),
+    application:unset_env(barrel_mcp, stdio_max_outbound_notifications),
     ok.
 
 echo_tool(Args) ->
@@ -235,6 +241,62 @@ subscriptions_are_served(_Config) ->
 %% `resources/subscribe' needs a session, and stdio has exactly one.
 %% The capability is advertised on every handshake revision, so a client
 %% that subscribes has to get the update.
+%% A subscription holds no worker slot, so `max_workers' does not bound
+%% these. Without a cap of their own a peer can open as many as it likes.
+subscriptions_are_capped(_Config) ->
+    application:set_env(barrel_mcp, stdio_max_subscriptions, 2),
+    {Dev, Server} = start_server(),
+    try
+        [
+            ?assertEqual(
+                <<"notifications/subscriptions/acknowledged">>,
+                maps:get(<<"method">>, open_listen(Dev, Id))
+            )
+         || Id <- [1, 2]
+        ],
+        Refused = open_listen(Dev, 3),
+        ?assertEqual(3, maps:get(<<"id">>, Refused)),
+        ?assertMatch(#{<<"code">> := ?JSONRPC_INTERNAL_ERROR}, maps:get(<<"error">>, Refused)),
+
+        %% The two that were admitted still stream.
+        ok = barrel_mcp:reg_tool(<<"capped">>, ?MODULE, a_tool, #{}),
+        try
+            Ids = lists:sort([subscription_id(barrel_mcp_stdio_io:next_line(Dev)) || _ <- [1, 2]]),
+            ?assertEqual([1, 2], Ids)
+        after
+            barrel_mcp_registry:unreg(tool, <<"capped">>)
+        end
+    after
+        stop_server(Dev, Server)
+    end.
+
+%% The writer blocks in `io:format' when the peer stops reading, and its
+%% mailbox is not a bound. Past the cap a notification is dropped, as on
+%% the inbound side, rather than queued without limit.
+outbound_notifications_are_bounded(_Config) ->
+    Cap = 4,
+    application:set_env(barrel_mcp, stdio_max_outbound_notifications, Cap),
+    {Dev, Server} = start_server(),
+    try
+        barrel_mcp_stdio_io:stall(Dev),
+        [Server ! {stdio_notify, a_notification(N)} || N <- lists:seq(1, 50)],
+        %% handle_call is the barrier: it is answered behind everything
+        %% already in the mailbox, so the drops have all happened.
+        ok = gen_server:call(Server, sync),
+        barrel_mcp_stdio_io:resume(Dev),
+
+        Seen = [barrel_mcp_stdio_io:next_line(Dev) || _ <- lists:seq(1, Cap)],
+        ?assertEqual([], [E || E <- Seen, E =:= timeout]),
+        ?assertEqual(ok, barrel_mcp_stdio_io:silent(Dev, 200)),
+
+        %% Dropping a notification must not have cost us the connection.
+        send(Dev, request(9, <<"tools/call">>, call(<<"echo">>, #{<<"input">> => <<"alive">>}))),
+        Response = barrel_mcp_stdio_io:next_line(Dev),
+        ?assertEqual(9, maps:get(<<"id">>, Response))
+    after
+        stop_server(Dev, Server)
+    end.
+
 legacy_subscribe_is_served(_Config) ->
     ok = barrel_mcp:reg_resource(<<"watched">>, ?MODULE, a_resource, #{uri => ?WATCHED}),
     {Dev, Server} = start_server(),
@@ -403,6 +465,22 @@ initialize_params() ->
         <<"protocolVersion">> => ?LEGACY,
         <<"capabilities">> => #{},
         <<"clientInfo">> => #{<<"name">> => <<"ct">>, <<"version">> => <<"0">>}
+    }.
+
+open_listen(Dev, Id) ->
+    send(
+        Dev,
+        request(Id, <<"subscriptions/listen">>, #{
+            <<"notifications">> => #{<<"toolsListChanged">> => true}
+        })
+    ),
+    barrel_mcp_stdio_io:next_line(Dev).
+
+a_notification(N) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"method">> => <<"notifications/message">>,
+        <<"params">> => #{<<"level">> => <<"info">>, <<"data">> => N}
     }.
 
 cancelled(Id) ->
