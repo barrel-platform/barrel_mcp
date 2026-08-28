@@ -1903,9 +1903,14 @@ task_op_declared(_Tasks, _Op) ->
 
 sub_capability(Caps, Family, Key) ->
     case maps:get(Family, Caps, undefined) of
-        Sub when is_map(Sub) -> maps:get(Key, Sub, false) =:= true;
+        Sub when is_map(Sub) -> declared(maps:get(Key, Sub, false));
         _ -> false
     end.
+
+%% A sub-capability is a boolean in the schema. Anything else a peer
+%% puts there is not a declaration we can act on.
+declared(true) -> true;
+declared(_) -> false.
 
 do_cancel(Id, #data{pending = Pending} = Data) ->
     case maps:take(Id, Pending) of
