@@ -1416,31 +1416,31 @@ negotiated_version(Headers, SessionId) ->
 validate_protocol_version(_Headers, _Sid, <<"initialize">>) ->
     ok;
 validate_protocol_version(Headers, SessionId, _Method) ->
-    case header(<<"mcp-protocol-version">>, Headers, undefined) of
-        undefined ->
-            ok;
-        Version ->
-            case lists:member(Version, ?MCP_SUPPORTED_VERSIONS) of
-                true ->
-                    case SessionId of
-                        undefined ->
-                            ok;
-                        _ ->
-                            _ = barrel_mcp_session:set_protocol_version(
-                                SessionId, Version
-                            ),
-                            ok
-                    end;
-                false ->
-                    {error,
-                        iolist_to_binary([
-                            <<"Bad MCP-Protocol-Version: ">>,
-                            Version,
-                            <<". Supported: ">>,
-                            lists:join(<<", ">>, ?MCP_SUPPORTED_VERSIONS)
-                        ])}
-            end
+    supported_version(header(<<"mcp-protocol-version">>, Headers, undefined), SessionId).
+
+supported_version(undefined, _SessionId) ->
+    ok;
+supported_version(Version, SessionId) ->
+    case lists:member(Version, ?MCP_SUPPORTED_VERSIONS) of
+        false -> {error, unsupported_version_message(Version)};
+        true -> remember_version(SessionId, Version)
     end.
+
+%% A version arriving on a request outlives it: later requests on the
+%% same session may omit the header.
+remember_version(undefined, _Version) ->
+    ok;
+remember_version(SessionId, Version) ->
+    _ = barrel_mcp_session:set_protocol_version(SessionId, Version),
+    ok.
+
+unsupported_version_message(Version) ->
+    iolist_to_binary([
+        <<"Bad MCP-Protocol-Version: ">>,
+        Version,
+        <<". Supported: ">>,
+        lists:join(<<", ">>, ?MCP_SUPPORTED_VERSIONS)
+    ]).
 
 maybe_capture_initialize_version(
     SessionId,
@@ -1870,6 +1870,7 @@ match_pos(Bin, Needle) ->
 %% Authentication
 %%====================================================================
 
+-spec init_auth(map()) -> map().
 init_auth(#{provider := Provider} = AuthOpts) ->
     _ = code:ensure_loaded(Provider),
     ProviderOpts = maps:get(provider_opts, AuthOpts, #{}),
@@ -1953,6 +1954,7 @@ extract_headers(Headers, AuthConfig) ->
     ).
 
 %% The user-facing `resource_metadata' option processing.
+-spec normalize_resource_metadata(map() | undefined) -> map() | undefined.
 normalize_resource_metadata(undefined) ->
     undefined;
 normalize_resource_metadata(#{resource := ResourceUrl} = M) ->
@@ -1983,6 +1985,7 @@ derive_prm_url(Resource) when is_binary(Resource) ->
             <<Resource/binary, "/.well-known/oauth-protected-resource">>
     end.
 
+-spec inject_resource_metadata_url(map(), map() | undefined) -> map().
 inject_resource_metadata_url(AuthConfig, undefined) ->
     AuthConfig;
 inject_resource_metadata_url(#{provider_state := State} = AuthConfig, #{url := Url}) when
@@ -2040,6 +2043,8 @@ cors_headers(Headers, Config, Extra) ->
 %% Origin validation + bind helpers
 %%====================================================================
 
+-spec resolve_allowed_origins(boolean(), any | undefined | [binary()]) ->
+    {ok, any | [term()]} | {error, allowed_origins_required}.
 resolve_allowed_origins(_Loopback, any) ->
     {ok, any};
 resolve_allowed_origins(true, undefined) ->
@@ -2070,6 +2075,7 @@ parse_origin(Bin) when is_binary(Bin) ->
             #{scheme => undefined, host => Bin, port => any}
     end.
 
+-spec is_loopback(inet:ip_address() | string() | binary()) -> boolean().
 is_loopback({127, _, _, _}) -> true;
 is_loopback({0, 0, 0, 0, 0, 0, 0, 1}) -> true;
 is_loopback("localhost") -> true;
@@ -2113,6 +2119,7 @@ origin_matches(_, _) ->
 %% Session manager bootstrap
 %%====================================================================
 
+-spec ensure_session_manager() -> ok | {ok, pid()} | {error, term()}.
 ensure_session_manager() ->
     case whereis(barrel_mcp_session) of
         undefined ->

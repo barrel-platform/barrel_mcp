@@ -1173,7 +1173,7 @@ input_required_result(Requests, State, Method, Params, Ctx) ->
 
 %% Every legacy revision publishes protocolVersion, capabilities and
 %% clientInfo as required; the reference SDK types them with no default.
-invalid_initialize_param(Params) when is_map(Params) ->
+validate_initialize_params(Params) when is_map(Params) ->
     Required = [
         {<<"protocolVersion">>, fun(V) -> is_binary(V) orelse is_integer(V) end},
         {<<"capabilities">>, fun is_map/1},
@@ -1188,7 +1188,7 @@ invalid_initialize_param(Params) when is_map(Params) ->
         [] -> ok;
         [Key | _] -> {error, Key}
     end;
-invalid_initialize_param(_Params) ->
+validate_initialize_params(_Params) ->
     {error, <<"params">>}.
 
 initialize(Params, Id, Ctx) ->
@@ -1220,6 +1220,8 @@ initialize(Params, Id, Ctx) ->
 %% `mcp/server/mcpserver/resolve.py:695'. The dotted names
 %% `missing_mode/3' produces nest, so `elicitation.form' is
 %% `{"elicitation": {"form": {}}}'.
+%% `binary:split/2' stops at the first separator, so a name splits into
+%% at most two parts and the clause below cannot fail to match.
 capabilities_object(Names) ->
     lists:foldl(
         fun(Name, Acc) ->
@@ -1334,7 +1336,7 @@ log_bad_request_state(Id, Reason) ->
 %%====================================================================
 
 handle_request(<<"initialize">>, Params, Id, Ctx) ->
-    case invalid_initialize_param(Params) of
+    case validate_initialize_params(Params) of
         {error, Key} ->
             error_response(
                 Id,
