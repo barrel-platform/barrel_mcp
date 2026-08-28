@@ -383,20 +383,29 @@ Options that are not per-listener live in `sys.config`:
     {session_ttl, 3600000},
 
     %% What -32022 offers a modern client to retry with. `modern'
-    %% (default) or `all'. See the Protocol Versions guide.
+    %% (default), `all', or `legacy' to serve only the handshake era
+    %% while your clients have not moved. See the Protocol Versions
+    %% guide.
     {advertise_versions, modern},
 
     %% HMAC key for the sealed `requestState' blob in multi round-trip
-    %% requests. Required for a cluster.
+    %% requests. Required past a single boot of a single node.
     {request_state_key, <<"...32+ random bytes...">>}
 ]}.
 ```
 
-Set `request_state_key` before running more than one node. Without it
-each node generates its own ephemeral key at start, so a retry landing
-on a different node than the one that issued the state is rejected with
-`-32602` and the call cannot complete. A warning is logged once at start
-so this is not discovered in production.
+Set `request_state_key` before anything you would not want a restart to
+interrupt. Without it a fresh key is generated at every boot, so the
+scope of the default is one boot of one node: a multi round-trip call
+whose retry lands on a different node, or on the same node after a
+restart, is rejected with `-32602` and cannot complete. A warning is
+logged once at start so this is not discovered in production.
+
+Generate the key once and keep it with your other secrets:
+
+```erlang
+Key = crypto:strong_rand_bytes(32).
+```
 
 A state that fails verification is rejected, never re-prompted, so a
 tampered or expired blob cannot drive a loop.
