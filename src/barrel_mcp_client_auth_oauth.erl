@@ -510,36 +510,7 @@ client_credentials(TokenEndpoint, Params) ->
         <<"grant_type">> => <<"client_credentials">>,
         <<"client_id">> => required(client_id, Params)
     },
-    Body1 =
-        case maps:get(client_assertion, Params, undefined) of
-            undefined ->
-                Body0;
-            JWT when is_binary(JWT) ->
-                Body0#{
-                    <<"client_assertion_type">> =>
-                        <<"urn:ietf:params:oauth:client-assertion-type:jwt-bearer">>,
-                    <<"client_assertion">> => JWT
-                }
-        end,
-    Body2 = maps:fold(fun add_optional/3, Body1, #{
-        scope => maps:get(scopes, Params, undefined),
-        resource => maps:get(resource, Params, undefined)
-    }),
-    %% `private_key_jwt' must NOT add HTTP Basic — pass the secret
-    %% only when there is no assertion.
-    Secret =
-        case maps:get(client_assertion, Params, undefined) of
-            undefined ->
-                maps:get(client_secret, Params, undefined);
-            _ ->
-                undefined
-        end,
-    http_post_form(
-        TokenEndpoint,
-        Body2,
-        Secret,
-        maps:get(client_id, Params, undefined)
-    ).
+    post_token_request(TokenEndpoint, Body0, optional_scope_and_resource(Params), Params).
 
 %% @doc RFC 8693 OAuth 2.0 Token Exchange. Used by the MCP
 %% `ext-auth' Enterprise-Managed Authorization extension to
@@ -568,32 +539,10 @@ token_exchange(TokenEndpoint, Params) ->
         <<"audience">> => required(audience, Params),
         <<"resource">> => required(resource, Params)
     },
-    Body1 =
-        case maps:get(client_assertion, Params, undefined) of
-            undefined ->
-                Body0;
-            JWT when is_binary(JWT) ->
-                Body0#{
-                    <<"client_assertion_type">> =>
-                        <<"urn:ietf:params:oauth:client-assertion-type:jwt-bearer">>,
-                    <<"client_assertion">> => JWT
-                }
-        end,
-    Secret =
-        case maps:get(client_assertion, Params, undefined) of
-            undefined ->
-                maps:get(client_secret, Params, undefined);
-            _ ->
-                undefined
-        end,
-    case
-        http_post_form(
-            TokenEndpoint,
-            Body1,
-            Secret,
-            maps:get(client_id, Params, undefined)
-        )
-    of
+    %% No optional fold: RFC 8693 carries `resource' and `audience' as
+    %% required parameters, already above, and `scope' is not part of an
+    %% ID-JAG request.
+    case post_token_request(TokenEndpoint, Body0, #{}, Params) of
         {ok, #{<<"access_token">> := IdJag}} ->
             {ok, IdJag};
         {ok, R} ->
@@ -620,34 +569,7 @@ jwt_bearer(TokenEndpoint, Params) ->
         <<"client_id">> => required(client_id, Params),
         <<"assertion">> => required(assertion, Params)
     },
-    Body1 =
-        case maps:get(client_assertion, Params, undefined) of
-            undefined ->
-                Body0;
-            JWT when is_binary(JWT) ->
-                Body0#{
-                    <<"client_assertion_type">> =>
-                        <<"urn:ietf:params:oauth:client-assertion-type:jwt-bearer">>,
-                    <<"client_assertion">> => JWT
-                }
-        end,
-    Body2 = maps:fold(fun add_optional/3, Body1, #{
-        scope => maps:get(scopes, Params, undefined),
-        resource => maps:get(resource, Params, undefined)
-    }),
-    Secret =
-        case maps:get(client_assertion, Params, undefined) of
-            undefined ->
-                maps:get(client_secret, Params, undefined);
-            _ ->
-                undefined
-        end,
-    http_post_form(
-        TokenEndpoint,
-        Body2,
-        Secret,
-        maps:get(client_id, Params, undefined)
-    ).
+    post_token_request(TokenEndpoint, Body0, optional_scope_and_resource(Params), Params).
 
 %% @doc Dynamic Client Registration ([RFC 7591][rfc7591]).
 %%
@@ -1172,6 +1094,44 @@ trim_trailing_slash(B) ->
         $/ -> binary:part(B, 0, byte_size(B) - 1);
         _ -> B
     end.
+
+%% The three grants that accept `private_key_jwt' instead of a secret.
+%% `exchange_code/2' and `refresh_token/2' are not among them: they pass
+%% their secret unconditionally, and routing them here would give them
+%% assertion semantics they never had.
+post_token_request(Endpoint, Body0, Optional, Params) ->
+    Body = maps:fold(fun add_optional/3, with_assertion(Body0, Params), Optional),
+    http_post_form(
+        Endpoint,
+        Body,
+        client_secret(Params),
+        maps:get(client_id, Params, undefined)
+    ).
+
+with_assertion(Body, Params) ->
+    case maps:get(client_assertion, Params, undefined) of
+        undefined ->
+            Body;
+        JWT when is_binary(JWT) ->
+            Body#{
+                <<"client_assertion_type">> =>
+                    <<"urn:ietf:params:oauth:client-assertion-type:jwt-bearer">>,
+                <<"client_assertion">> => JWT
+            }
+    end.
+
+%% `private_key_jwt' must not also add HTTP Basic (RFC 7523).
+client_secret(Params) ->
+    case maps:get(client_assertion, Params, undefined) of
+        undefined -> maps:get(client_secret, Params, undefined);
+        _ -> undefined
+    end.
+
+optional_scope_and_resource(Params) ->
+    #{
+        scope => maps:get(scopes, Params, undefined),
+        resource => maps:get(resource, Params, undefined)
+    }.
 
 required(Key, Map) ->
     case maps:find(Key, Map) of
