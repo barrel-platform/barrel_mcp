@@ -358,16 +358,57 @@ notification_response() ->
 %% Era dispatch
 %%====================================================================
 
-%% Gate a request on its version and era, run it, then decorate the
-%% result. Version comes first: a request naming a revision we do not
-%% speak may legitimately carry a shape we would misjudge.
+%% Gate a request on its era, its `_meta' and its version, run it, then
+%% decorate the result.
+%%
+%% A method the era does not have is not found whatever else is wrong
+%% with the request, and malformed `_meta' is answered before the
+%% version it failed to state: "unsupported version: undefined" names
+%% the wrong problem.
 dispatch(Method, Params, Id, Ctx) ->
-    case check_version(Ctx) of
-        {error, Requested} ->
-            unsupported_version_error(Id, Requested);
-        ok ->
-            dispatch_checked(Method, Params, Id, Ctx)
+    case serves(Method, Ctx) of
+        false ->
+            error_response(
+                Id,
+                ?JSONRPC_METHOD_NOT_FOUND,
+                <<"Method not found: ", Method/binary>>
+            );
+        true ->
+            dispatch_versioned(Method, Params, Id, Ctx)
     end.
+
+dispatch_versioned(Method, Params, Id, Ctx) ->
+    case barrel_mcp_ctx:validate_version(Ctx) of
+        {error, Reason} ->
+            meta_error(Id, Reason);
+        ok ->
+            case check_version(Ctx) of
+                {error, Requested} -> unsupported_version_error(Id, Requested);
+                ok -> dispatch_valid(Method, Params, Id, Ctx)
+            end
+    end.
+
+dispatch_valid(Method, Params, Id, Ctx) ->
+    case barrel_mcp_ctx:validate(Ctx) of
+        {error, Reason} ->
+            meta_error(Id, Reason);
+        ok ->
+            Response = handle_request(Method, Params, Id, Ctx),
+            finalize(with_cache_hints(Method, Response, Ctx), Ctx)
+    end.
+
+meta_error(Id, {missing_meta, Key}) ->
+    error_response(
+        Id,
+        ?JSONRPC_INVALID_PARAMS,
+        <<"Missing required _meta field: ", Key/binary>>
+    );
+meta_error(Id, {invalid_meta, Key}) ->
+    error_response(
+        Id,
+        ?JSONRPC_INVALID_PARAMS,
+        <<"Invalid _meta field: ", Key/binary>>
+    ).
 
 %% Only modern requests declare a version per request. A legacy one
 %% negotiated its version at `initialize', which validated it there.
@@ -413,34 +454,6 @@ advertised_versions() ->
     case application:get_env(barrel_mcp, advertise_versions, modern) of
         all -> ?MCP_ALL_VERSIONS;
         _ -> ?MCP_MODERN_VERSIONS
-    end.
-
-dispatch_checked(Method, Params, Id, Ctx) ->
-    case barrel_mcp_ctx:validate(Ctx) of
-        {error, {missing_meta, Key}} ->
-            error_response(
-                Id,
-                ?JSONRPC_INVALID_PARAMS,
-                <<"Missing required _meta field: ", Key/binary>>
-            );
-        {error, {invalid_meta, Key}} ->
-            error_response(
-                Id,
-                ?JSONRPC_INVALID_PARAMS,
-                <<"Invalid _meta field: ", Key/binary>>
-            );
-        ok ->
-            case serves(Method, Ctx) of
-                false ->
-                    error_response(
-                        Id,
-                        ?JSONRPC_METHOD_NOT_FOUND,
-                        <<"Method not found: ", Method/binary>>
-                    );
-                true ->
-                    Response = handle_request(Method, Params, Id, Ctx),
-                    finalize(with_cache_hints(Method, Response, Ctx), Ctx)
-            end
     end.
 
 serves(Method, Ctx) ->

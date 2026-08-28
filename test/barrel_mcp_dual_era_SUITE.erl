@@ -37,6 +37,8 @@
     resource_not_found_status/1,
     modern_notification_returns_202/1,
     modern_tool_error_stays_200/1,
+    modern_header_without_meta_names_the_missing_key/1,
+    modern_header_makes_initialize_not_found/1,
     legacy_tool_error_keeps_its_code/1,
     modern_progress_on_response_stream/1,
     modern_without_progress_token_is_plain_json/1,
@@ -91,6 +93,8 @@ all() ->
         resource_not_found_status,
         modern_notification_returns_202,
         modern_tool_error_stays_200,
+        modern_header_without_meta_names_the_missing_key,
+        modern_header_makes_initialize_not_found,
         legacy_tool_error_keeps_its_code,
         modern_progress_on_response_stream,
         modern_without_progress_token_is_plain_json,
@@ -464,7 +468,9 @@ non_binary_protocol_version(Config) ->
             },
             {Status, _, Body} = post(Port, iolist_to_binary(json:encode(Body0)), Hdrs),
             ?assertEqual(400, Status),
-            ?assertEqual(?MCP_HEADER_MISMATCH, maps:get(<<"code">>, error_of(Body)))
+            %% Malformed `_meta', not a disagreement between two stated
+            %% versions: the header check has nothing to compare against.
+            ?assertEqual(?JSONRPC_INVALID_PARAMS, maps:get(<<"code">>, error_of(Body)))
         end,
         [42, null, #{<<"a">> => 1}, [?MODERN]]
     ),
@@ -871,6 +877,47 @@ post_modern(Port, Body, ExtraHeaders) ->
             barrel_mcp_headers:standard(Method, Params) ++
             ExtraHeaders,
     post(Port, Body, Headers).
+
+%% The header names the era even when the body forgot to. Routing this
+%% as legacy answered "Bad MCP-Protocol-Version: 2026-07-28. Supported:
+%% <the legacy list>", telling the peer we do not speak a revision we do.
+modern_header_without_meta_names_the_missing_key(Config) ->
+    Port = ?config(port, Config),
+    %% The mirrored headers are the first thing a modern request has to
+    %% get right, so send them and leave only `_meta' out.
+    {400, _, Body} = post(
+        Port,
+        legacy_request(77, <<"tools/list">>, #{}),
+        [
+            {<<"mcp-protocol-version">>, ?MODERN},
+            {<<"mcp-method">>, <<"tools/list">>}
+        ]
+    ),
+    Response = json:decode(Body),
+    ?assertEqual(77, maps:get(<<"id">>, Response)),
+    Error = maps:get(<<"error">>, Response),
+    ?assertEqual(?JSONRPC_INVALID_PARAMS, maps:get(<<"code">>, Error)),
+    Message = maps:get(<<"message">>, Error),
+    ?assertNotEqual(nomatch, binary:match(Message, ?MCP_META_PROTOCOL_VERSION)),
+    %% The defect this replaces: routed legacy, the answer named the
+    %% legacy list and said we do not speak the revision it asked for.
+    ?assertEqual(nomatch, binary:match(Message, <<"Supported">>)).
+
+%% `initialize' does not exist in a modern revision, so a transport
+%% declaring one leaves no method to run.
+modern_header_makes_initialize_not_found(Config) ->
+    Port = ?config(port, Config),
+    {_, _, Body} = post(
+        Port,
+        modern_request(78, <<"initialize">>, #{}),
+        [
+            {<<"mcp-protocol-version">>, ?MODERN},
+            {<<"mcp-method">>, <<"initialize">>}
+        ]
+    ),
+    Response = json:decode(Body),
+    Error = maps:get(<<"error">>, Response),
+    ?assertEqual(?JSONRPC_METHOD_NOT_FOUND, maps:get(<<"code">>, Error)).
 
 post(Port, Body, ExtraHeaders) ->
     Headers =

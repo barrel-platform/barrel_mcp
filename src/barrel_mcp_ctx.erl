@@ -34,6 +34,7 @@
     from_request/1,
     from_request/2,
     validate/1,
+    validate_version/1,
     era/1,
     is_modern/1,
     protocol_version/1,
@@ -64,7 +65,10 @@
     auth_info => term(),
     streaming => boolean(),
     protocol_version => binary() | undefined,
-    client_capabilities => map()
+    client_capabilities => map(),
+    %% The revision the transport itself declares for this request, from
+    %% `MCP-Protocol-Version'. Used only to decide the era.
+    transport_version => binary() | undefined
 }.
 
 -type ctx() :: #{
@@ -99,7 +103,7 @@ from_request(Request, Extra) when is_map(Request), is_map(Extra) ->
     Method = maps:get(<<"method">>, Request, undefined),
     Params = as_map(maps:get(<<"params">>, Request, #{})),
     Meta = as_map(maps:get(<<"_meta">>, Params, #{})),
-    Era = classify(Method, Meta),
+    Era = classify(Method, Meta, maps:get(transport_version, Extra, undefined)),
     #{
         era => Era,
         protocol_version => version_of(Era, Meta, Extra),
@@ -120,19 +124,36 @@ from_request(Request, Extra) when is_map(Request), is_map(Extra) ->
         meta => Meta
     }.
 
-%% An `initialize' request is a legacy handshake by definition, whatever
-%% else it carries. Otherwise the presence of the protocol-version
-%% `_meta' key is the era signal.
-classify(<<"initialize">>, _Meta) ->
-    legacy;
-classify(_Method, Meta) ->
-    case maps:is_key(?MCP_META_PROTOCOL_VERSION, Meta) of
+%% Either signal puts a request in the modern era: the `_meta' key it
+%% carries, or the revision the transport declares for it. Taking only
+%% the first would answer a request headed `2026-07-28' with no `_meta'
+%% on the legacy path, where the version it named is not in the
+%% supported list, and tell the peer we do not speak a revision we do.
+%%
+%% `initialize' is a legacy handshake by definition, but it does not
+%% exist in a modern revision, so a transport declaring one leaves no
+%% method to run.
+classify(<<"initialize">>, _Meta, Transport) ->
+    case is_modern_version(Transport) of
+        true -> modern;
+        false -> legacy
+    end;
+classify(_Method, Meta, Transport) ->
+    case maps:is_key(?MCP_META_PROTOCOL_VERSION, Meta) orelse is_modern_version(Transport) of
         true -> modern;
         false -> legacy
     end.
 
-version_of(modern, Meta, _Extra) ->
-    as_binary_or_undefined(maps:get(?MCP_META_PROTOCOL_VERSION, Meta, undefined));
+is_modern_version(Version) when is_binary(Version) ->
+    barrel_mcp_version:era(Version) =:= modern;
+is_modern_version(_Version) ->
+    false.
+
+version_of(modern, Meta, Extra) ->
+    case as_binary_or_undefined(maps:get(?MCP_META_PROTOCOL_VERSION, Meta, undefined)) of
+        undefined -> as_binary_or_undefined(maps:get(transport_version, Extra, undefined));
+        Version -> Version
+    end;
 version_of(legacy, _Meta, Extra) ->
     as_binary_or_undefined(maps:get(protocol_version, Extra, undefined)).
 
@@ -151,18 +172,50 @@ capabilities_of(legacy, _Meta, Extra) ->
 %% `?JSONRPC_INVALID_PARAMS' (HTTP 400).
 %%
 %% Legacy requests carry no such requirement and always pass.
+%% @doc Check the stated revision on its own, before anything is judged
+%% against it. A peer naming a revision we do not speak may legitimately
+%% carry a `_meta' shape we would misjudge, so the version error has to
+%% win; but a version that is absent or not a string is a `_meta'
+%% problem, and answering "unsupported version: undefined" names the
+%% wrong one.
+-spec validate_version(ctx()) ->
+    ok | {error, {missing_meta, binary()}} | {error, {invalid_meta, binary()}}.
+validate_version(#{era := legacy}) ->
+    ok;
+validate_version(#{era := modern, meta := Meta}) ->
+    case maps:find(?MCP_META_PROTOCOL_VERSION, Meta) of
+        error -> {error, {missing_meta, ?MCP_META_PROTOCOL_VERSION}};
+        {ok, Version} when is_binary(Version) -> ok;
+        {ok, _} -> {error, {invalid_meta, ?MCP_META_PROTOCOL_VERSION}}
+    end.
+
 -spec validate(ctx()) ->
     ok | {error, {missing_meta, binary()}} | {error, {invalid_meta, binary()}}.
 validate(#{era := legacy}) ->
     ok;
 validate(#{era := modern, meta := Meta}) ->
-    Required = [
-        ?MCP_META_PROTOCOL_VERSION,
-        ?MCP_META_CLIENT_CAPABILITIES
+    case maps:is_key(?MCP_META_CLIENT_CAPABILITIES, Meta) of
+        false -> {error, {missing_meta, ?MCP_META_CLIENT_CAPABILITIES}};
+        true -> validate_types(Meta)
+    end.
+
+%% Presence is not enough. `clientCapabilities: 42' was coerced to an
+%% empty map and accepted, which reads as a client declaring nothing
+%% rather than as the malformed request it is.
+validate_types(Meta) ->
+    Typed = [
+        {?MCP_META_CLIENT_CAPABILITIES, fun is_map/1},
+        {?MCP_META_CLIENT_INFO, fun is_map/1}
     ],
-    case [K || K <- Required, not maps:is_key(K, Meta)] of
+    Bad = [
+        K
+     || {K, Ok} <- Typed,
+        maps:is_key(K, Meta),
+        not Ok(maps:get(K, Meta))
+    ],
+    case Bad of
         [] -> validate_log_level(Meta);
-        [Missing | _] -> {error, {missing_meta, Missing}}
+        [Key | _] -> {error, {invalid_meta, Key}}
     end.
 
 %% An unrecognised `io.modelcontextprotocol/logLevel' "SHOULD" be

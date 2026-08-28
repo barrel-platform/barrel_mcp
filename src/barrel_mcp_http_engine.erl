@@ -352,14 +352,20 @@ stream_post_request(Headers, Responder, Config, SessionEnabled, Request, AuthInf
             %% issue requests, so there is nothing to answer.
             handle_inbound_response(Headers, Responder, Config, Request);
         false ->
-            case barrel_mcp_ctx:era(barrel_mcp_ctx:from_request(Request)) of
+            %% The era is decided from the body's `_meta' and from the
+            %% version the transport declares, so the second decision
+            %% inside the protocol core has to see the same evidence.
+            Transport = negotiated_version(Headers, session_header(Headers)),
+            Extra = #{transport_version => Transport},
+            case barrel_mcp_ctx:era(barrel_mcp_ctx:from_request(Request, Extra)) of
                 modern ->
                     handle_modern_request(
                         Headers,
                         Responder,
                         Config,
                         Request,
-                        AuthInfo
+                        AuthInfo,
+                        Transport
                     );
                 legacy ->
                     handle_inbound_request(
@@ -379,7 +385,7 @@ stream_post_request(Headers, Responder, Config, SessionEnabled, Request, AuthInf
 
 %% Stateless: no session to look up, none to mint, and no
 %% `Mcp-Session-Id' on the way back.
-handle_modern_request(Headers, Responder, Config, Request, AuthInfo) ->
+handle_modern_request(Headers, Responder, Config, Request, AuthInfo, Transport) ->
     case validate_metadata_headers(Headers, Request) of
         {error, Message} ->
             Id = maps:get(<<"id">>, Request, null),
@@ -394,7 +400,7 @@ handle_modern_request(Headers, Responder, Config, Request, AuthInfo) ->
                 Message
             );
         ok ->
-            dispatch_modern_request(Headers, Responder, Config, Request, AuthInfo)
+            dispatch_modern_request(Headers, Responder, Config, Request, AuthInfo, Transport)
     end.
 
 %% The headers mirror body fields so an intermediary can route without
@@ -431,22 +437,27 @@ validate_request_headers(Headers, Request) ->
 %% intermediary enforcing policy reads one, the server executes on the
 %% other.
 check_protocol_version_header(Headers, Params) ->
-    Meta = maps:get(<<"_meta">>, Params, #{}),
-    Declared = maps:get(?MCP_META_PROTOCOL_VERSION, Meta, undefined),
-    Header = header(<<"mcp-protocol-version">>, Headers, undefined),
-    check_protocol_version_header(Header, Declared, is_binary(Declared)).
+    Meta =
+        case maps:get(<<"_meta">>, Params, #{}) of
+            M when is_map(M) -> M;
+            _ -> #{}
+        end,
+    case maps:get(?MCP_META_PROTOCOL_VERSION, Meta, undefined) of
+        Declared when is_binary(Declared) ->
+            Header = header(<<"mcp-protocol-version">>, Headers, undefined),
+            compare_protocol_version_header(Header, Declared);
+        _ ->
+            %% Absent, or there and not a string. Both are `_meta'
+            %% problems rather than a disagreement between two stated
+            %% versions, and `barrel_mcp_ctx:validate/1' names them.
+            ok
+    end.
 
-%% The declared version reaches us from a peer's `_meta' and is
-%% interpolated into the mismatch message. A number or a null there
-%% would raise `badarg' instead of returning an error, so it is
-%% confirmed to be a string before any message is built.
-check_protocol_version_header(_Header, _Declared, false) ->
-    {error, <<"Header mismatch: protocol version in _meta must be a string">>};
-check_protocol_version_header(undefined, _Declared, true) ->
+compare_protocol_version_header(undefined, _Declared) ->
     {error, <<"Header mismatch: MCP-Protocol-Version header is required">>};
-check_protocol_version_header(Declared, Declared, true) ->
+compare_protocol_version_header(Declared, Declared) ->
     ok;
-check_protocol_version_header(Other, Declared, true) ->
+compare_protocol_version_header(Other, Declared) ->
     {error,
         <<"Header mismatch: MCP-Protocol-Version header value '", Other/binary,
             "' does not match body value '", Declared/binary, "'">>}.
@@ -467,11 +478,15 @@ params_of(Request) ->
         _ -> #{}
     end.
 
-dispatch_modern_request(Headers, Responder, Config, Request, AuthInfo) ->
+dispatch_modern_request(Headers, Responder, Config, Request, AuthInfo, Transport) ->
     case
         barrel_mcp_protocol:handle(
             with_auth(Request, AuthInfo),
-            #{auth_info => AuthInfo, streaming => true}
+            #{
+                auth_info => AuthInfo,
+                streaming => true,
+                transport_version => Transport
+            }
         )
     of
         no_response ->
