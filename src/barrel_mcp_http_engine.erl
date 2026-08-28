@@ -1306,6 +1306,7 @@ tool_outcome_envelope(_Reply, RequestId, {failed, Reason}) ->
                 <<"Internal tool error">>
         end,
     barrel_mcp_protocol:success_response(RequestId, #{
+        <<"resultType">> => <<"complete">>,
         <<"content">> => [#{<<"type">> => <<"text">>, <<"text">> => Text}],
         <<"isError">> => true
     });

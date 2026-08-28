@@ -136,7 +136,7 @@ is_valid_schema(Schema) ->
 check_dialect(Schema, Ids) when is_map(Schema) ->
     case maps:get(<<"$schema">>, Schema, undefined) of
         undefined -> ok;
-        Uri when is_binary(Uri) -> supported_dialect(strip_fragment(Uri), Ids);
+        Uri when is_binary(Uri) -> check_dialect_uri(strip_fragment(Uri), Schema, Ids);
         Other -> error({schema_error, {unsupported_dialect, Other}})
     end;
 check_dialect(_Schema, _Ids) ->
@@ -149,6 +149,57 @@ supported_dialect(Uri, Ids) ->
         true -> ok;
         false -> error({schema_error, {unsupported_dialect, Uri}})
     end.
+
+%% Draft-07 is what the reference server ships on every tool, and most
+%% of it means the same thing under 2020-12. The five constructs that
+%% do not are refused, so a document using them still gets the
+%% graceful error the spec asks for (2026-07-28/basic/index.mdx:292)
+%% rather than a silent misjudgement.
+-define(DRAFT_07, <<"http://json-schema.org/draft-07/schema">>).
+
+check_dialect_uri(Uri, Schema, _Ids) when Uri =:= ?DRAFT_07 ->
+    case draft_07_only_construct(Schema) of
+        none -> ok;
+        Kw -> error({schema_error, {unsupported_dialect, {Uri, Kw}}})
+    end;
+check_dialect_uri(Uri, _Schema, Ids) ->
+    supported_dialect(Uri, Ids).
+
+draft_07_only_construct(Schema) when is_map(Schema) ->
+    Here =
+        case Schema of
+            #{<<"definitions">> := _} -> <<"definitions">>;
+            #{<<"dependencies">> := _} -> <<"dependencies">>;
+            #{<<"id">> := _} -> <<"id">>;
+            #{<<"items">> := Items} when is_list(Items) -> <<"items">>;
+            #{<<"exclusiveMinimum">> := B} when is_boolean(B) -> <<"exclusiveMinimum">>;
+            #{<<"exclusiveMaximum">> := B} when is_boolean(B) -> <<"exclusiveMaximum">>;
+            _ -> none
+        end,
+    case Here of
+        none ->
+            maps:fold(
+                fun
+                    (_K, _V, Found) when Found =/= none -> Found;
+                    (_K, V, none) -> draft_07_only_construct(V)
+                end,
+                none,
+                Schema
+            );
+        Kw ->
+            Kw
+    end;
+draft_07_only_construct(List) when is_list(List) ->
+    lists:foldl(
+        fun
+            (_V, Found) when Found =/= none -> Found;
+            (V, none) -> draft_07_only_construct(V)
+        end,
+        none,
+        List
+    );
+draft_07_only_construct(_Leaf) ->
+    none.
 
 base_of(Schema) when is_map(Schema) ->
     case maps:get(<<"$id">>, Schema, undefined) of

@@ -19,7 +19,7 @@
 -export([official_suite/1, no_network_dereference/1, bounds_are_enforced/1]).
 -export([invalid_schemas_are_refused_at_registration/1, output_schema_by_revision/1]).
 -export([vendored_metaschema_is_unchanged/1, dialects_other_than_2020_12_are_refused/1]).
--export([every_reference_form_resolves/1]).
+-export([every_reference_form_resolves/1, draft_07_is_accepted_when_nothing_differs/1]).
 -export([a_tool/1]).
 
 all() ->
@@ -31,7 +31,8 @@ all() ->
         output_schema_by_revision,
         vendored_metaschema_is_unchanged,
         dialects_other_than_2020_12_are_refused,
-        every_reference_form_resolves
+        every_reference_form_resolves,
+        draft_07_is_accepted_when_nothing_differs
     ].
 
 a_tool(_Args) -> <<"ok">>.
@@ -163,6 +164,11 @@ dialects_other_than_2020_12_are_refused(_Config) ->
         {<<"2020-12">>, #{<<"$schema">> => <<"https://json-schema.org/draft/2020-12/schema">>}},
         {<<"2020-12 with a fragment">>, #{
             <<"$schema">> => <<"https://json-schema.org/draft/2020-12/schema#">>
+        }},
+        %% Draft-07 means the same as 2020-12 for this document, and it is
+        %% what the reference server declares on every tool.
+        {<<"draft-07, nothing read differently">>, #{
+            <<"$schema">> => <<"http://json-schema.org/draft-07/schema#">>
         }}
     ],
     lists:foreach(
@@ -172,15 +178,20 @@ dialects_other_than_2020_12_are_refused(_Config) ->
         Accepted
     ),
     Refused = [
-        {<<"draft-07">>, <<"http://json-schema.org/draft-07/schema#">>},
-        {<<"draft-06">>, <<"http://json-schema.org/draft-06/schema#">>},
-        {<<"2019-09">>, <<"https://json-schema.org/draft/2019-09/schema">>}
+        %% A draft-07 construct 2020-12 reads differently is refused,
+        %% gracefully, rather than misjudged.
+        {<<"draft-07 using definitions">>, #{
+            <<"$schema">> => <<"http://json-schema.org/draft-07/schema#">>,
+            <<"definitions">> => #{}
+        }},
+        {<<"draft-06">>, #{<<"$schema">> => <<"http://json-schema.org/draft-06/schema#">>}},
+        {<<"2019-09">>, #{<<"$schema">> => <<"https://json-schema.org/draft/2019-09/schema">>}}
     ],
     lists:foreach(
-        fun({Why, Uri}) ->
+        fun({Why, Dialect}) ->
             ?assertMatch(
                 {Why, {error, {unsupported_dialect, _}}},
-                {Why, barrel_mcp_jsonschema:compile(Object(#{<<"$schema">> => Uri}))}
+                {Why, barrel_mcp_jsonschema:compile(Object(Dialect))}
             )
         end,
         Refused
@@ -203,7 +214,8 @@ dialects_other_than_2020_12_are_refused(_Config) ->
         {error, {invalid_input_schema, {unsupported_dialect, _}}},
         barrel_mcp:reg_tool(<<"old_dialect">>, ?MODULE, a_tool, #{
             input_schema => Object(#{
-                <<"$schema">> => <<"http://json-schema.org/draft-07/schema#">>
+                <<"$schema">> => <<"http://json-schema.org/draft-07/schema#">>,
+                <<"definitions">> => #{}
             })
         })
     ).
@@ -424,3 +436,29 @@ format(Failures) ->
         io_lib:format("  ~ts / ~ts / ~ts: ~p~n", [F, G, T, R])
      || {F, G, T, R} <- Failures
     ].
+
+%% The reference server declares draft-07 on every tool. A document
+%% using only what means the same under 2020-12 compiles; one using a
+%% construct 2020-12 reads differently is still refused, gracefully.
+draft_07_is_accepted_when_nothing_differs(_Config) ->
+    D7 = <<"http://json-schema.org/draft-07/schema#">>,
+    Same = #{
+        <<"$schema">> => D7,
+        <<"type">> => <<"object">>,
+        <<"properties">> => #{<<"message">> => #{<<"type">> => <<"string">>}},
+        <<"required">> => [<<"message">>]
+    },
+    {ok, C} = barrel_mcp_jsonschema:compile(Same),
+    ?assertEqual(ok, barrel_mcp_jsonschema:validate(#{<<"message">> => <<"x">>}, C, #{})),
+    ?assertMatch({error, _}, barrel_mcp_jsonschema:validate(#{}, C, #{})),
+    Differs = [
+        Same#{<<"definitions">> => #{}},
+        Same#{<<"properties">> => #{<<"xs">> => #{<<"items">> => [#{<<"type">> => <<"string">>}]}}},
+        Same#{<<"properties">> => #{<<"n">> => #{<<"exclusiveMinimum">> => true}}}
+    ],
+    lists:foreach(
+        fun(S) ->
+            ?assertMatch({error, {unsupported_dialect, _}}, barrel_mcp_jsonschema:compile(S))
+        end,
+        Differs
+    ).

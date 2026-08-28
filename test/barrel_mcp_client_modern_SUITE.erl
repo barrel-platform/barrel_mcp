@@ -1314,9 +1314,13 @@ catalogue() ->
         #{<<"name">> => <<"not_a_schema">>, <<"inputSchema">> => #{<<"type">> => <<"nope">>}},
         #{
             <<"name">> => <<"old_dialect">>,
+            %% `definitions' is what 2020-12 reads differently; a bare
+            %% draft-07 object is accepted now, since that is what the
+            %% reference server declares on every tool.
             <<"inputSchema">> => #{
                 <<"$schema">> => <<"http://json-schema.org/draft-07/schema#">>,
-                <<"type">> => <<"object">>
+                <<"type">> => <<"object">>,
+                <<"definitions">> => #{}
             }
         },
         #{<<"name">> => <<"not_an_object">>, <<"inputSchema">> => <<"a string">>},

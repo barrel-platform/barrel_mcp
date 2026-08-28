@@ -2022,7 +2022,9 @@ run_async_plan(Plan, Timeout, AuthInfo, OnSpawn) ->
                 }
             );
         {tool_failed, RequestId, Reason} ->
-            success_response(RequestId, tool_failure_result(Reason))
+            %% Built here, not by a handler, so finalize never sees it:
+            %% stamp resultType and serverInfo the way every result gets.
+            success_response(RequestId, decorate_result(tool_failure_result(Reason)))
     after Timeout ->
         error_response(RequestId, internal_error_code(PlanCtx), <<"Tool timed out">>)
     end.

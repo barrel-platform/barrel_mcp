@@ -1,4 +1,4 @@
-.PHONY: all compile test ct eunit dialyzer docs examples-setup examples-test interop-setup interop-test interop-python interop-go-setup interop-go clean
+.PHONY: all compile test ct eunit dialyzer docs examples-setup examples-test interop-setup interop-test interop-python conformance-setup conformance clean
 
 all: compile
 
@@ -49,19 +49,19 @@ interop-python: interop-setup
 	INTEROP_PYTHON_MODERN=$(CURDIR)/test/interop/.venv-modern/bin/python \
 	    rebar3 ct --suite=test/barrel_mcp_python_interop_SUITE
 
-# Go MCP SDK interop. `interop-go-setup' builds both binaries and is
-# idempotent. The CT suite skips when the two env vars are unset.
-interop-go-setup:
-	cd test/interop/go && go build -o bin/client ./client && go build -o bin/server ./server
+# Official MCP conformance runner and reference server, pinned in
+# test/conformance/package.json. `conformance-setup' is idempotent.
+conformance-setup:
+	cd test/conformance && npm install --no-audit --no-fund
 
-interop-go: interop-go-setup
-	INTEROP_GO_CLIENT=$(CURDIR)/test/interop/go/bin/client \
-	INTEROP_GO_SERVER=$(CURDIR)/test/interop/go/bin/server \
-	    rebar3 ct --suite=test/barrel_mcp_go_interop_SUITE
+conformance: conformance-setup
+	INTEROP_CONFORMANCE=$(CURDIR)/test/conformance/node_modules/@modelcontextprotocol/conformance/dist/index.js \
+	INTEROP_SERVER_EVERYTHING=$(CURDIR)/test/conformance/node_modules/@modelcontextprotocol/server-everything/dist/index.js \
+	    rebar3 ct --suite=test/barrel_mcp_conformance_SUITE
 
-interop-test: interop-python interop-go
+interop-test: interop-python conformance
 
 clean:
 	rebar3 clean
 	rm -rf examples/*/_build examples/*/_checkouts test/interop/.venv \
-	    test/interop/.venv-modern test/interop/go/bin
+	    test/interop/.venv-modern test/conformance/node_modules
