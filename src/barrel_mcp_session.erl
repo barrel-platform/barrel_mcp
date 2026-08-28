@@ -1010,73 +1010,38 @@ ensure_inflight_table() ->
     end.
 
 do_sampling(SessionId, SsePid, Params, Opts) ->
-    Timeout = maps:get(timeout_ms, Opts, ?DEFAULT_SAMPLING_TIMEOUT),
-    RequestId = generate_request_id(<<"sampling-">>),
-    Ref = make_ref(),
-    ok = gen_server:call(
-        ?MODULE,
-        {register_pending, RequestId, #pending{
-            id = RequestId,
-            session_id = SessionId,
-            caller = self(),
-            caller_ref = Ref,
-            expires_at = erlang:system_time(millisecond) + Timeout,
-            tag = sampling_response
-        }}
-    ),
-    Request = #{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => RequestId,
-        <<"method">> => <<"sampling/createMessage">>,
-        <<"params">> => Params
-    },
-    SsePid ! {sse_send_message, Request},
-    receive
-        {sampling_response, Ref, #{<<"result">> := Result} = R} ->
-            Usage = maps:get(<<"usage">>, Result, maps:get(usage, R, #{})),
+    case ask_client(sampling, SessionId, SsePid, Params, Opts) of
+        {ok, Result, Response} ->
+            Usage = maps:get(<<"usage">>, Result, maps:get(usage, Response, #{})),
             {ok, Result, Usage};
-        {sampling_response, Ref, #{<<"error">> := Err}} ->
-            {error, {client_error, Err}}
-    after Timeout ->
-        _ = gen_server:call(?MODULE, {discard_pending, RequestId}),
-        {error, timeout}
+        {error, _} = Err ->
+            Err
     end.
 
 do_elicit(SessionId, SsePid, Params, Opts) ->
-    Timeout = maps:get(timeout_ms, Opts, ?DEFAULT_SAMPLING_TIMEOUT),
-    RequestId = generate_request_id(<<"elicit-">>),
-    Ref = make_ref(),
-    ok = gen_server:call(
-        ?MODULE,
-        {register_pending, RequestId, #pending{
-            id = RequestId,
-            session_id = SessionId,
-            caller = self(),
-            caller_ref = Ref,
-            expires_at = erlang:system_time(millisecond) + Timeout,
-            tag = elicitation_response
-        }}
-    ),
-    Request = #{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => RequestId,
-        <<"method">> => <<"elicitation/create">>,
-        <<"params">> => Params
-    },
-    SsePid ! {sse_send_message, Request},
-    receive
-        {elicitation_response, Ref, #{<<"result">> := Result}} ->
-            {ok, Result};
-        {elicitation_response, Ref, #{<<"error">> := Err}} ->
-            {error, {client_error, Err}}
-    after Timeout ->
-        _ = gen_server:call(?MODULE, {discard_pending, RequestId}),
-        {error, timeout}
+    case ask_client(elicit, SessionId, SsePid, Params, Opts) of
+        {ok, Result, _Response} -> {ok, Result};
+        {error, _} = Err -> Err
     end.
 
 do_roots_list(SessionId, SsePid, Opts) ->
+    case ask_client(roots, SessionId, SsePid, #{}, Opts) of
+        {ok, Result, _Response} -> {ok, maps:get(<<"roots">>, Result, [])};
+        {error, _} = Err -> Err
+    end.
+
+request_spec(sampling) -> {<<"sampling-">>, <<"sampling/createMessage">>, sampling_response};
+request_spec(elicit) -> {<<"elicit-">>, <<"elicitation/create">>, elicitation_response};
+request_spec(roots) -> {<<"roots-">>, <<"roots/list">>, roots_response}.
+
+%% One server-to-client request and the wait for its answer. The pending
+%% row is what lets a response arriving on another connection find this
+%% caller, and what `purge_session/1' uses to fail it when the client
+%% goes; both depend on the reply shape matched here.
+ask_client(Kind, SessionId, SsePid, Params, Opts) ->
+    {Prefix, Method, Tag} = request_spec(Kind),
     Timeout = maps:get(timeout_ms, Opts, ?DEFAULT_SAMPLING_TIMEOUT),
-    RequestId = generate_request_id(<<"roots-">>),
+    RequestId = generate_request_id(Prefix),
     Ref = make_ref(),
     ok = gen_server:call(
         ?MODULE,
@@ -1086,21 +1051,20 @@ do_roots_list(SessionId, SsePid, Opts) ->
             caller = self(),
             caller_ref = Ref,
             expires_at = erlang:system_time(millisecond) + Timeout,
-            tag = roots_response
+            tag = Tag
         }}
     ),
-    Request = #{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => RequestId,
-        <<"method">> => <<"roots/list">>,
-        <<"params">> => #{}
-    },
-    SsePid ! {sse_send_message, Request},
+    SsePid !
+        {sse_send_message, #{
+            <<"jsonrpc">> => <<"2.0">>,
+            <<"id">> => RequestId,
+            <<"method">> => Method,
+            <<"params">> => Params
+        }},
     receive
-        {roots_response, Ref, #{<<"result">> := Result}} ->
-            Roots = maps:get(<<"roots">>, Result, []),
-            {ok, Roots};
-        {roots_response, Ref, #{<<"error">> := Err}} ->
+        {Tag, Ref, #{<<"result">> := Result} = Response} ->
+            {ok, Result, Response};
+        {Tag, Ref, #{<<"error">> := Err}} ->
             {error, {client_error, Err}}
     after Timeout ->
         _ = gen_server:call(?MODULE, {discard_pending, RequestId}),
