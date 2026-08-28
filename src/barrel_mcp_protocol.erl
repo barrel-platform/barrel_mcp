@@ -418,8 +418,12 @@ check_version(Ctx) ->
         false ->
             ok;
         true ->
+            %% Against the advertised list, not the compiled one: an
+            %% operator serving only legacy clients refuses the modern
+            %% era, and the probe is what a client falls back from.
             Requested = barrel_mcp_ctx:protocol_version(Ctx),
-            case lists:member(Requested, ?MCP_MODERN_VERSIONS) of
+            Modern = [V || V <- advertised_versions(), lists:member(V, ?MCP_MODERN_VERSIONS)],
+            case lists:member(Requested, Modern) of
                 true -> ok;
                 false -> {error, Requested}
             end
@@ -454,6 +458,7 @@ unsupported_version_error(Id, Requested) ->
 advertised_versions() ->
     case application:get_env(barrel_mcp, advertise_versions, modern) of
         all -> ?MCP_ALL_VERSIONS;
+        legacy -> ?MCP_LEGACY_VERSIONS;
         _ -> ?MCP_MODERN_VERSIONS
     end.
 

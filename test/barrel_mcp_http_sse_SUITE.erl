@@ -31,6 +31,7 @@
     origin_is_validated/1,
     stream_close_ends_the_session/1,
     stream_close_kills_the_running_tool/1,
+    discover_is_refused_on_the_pair/1,
     client_falls_back_to_the_sse_pair/1
 ]).
 
@@ -51,6 +52,7 @@ all() ->
         origin_is_validated,
         stream_close_ends_the_session,
         stream_close_kills_the_running_tool,
+        discover_is_refused_on_the_pair,
         client_falls_back_to_the_sse_pair
     ].
 
@@ -208,6 +210,37 @@ stream_close_kills_the_running_tool(Config) ->
     after
         persistent_term:erase({?MODULE, watcher})
     end.
+
+%% `server/discover' is answered in both eras elsewhere so a dual-era
+%% client can probe before choosing. This pair cannot serve the modern
+%% era at all, so answering here would advertise a revision the
+%% transport does not have. The Go SDK adopted exactly that and landed
+%% a 2024-11-05 transport on 2026-07-28.
+discover_is_refused_on_the_pair(Config) ->
+    {Stream, Endpoint} = open_stream(Config),
+    Probe = json:encode(#{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 9,
+        <<"method">> => <<"server/discover">>,
+        <<"params">> => #{
+            <<"_meta">> => #{
+                ?MCP_META_PROTOCOL_VERSION => <<"2026-07-28">>,
+                ?MCP_META_CLIENT_CAPABILITIES => #{}
+            }
+        }
+    }),
+    202 = post(Config, Endpoint, Probe),
+    {Response, Stream1} = next_message(Stream),
+    ?assertEqual(9, maps:get(<<"id">>, Response)),
+    ?assertEqual(
+        ?JSONRPC_METHOD_NOT_FOUND,
+        maps:get(<<"code">>, maps:get(<<"error">>, Response))
+    ),
+    %% And the handshake the client falls back to still works.
+    202 = post(Config, Endpoint, init_body()),
+    {Init, Stream2} = next_message(Stream1),
+    ?assertEqual(<<"2024-11-05">>, maps:get(<<"protocolVersion">>, maps:get(<<"result">>, Init))),
+    close(Stream2).
 
 %% A server that hosts only the 2024-11-05 pair answers a Streamable
 %% POST with a 404, which is what tells the client to go looking for the

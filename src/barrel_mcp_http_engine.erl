@@ -1681,9 +1681,15 @@ legacy_dispatch(SessionId, Headers, Body, Responder, Config, AuthInfo) ->
             ),
             reply(Responder, 202, cors_headers(Headers, Config, #{}), <<>>);
         {ok, Request} ->
+            %% This pair predates the modern era, so a client on it is
+            %% in the handshake era whatever revision its header names.
+            %% Pinning the transport version to a legacy revision keeps
+            %% the header-aware era selection from routing its probe
+            %% into a stateless path the pair cannot serve.
             ProtocolState = #{
                 auth_info => AuthInfo,
                 protocol_version => negotiated_version(Headers, SessionId),
+                transport_version => legacy_transport_version(Headers, SessionId),
                 session_id => SessionId
             },
             Message =
@@ -1695,6 +1701,18 @@ legacy_dispatch(SessionId, Headers, Body, Responder, Config, AuthInfo) ->
             reply(Responder, 202, cors_headers(Headers, Config, #{}), <<>>)
     end.
 
+%% `server/discover' is answered in both eras elsewhere, so a dual-era
+%% client can probe before choosing. This pair cannot serve the modern
+%% era at all, so a probe answered here would advertise a revision the
+%% transport does not have. Refusing it as method-not-found is what a
+%% client falls back from into the handshake the pair belongs to.
+legacy_answer(SessionId, #{<<"method">> := <<"server/discover">>, <<"id">> := Id}, _State) ->
+    push_legacy(
+        SessionId,
+        barrel_mcp_protocol:error_response(
+            Id, ?JSONRPC_METHOD_NOT_FOUND, <<"Method not found: server/discover">>
+        )
+    );
 legacy_answer(SessionId, Message, ProtocolState) ->
     case barrel_mcp_protocol:handle(Message, ProtocolState) of
         no_response ->
@@ -1762,6 +1780,19 @@ watch_stream_loop(Ref, Stream, Worker) ->
             ok;
         done ->
             ok
+    end.
+
+%% The revision the SSE pair runs at: what the session negotiated, or
+%% the newest legacy revision before it has. Never a modern one.
+legacy_transport_version(Headers, SessionId) ->
+    case negotiated_version(Headers, SessionId) of
+        V when is_binary(V) ->
+            case barrel_mcp_version:era(V) of
+                legacy -> V;
+                _ -> ?MCP_LATEST_LEGACY_VERSION
+            end;
+        _ ->
+            ?MCP_LATEST_LEGACY_VERSION
     end.
 
 method_of(Message) when is_map(Message) -> maps:get(<<"method">>, Message, <<>>);

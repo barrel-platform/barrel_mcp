@@ -571,3 +571,19 @@ initialize_params_are_required_test() ->
     %% A complete one still negotiates.
     Result = result_of(legacy(<<"initialize">>, init_params())),
     ?assertEqual(?MCP_LATEST_LEGACY_VERSION, maps:get(<<"protocolVersion">>, Result)).
+
+%% An operator whose clients have not moved serves only the handshake
+%% era: the probe a dual-era client falls back from is refused, and
+%% initialize still negotiates.
+advertise_legacy_refuses_the_modern_era_test() ->
+    application:set_env(barrel_mcp, advertise_versions, legacy),
+    try
+        ?assertEqual(
+            ?MCP_UNSUPPORTED_PROTOCOL_VERSION,
+            error_code_of(modern(<<"server/discover">>))
+        ),
+        Result = result_of(legacy(<<"initialize">>, init_params())),
+        ?assertEqual(?MCP_LATEST_LEGACY_VERSION, maps:get(<<"protocolVersion">>, Result))
+    after
+        application:unset_env(barrel_mcp, advertise_versions)
+    end.
