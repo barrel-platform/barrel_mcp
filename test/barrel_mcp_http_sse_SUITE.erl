@@ -28,10 +28,11 @@
     routes_are_off_unless_configured/1,
     origin_is_validated/1,
     stream_close_ends_the_session/1,
+    stream_close_kills_the_running_tool/1,
     client_falls_back_to_the_sse_pair/1
 ]).
 
--export([echo_tool/1]).
+-export([echo_tool/1, watched_slow_tool/1]).
 
 -define(PORT, 23100).
 -define(SSE, "/sse").
@@ -47,6 +48,7 @@ all() ->
         routes_are_off_unless_configured,
         origin_is_validated,
         stream_close_ends_the_session,
+        stream_close_kills_the_running_tool,
         client_falls_back_to_the_sse_pair
     ].
 
@@ -57,10 +59,14 @@ init_per_suite(Config) ->
     ok = barrel_mcp:reg_tool(<<"echo">>, ?MODULE, echo_tool, #{
         description => <<"Echoes its input">>
     }),
+    ok = barrel_mcp:reg_tool(<<"watched_slow">>, ?MODULE, watched_slow_tool, #{
+        description => <<"Reports its pid, then sleeps well past any test bound">>
+    }),
     Config.
 
 end_per_suite(_Config) ->
     barrel_mcp_registry:unreg(tool, <<"echo">>),
+    barrel_mcp_registry:unreg(tool, <<"watched_slow">>),
     application:stop(barrel_mcp),
     ok.
 
@@ -89,6 +95,17 @@ end_per_testcase(_TC, _Config) ->
 
 echo_tool(Args) ->
     <<"Echo: ", (maps:get(<<"input">>, Args, <<"none">>))/binary>>.
+
+%% Hands its pid to whoever registered under `watcher', then sleeps far
+%% longer than the case will wait, so the only way it stops early is by
+%% being killed.
+watched_slow_tool(_Args) ->
+    case persistent_term:get({?MODULE, watcher}, undefined) of
+        Pid when is_pid(Pid) -> Pid ! {tool_pid, self()};
+        _ -> ok
+    end,
+    timer:sleep(30000),
+    <<"never">>.
 
 %%====================================================================
 %% Cases
@@ -162,6 +179,33 @@ stream_close_ends_the_session(Config) ->
     close(Stream),
     wait_until(fun() -> post(Config, Endpoint, init_body()) =:= 404 end, 5000),
     ?assertEqual(404, post(Config, Endpoint, init_body())).
+
+%% The stream is the session and the answer has nowhere to go once it
+%% closes, so the tool it was waiting on must not keep running. Every
+%% other transport reaps its worker on disconnect; this one did not.
+stream_close_kills_the_running_tool(Config) ->
+    {Stream, Endpoint} = open_stream(Config),
+    persistent_term:put({?MODULE, watcher}, self()),
+    try
+        202 = post(Config, Endpoint, init_body()),
+        {_Init, Stream1} = next_message(Stream),
+        Call = request(7, <<"tools/call">>, #{
+            <<"name">> => <<"watched_slow">>,
+            <<"arguments">> => #{}
+        }),
+        202 = post(Config, Endpoint, Call),
+        ToolPid =
+            receive
+                {tool_pid, P} -> P
+            after 5000 -> error(tool_never_started)
+            end,
+        ?assert(is_process_alive(ToolPid)),
+        close(Stream1),
+        wait_until(fun() -> not is_process_alive(ToolPid) end, 3000),
+        ?assertNot(is_process_alive(ToolPid))
+    after
+        persistent_term:erase({?MODULE, watcher})
+    end.
 
 %% A server that hosts only the 2024-11-05 pair answers a Streamable
 %% POST with a 404, which is what tells the client to go looking for the

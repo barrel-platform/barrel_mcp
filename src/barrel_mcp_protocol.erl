@@ -37,7 +37,8 @@
     decode_envelope/1,
     format_tool_result_external/1,
     drive_async_plan/2,
-    drive_async_plan/3
+    drive_async_plan/3,
+    drive_async_plan/4
 ]).
 
 %% How long `tasks/result' waits for a task to finish before giving up.
@@ -1820,12 +1821,20 @@ drive_async_plan(Plan, Timeout) ->
 %% with no auth provider use the `/2' form and `auth_info' is `undefined'.
 -spec drive_async_plan(map(), timeout(), term()) -> map().
 drive_async_plan(Plan, Timeout, AuthInfo) ->
+    drive_async_plan(Plan, Timeout, AuthInfo, fun(_Worker) -> ok end).
+
+%% @doc As {@link drive_async_plan/3}, telling `OnSpawn' the worker pid
+%% before waiting on it. A caller that must reap the worker if its own
+%% peer goes away has no other way to learn the pid: the wait is
+%% blocking and the spawn happens inside it.
+-spec drive_async_plan(map(), timeout(), term(), fun((pid() | undefined) -> term())) -> map().
+drive_async_plan(Plan, Timeout, AuthInfo, OnSpawn) ->
     Ctx = maps:get(ctx, Plan, undefined),
     case long_running_plan(Plan, Ctx) of
         {true, ToolName} ->
             finalize(drive_as_task(Plan, ToolName, Ctx, AuthInfo), Ctx);
         false ->
-            finalize(run_async_plan(Plan, Timeout, AuthInfo), Ctx)
+            finalize(run_async_plan(Plan, Timeout, AuthInfo, OnSpawn), Ctx)
     end.
 
 %% A tool is only run as a task when the caller can actually poll one.
@@ -1896,7 +1905,7 @@ drive_as_task(Plan, _ToolName, Ctx, AuthInfo, TaskId) ->
 session_of(undefined) -> undefined;
 session_of(Ctx) -> barrel_mcp_ctx:session_id(Ctx).
 
-run_async_plan(Plan, Timeout, AuthInfo) ->
+run_async_plan(Plan, Timeout, AuthInfo, OnSpawn) ->
     Self = self(),
     PlanCtx = maps:get(ctx, Plan, undefined),
     RequestId = maps:get(request_id, Plan),
@@ -1914,7 +1923,7 @@ run_async_plan(Plan, Timeout, AuthInfo) ->
         reply_to => Self,
         auth_info => AuthInfo
     },
-    _Pid = Spawn(Ctx),
+    _ = OnSpawn(Spawn(Ctx)),
     receive
         {tool_result, RequestId, Result} ->
             success_response(

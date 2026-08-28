@@ -1703,10 +1703,7 @@ legacy_answer(SessionId, Message, ProtocolState) ->
             %% Off this request: the POST answers 202 straight away and
             %% the result goes out on the stream whenever it is ready.
             AuthInfo = maps:get(auth_info, ProtocolState),
-            _ = spawn(fun() ->
-                Response = barrel_mcp_protocol:drive_async_plan(Plan, 60000, AuthInfo),
-                push_legacy(SessionId, Response)
-            end),
+            _ = spawn(fun() -> answer_on_stream(SessionId, Plan, AuthInfo) end),
             ok;
         {subscribe, _Sub} ->
             %% Modern-only, and this transport predates it.
@@ -1716,6 +1713,55 @@ legacy_answer(SessionId, Message, ProtocolState) ->
                 SessionId, method_of(Message), Response
             ),
             push_legacy(SessionId, Response)
+    end.
+
+%% The stream is the session, and the answer has nowhere to go once it
+%% closes, so the tool it was waiting on must not keep running. The
+%% wait inside drive_async_plan is blocking and knows nothing of the
+%% stream, so a watcher kills the worker the moment the stream goes.
+%%
+%% Watched by monitor rather than link: the stream process traps exits
+%% and reads any EXIT as its peer leaving, so a link would turn a
+%% normal finish here into a spurious close.
+answer_on_stream(SessionId, Plan, AuthInfo) ->
+    Watcher = spawn_link(fun() -> watch_stream(SessionId) end),
+    Response = barrel_mcp_protocol:drive_async_plan(
+        Plan,
+        60000,
+        AuthInfo,
+        fun(Worker) -> Watcher ! {worker, Worker} end
+    ),
+    Watcher ! done,
+    push_legacy(SessionId, Response).
+
+watch_stream(SessionId) ->
+    Stream =
+        case barrel_mcp_session:get_sse_pid(SessionId) of
+            {ok, Pid} -> Pid;
+            _ -> undefined
+        end,
+    Ref =
+        case Stream of
+            undefined -> undefined;
+            _ -> monitor(process, Stream)
+        end,
+    watch_stream_loop(Ref, Stream, undefined).
+
+%% Holds the worker pid once it exists. A DOWN before the worker is
+%% known is remembered as a pending kill.
+watch_stream_loop(Ref, Stream, Worker) ->
+    receive
+        {worker, W} when Ref =:= undefined ->
+            %% No stream to watch means the peer is already gone.
+            _ = settle_disconnect(disconnected, W),
+            ok;
+        {worker, W} ->
+            watch_stream_loop(Ref, Stream, W);
+        {'DOWN', Ref, process, Stream, _} ->
+            _ = settle_disconnect(disconnected, Worker),
+            ok;
+        done ->
+            ok
     end.
 
 method_of(Message) when is_map(Message) -> maps:get(<<"method">>, Message, <<>>);
