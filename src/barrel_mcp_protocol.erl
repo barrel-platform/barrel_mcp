@@ -748,7 +748,7 @@ seal_input_required(Requests, State, Method, Params, Ctx, RequestId) ->
                         RequestId,
                         ?MCP_MISSING_CLIENT_CAPABILITY,
                         <<"Client did not declare a required capability">>,
-                        #{<<"requiredCapabilities">> => Missing}
+                        #{<<"requiredCapabilities">> => capabilities_object(Missing)}
                     )
             end
     end.
@@ -780,7 +780,7 @@ with_tasks_extension(Id, Ctx, Fun) ->
                 Id,
                 ?MCP_MISSING_CLIENT_CAPABILITY,
                 <<"Client did not declare a required capability">>,
-                #{<<"requiredCapabilities">> => [?MCP_EXT_TASKS]}
+                #{<<"requiredCapabilities">> => extension_object(?MCP_EXT_TASKS)}
             );
         false ->
             Fun()
@@ -1171,6 +1171,31 @@ input_required_result(Requests, State, Method, Params, Ctx) ->
             {error, Missing}
     end.
 
+%% `requiredCapabilities' is a ClientCapabilities object, not a list of
+%% names: the reference server builds one at
+%% `mcp/server/mcpserver/resolve.py:695'. The dotted names
+%% `missing_mode/3' produces nest, so `elicitation.form' is
+%% `{"elicitation": {"form": {}}}'.
+capabilities_object(Names) ->
+    lists:foldl(
+        fun(Name, Acc) ->
+            case binary:split(Name, <<".">>) of
+                [Capability] ->
+                    Acc#{Capability => maps:get(Capability, Acc, #{})};
+                [Capability, Mode] ->
+                    Inner = maps:get(Capability, Acc, #{}),
+                    Acc#{Capability => Inner#{Mode => #{}}}
+            end
+        end,
+        #{},
+        Names
+    ).
+
+%% An extension is named under `extensions', keyed by its identifier
+%% (`mcp/server/mcpserver/server.py:1337').
+extension_object(Identifier) ->
+    #{<<"extensions">> => #{Identifier => #{}}}.
+
 undeclared_capabilities(Requests, Ctx) ->
     lists:usort(
         lists:append([missing_capabilities(R, Ctx) || R <- maps:values(Requests)])
@@ -1307,7 +1332,7 @@ handle_request(<<"subscriptions/listen">>, Params, Id, Ctx) ->
                         Id,
                         ?MCP_MISSING_CLIENT_CAPABILITY,
                         <<"Client did not declare a required capability">>,
-                        #{<<"requiredCapabilities">> => [?MCP_EXT_TASKS]}
+                        #{<<"requiredCapabilities">> => extension_object(?MCP_EXT_TASKS)}
                     );
                 true ->
                     %% Bound to the principal, and narrowed to the ids

@@ -305,7 +305,7 @@ undeclared_capability_refused(Config) ->
     Error = error_of(Body),
     ?assertEqual(?MCP_MISSING_CLIENT_CAPABILITY, maps:get(<<"code">>, Error)),
     ?assertEqual(
-        [<<"roots">>],
+        #{<<"roots">> => #{}},
         maps:get(<<"requiredCapabilities">>, maps:get(<<"data">>, Error))
     ),
     ok.

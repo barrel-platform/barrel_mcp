@@ -131,8 +131,11 @@ async def undeclared_capability_is_refused(url: str) -> None:
                 fail(f"undeclared elicitation raised {exc!r}, not an MCPError")
             if error.code != MISSING_CLIENT_CAPABILITY:
                 fail(f"undeclared elicitation returned code {error.code}")
+            # A ClientCapabilities object, not a list of names: the
+            # reference server builds one in
+            # mcp/server/mcpserver/resolve.py.
             required = (error.data or {}).get("requiredCapabilities")
-            if required != ["elicitation"]:
+            if not isinstance(required, dict) or "elicitation" not in required:
                 fail(f"error named requiredCapabilities {required!r}")
             return
     fail("server asked for elicitation from a client that never declared it")

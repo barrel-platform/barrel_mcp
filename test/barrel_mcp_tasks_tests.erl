@@ -354,7 +354,7 @@ task_methods_need_extension() ->
             Error = maps:get(<<"error">>, Resp),
             ?assertEqual(-32021, maps:get(<<"code">>, Error)),
             ?assertEqual(
-                [<<"io.modelcontextprotocol/tasks">>],
+                #{<<"extensions">> => #{<<"io.modelcontextprotocol/tasks">> => #{}}},
                 maps:get(<<"requiredCapabilities">>, maps:get(<<"data">>, Error))
             )
         end,
