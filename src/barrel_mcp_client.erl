@@ -1867,6 +1867,12 @@ is_supported(_, #data{server_capabilities = undefined}) ->
     false;
 is_supported(<<"tools/", _/binary>>, #data{server_capabilities = Caps}) ->
     maps:is_key(<<"tools">>, Caps);
+%% Subscribing needs the sub-capability, not just the family: a server
+%% advertising `resources' without `subscribe' has no subscribe method.
+is_supported(<<"resources/subscribe">>, #data{server_capabilities = Caps}) ->
+    sub_capability(Caps, <<"resources">>, <<"subscribe">>);
+is_supported(<<"resources/unsubscribe">>, #data{server_capabilities = Caps}) ->
+    sub_capability(Caps, <<"resources">>, <<"subscribe">>);
 is_supported(<<"resources/", _/binary>>, #data{server_capabilities = Caps}) ->
     maps:is_key(<<"resources">>, Caps);
 is_supported(<<"prompts/", _/binary>>, #data{server_capabilities = Caps}) ->
@@ -1876,14 +1882,30 @@ is_supported(<<"completion/", _/binary>>, #data{server_capabilities = Caps}) ->
 is_supported(<<"logging/", _/binary>>, #data{server_capabilities = Caps}) ->
     maps:is_key(<<"logging">>, Caps);
 is_supported(<<"tasks/", _/binary>>, #data{era = modern} = Data) ->
-    %% Modern servers advertise tasks as an extension, not a capability.
+    %% Modern servers advertise tasks as an extension, not a capability,
+    %% and its object is empty: naming the identifier is the
+    %% declaration, so there is nothing finer to check.
     Caps = Data#data.server_capabilities,
     Extensions = maps:get(<<"extensions">>, Caps, #{}),
     is_map(Extensions) andalso maps:is_key(?MCP_EXT_TASKS, Extensions);
-is_supported(<<"tasks/", _/binary>>, #data{server_capabilities = Caps}) ->
-    maps:is_key(<<"tasks">>, Caps);
+is_supported(<<"tasks/", Op/binary>>, #data{server_capabilities = Caps}) ->
+    task_op_declared(maps:get(<<"tasks">>, Caps, undefined), Op);
 is_supported(_, _) ->
     true.
+
+%% A legacy `tasks' capability names each operation it has, so a server
+%% offering `get' and `list' has not thereby offered `cancel'. An object
+%% we cannot read at all is treated as declaring nothing.
+task_op_declared(Tasks, Op) when is_map(Tasks) ->
+    maps:is_key(Op, Tasks);
+task_op_declared(_Tasks, _Op) ->
+    false.
+
+sub_capability(Caps, Family, Key) ->
+    case maps:get(Family, Caps, undefined) of
+        Sub when is_map(Sub) -> maps:get(Key, Sub, false) =:= true;
+        _ -> false
+    end.
 
 do_cancel(Id, #data{pending = Pending} = Data) ->
     case maps:take(Id, Pending) of

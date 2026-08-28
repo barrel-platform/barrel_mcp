@@ -27,6 +27,9 @@
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_headers).
 
+%% Largest integer JSON round-trips exactly (RFC 8259 section 6).
+-define(JSON_SAFE_INTEGER, 9007199254740991).
+
 -include("barrel_mcp.hrl").
 
 %% Value encoding
@@ -208,7 +211,14 @@ param_header_name(Name) ->
 %% `null' counts as absent: the spec has the header omitted for it.
 %% Floats are accepted because JSON does not distinguish them from
 %% integers, not because `number' is a permitted annotation target.
-value_at([], V) when is_binary(V); is_number(V); is_boolean(V) ->
+value_at([], V) when is_integer(V) ->
+    %% Outside the JSON safe range the two ends do not agree on the
+    %% value, so there is nothing a mirrored header could prove.
+    case V >= -?JSON_SAFE_INTEGER andalso V =< ?JSON_SAFE_INTEGER of
+        true -> {ok, V};
+        false -> none
+    end;
+value_at([], V) when is_binary(V); is_float(V); is_boolean(V) ->
     {ok, V};
 value_at([], _V) ->
     none;
@@ -417,6 +427,11 @@ binding_of(Sub, SubPath) ->
     case maps:get(<<"x-mcp-header">>, Sub, undefined) of
         undefined ->
             {ok, none};
+        Name when is_binary(Name), is_map_key(<<"$ref">>, Sub) ->
+            %% A `$ref' is an opaque pointer. Whatever it resolves to may
+            %% not be a primitive, and we would be binding a header to a
+            %% type we never looked at.
+            {error, {x_mcp_header_on_ref, Name}};
         Name when is_binary(Name) ->
             case valid_name(Name) of
                 false ->

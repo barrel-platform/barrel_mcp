@@ -73,8 +73,10 @@ deployment, and connects to both. See the
 - `MCP-Protocol-Version` validated server-side: missing falls back
   to the session-stored negotiated version; unsupported → 400.
 - JSON-RPC `id` must be string or integer; `null` and other shapes
-  rejected with -32600. Top-level JSON arrays (batches) explicitly
-  rejected — MCP removed batching.
+  rejected with -32600.
+- Top-level JSON arrays (batches) are served on `2024-11-05` and
+  `2025-03-26`, and rejected from `2025-06-18`, where the spec removed
+  them.
 - `notifications/cancelled` aborts the in-flight tool call; the
   cancelled HTTP request closes with 200 and an empty body (no
   JSON-RPC envelope, per spec).

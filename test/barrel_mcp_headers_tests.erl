@@ -225,6 +225,12 @@ scan_rejects_object_and_array_test() ->
         scan_with(#{<<"type">> => <<"array">>, <<"x-mcp-header">> => <<"A">>})
     ).
 
+scan_rejects_annotation_beside_a_ref_test() ->
+    ?assertMatch(
+        {error, {x_mcp_header_on_ref, <<"R">>}},
+        scan_with(#{<<"$ref">> => <<"#/$defs/thing">>, <<"x-mcp-header">> => <<"R">>})
+    ).
+
 scan_rejects_case_insensitive_duplicate_test() ->
     ?assertMatch(
         {error, {duplicate_x_mcp_header, <<"region">>}},
@@ -467,3 +473,15 @@ registration_stores_bindings_test() ->
     {ok, Handler} = barrel_mcp_registry:find(tool, <<"good_hdr">>),
     ?assertEqual([{<<"Region">>, [<<"region">>]}], maps:get(header_params, Handler)),
     barrel_mcp_registry:unreg(tool, <<"good_hdr">>).
+
+%% Past the JSON safe range the two ends do not agree on the value, so
+%% there is nothing a mirrored header could prove.
+param_header_skips_unsafe_integers_test() ->
+    Bindings = [{<<"N">>, [<<"n">>]}],
+    Safe = 9007199254740991,
+    ?assertEqual(
+        [{<<"mcp-param-n">>, <<"9007199254740991">>}],
+        barrel_mcp_headers:param_headers(#{<<"n">> => Safe}, Bindings)
+    ),
+    ?assertEqual([], barrel_mcp_headers:param_headers(#{<<"n">> => Safe + 1}, Bindings)),
+    ?assertEqual([], barrel_mcp_headers:param_headers(#{<<"n">> => -Safe - 1}, Bindings)).
