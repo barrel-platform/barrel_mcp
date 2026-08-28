@@ -402,15 +402,17 @@ modern_notification_returns_202(Config) ->
 %% The code is the JSON-RPC one, not `-32000': that sits in the range
 %% 2026-07-28 reserved as legacy and told new implementations not to use
 %% (basic/index.mdx:117).
+%% A crashing tool is an error result, as both Python SDK generations
+%% answer it, and the crash reason is never on the wire.
 modern_tool_error_stays_200(Config) ->
     Port = ?config(port, Config),
     Params = #{<<"name">> => <<"boom">>, <<"arguments">> => #{}},
     {200, _, Body} = post_modern(Port, modern_request(1, <<"tools/call">>, Params), []),
-    ?assertEqual(-32603, maps:get(<<"code">>, error_of(Body))),
+    assert_crash_result(Body),
     ok.
 
-%% The same crash on a handshake-era connection keeps `-32000', which is
-%% what a client written against those revisions expects.
+%% The same on a handshake-era connection: the envelope does not depend
+%% on the era, since the reference implementation's does not either.
 legacy_tool_error_keeps_its_code(Config) ->
     Port = ?config(port, Config),
     {200, InitHeaders, _} = post(Port, init_body(), []),
@@ -421,8 +423,14 @@ legacy_tool_error_keeps_its_code(Config) ->
         legacy_request(2, <<"tools/call">>, Params),
         [{<<"mcp-session-id">>, SessionId}]
     ),
-    ?assertEqual(?MCP_TOOL_ERROR, maps:get(<<"code">>, error_of(Body))),
+    assert_crash_result(Body),
     ok.
+
+assert_crash_result(Body) ->
+    #{<<"result">> := #{<<"isError">> := true, <<"content">> := [Block]}} = json:decode(Body),
+    Text = maps:get(<<"text">>, Block),
+    ?assertEqual(<<"Internal tool error">>, Text),
+    ?assertEqual(nomatch, binary:match(Text, <<"deliberate_crash">>)).
 
 %%====================================================================
 %% Request metadata headers

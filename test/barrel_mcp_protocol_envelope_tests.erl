@@ -224,7 +224,29 @@ drive_async_plan_tool_failed_test() ->
         end
     },
     Resp = barrel_mcp_protocol:drive_async_plan(Plan, 1000),
-    ?assertMatch(#{<<"error">> := #{<<"code">> := -32000}}, Resp).
+    %% An error result, not a protocol error, as the reference
+    %% implementation does. The crash reason is never echoed.
+    #{<<"result">> := Result} = Resp,
+    ?assertEqual(true, maps:get(<<"isError">>, Result)),
+    [#{<<"text">> := Text}] = maps:get(<<"content">>, Result),
+    ?assertEqual(<<"Internal tool error">>, Text),
+    ?assertEqual(nomatch, binary:match(Text, <<"kaboom">>)).
+
+%% An unknown tool is the one failure that carries a name, in the exact
+%% text the reference implementation uses.
+drive_async_plan_unknown_tool_test() ->
+    Plan = #{
+        request_id => 10,
+        spawn => fun(Ctx) ->
+            ReplyTo = maps:get(reply_to, Ctx),
+            spawn(fun() ->
+                ReplyTo ! {tool_failed, 10, {error, {not_found, tool, <<"nope">>}}}
+            end)
+        end
+    },
+    #{<<"result">> := Result} = barrel_mcp_protocol:drive_async_plan(Plan, 1000),
+    ?assertEqual(true, maps:get(<<"isError">>, Result)),
+    ?assertMatch([#{<<"text">> := <<"Unknown tool: nope">>}], maps:get(<<"content">>, Result)).
 
 drive_async_plan_timeout_test() ->
     Plan = #{

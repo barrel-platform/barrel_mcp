@@ -1291,12 +1291,24 @@ tool_outcome_envelope(Reply, RequestId, {validation_failed, Errors}) ->
         },
         #{}
     );
-tool_outcome_envelope(Reply, RequestId, {failed, _Reason}) ->
-    barrel_mcp_protocol:error_response(
-        RequestId,
-        internal_error_code(Reply),
-        <<"Internal tool error">>
-    );
+%% Same envelope as the stdio and simple paths, so a tool that could not
+%% run reads identically on every transport: an error result, as the
+%% reference implementation answers, with the crash reason kept off
+%% the wire. The rule lives in barrel_mcp_protocol:tool_failure_result/1;
+%% it is repeated here rather than exported because the protocol module
+%% sits at the export limit the linter enforces.
+tool_outcome_envelope(_Reply, RequestId, {failed, Reason}) ->
+    Text =
+        case Reason of
+            {error, {not_found, tool, Name}} when is_binary(Name) ->
+                <<"Unknown tool: ", Name/binary>>;
+            _ ->
+                <<"Internal tool error">>
+        end,
+    barrel_mcp_protocol:success_response(RequestId, #{
+        <<"content">> => [#{<<"type">> => <<"text">>, <<"text">> => Text}],
+        <<"isError">> => true
+    });
 tool_outcome_envelope(Reply, RequestId, timeout) ->
     barrel_mcp_protocol:error_response(
         RequestId,

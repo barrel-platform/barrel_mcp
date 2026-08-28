@@ -717,6 +717,36 @@ tool_call_plan(Params, Id, Ctx, Mrtr) ->
     },
     {async, Plan}.
 
+%% @doc A tool that could not run, as the error result the reference
+%% implementation returns for it.
+%%
+%% Both Python SDK generations turn every exception in the tool-call
+%% handler into a CallToolResult with isError, never a protocol error
+%% (v2 mcp/server/mcpserver/server.py:424, v1 lowlevel/server.py:472),
+%% and an unknown tool raises ToolError("Unknown tool: <name>") into
+%% that same branch (tools/tool_manager.py:72). That is what clients on
+%% the wire expect and what the official conformance runner asserts.
+%%
+%% 2026-07-28/server/tools.mdx:742-745 lists an unknown tool under
+%% protocol errors instead. The reference implementation wins here;
+%% this comment is so the disagreement is not rediscovered.
+%%
+%% Crash details stay logged server-side by the registry. Only the
+%% unknown-tool case carries a name; everything else is a fixed text,
+%% since a reason can hold paths or secret-bearing exception terms.
+tool_failure_result(Reason) ->
+    Text =
+        case Reason of
+            {error, {not_found, tool, Name}} when is_binary(Name) ->
+                <<"Unknown tool: ", Name/binary>>;
+            _ ->
+                <<"Internal tool error">>
+        end,
+    #{
+        <<"content">> => [#{<<"type">> => <<"text">>, <<"text">> => Text}],
+        <<"isError">> => true
+    }.
+
 %% @doc Turn a handler's `{input_required, Requests, State}' into the
 %% JSON-RPC envelope for it, given the plan that produced the call.
 %%
@@ -1991,15 +2021,8 @@ run_async_plan(Plan, Timeout, AuthInfo, OnSpawn) ->
                     <<"isError">> => true
                 }
             );
-        {tool_failed, RequestId, _Reason} ->
-            %% Crash details are logged server-side by the registry; do
-            %% not echo `Reason' back to the wire (it can carry module
-            %% paths, file paths, or secret-bearing exception terms).
-            error_response(
-                RequestId,
-                internal_error_code(PlanCtx),
-                <<"Internal tool error">>
-            )
+        {tool_failed, RequestId, Reason} ->
+            success_response(RequestId, tool_failure_result(Reason))
     after Timeout ->
         error_response(RequestId, internal_error_code(PlanCtx), <<"Tool timed out">>)
     end.

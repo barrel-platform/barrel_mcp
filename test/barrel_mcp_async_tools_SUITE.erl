@@ -477,7 +477,10 @@ unknown_tool_leaves_the_session_usable(Config) ->
     {200, IH, _} = post_init(Port),
     SessionId = proplists:get_value(<<"mcp-session-id">>, IH),
     Missing = call(Port, SessionId, tool_call_body(<<"absent">>, 31)),
-    ?assertMatch(#{<<"error">> := _}, Missing),
+    %% An error result, as the reference implementation answers, not a
+    %% protocol error.
+    #{<<"result">> := #{<<"isError">> := true, <<"content">> := [Block]}} = Missing,
+    ?assertEqual(<<"Unknown tool: absent">>, maps:get(<<"text">>, Block)),
     Present = call(Port, SessionId, tool_call_body(<<"present">>, 32)),
     ?assertMatch(#{<<"result">> := _}, Present),
     ok = barrel_mcp_registry:unreg(tool, <<"present">>),
