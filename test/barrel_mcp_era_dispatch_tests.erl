@@ -94,6 +94,15 @@ modern(Method, Params) ->
 
 legacy(Method) -> legacy(Method, #{}).
 
+%% `initialize' publishes all three as required, so a request without
+%% them is invalid params rather than a handshake.
+init_params() ->
+    #{
+        <<"protocolVersion">> => ?MCP_LATEST_LEGACY_VERSION,
+        <<"capabilities">> => #{},
+        <<"clientInfo">> => #{<<"name">> => <<"tests">>, <<"version">> => <<"0">>}
+    }.
+
 legacy(Method, Params) ->
     #{
         <<"jsonrpc">> => <<"2.0">>,
@@ -198,7 +207,7 @@ legacy_only_still_served() ->
 initialize_stays_legacy() ->
     %% A confused client attaching modern metadata to `initialize' must
     %% not get a half-modern handshake.
-    Result = result_of(modern(<<"initialize">>)),
+    Result = result_of(modern(<<"initialize">>, init_params())),
     ?assertNot(maps:is_key(<<"resultType">>, Result)),
     ?assert(maps:is_key(<<"protocolVersion">>, Result)),
     %% And the negotiated version stays legacy.
@@ -385,7 +394,7 @@ discover_instructions() ->
 legacy_capabilities_intact_test() ->
     Result = maps:get(
         <<"result">>,
-        barrel_mcp_protocol:handle(legacy(<<"initialize">>))
+        barrel_mcp_protocol:handle(legacy(<<"initialize">>, init_params()))
     ),
     Caps = maps:get(<<"capabilities">>, Result),
     ?assert(maps:is_key(<<"logging">>, Caps)),
@@ -400,7 +409,9 @@ capabilities_follow_the_negotiated_revision_test() ->
         Result = maps:get(
             <<"result">>,
             barrel_mcp_protocol:handle(
-                legacy(<<"initialize">>, #{<<"protocolVersion">> => Requested})
+                legacy(<<"initialize">>, (init_params())#{
+                    <<"protocolVersion">> => Requested
+                })
             )
         ),
         Caps = maps:get(<<"capabilities">>, Result),
@@ -526,3 +537,37 @@ cache_hints_resource_override() ->
     Other = result_of(modern(<<"resources/read">>, #{<<"uri">> => <<"file:///present">>})),
     ?assertNotEqual(250, maps:get(<<"ttlMs">>, Other)),
     barrel_mcp_registry:unreg(resource, <<"volatile">>).
+
+%% Every legacy revision publishes protocolVersion, capabilities and
+%% clientInfo as required. Defaulting them accepted a request no schema
+%% allows.
+initialize_params_are_required_test() ->
+    ?assertEqual(?JSONRPC_INVALID_PARAMS, error_code_of(legacy(<<"initialize">>, #{}))),
+    lists:foreach(
+        fun(Key) ->
+            Params = maps:remove(Key, init_params()),
+            ?assertEqual(
+                ?JSONRPC_INVALID_PARAMS,
+                error_code_of(legacy(<<"initialize">>, Params))
+            )
+        end,
+        [<<"protocolVersion">>, <<"capabilities">>, <<"clientInfo">>]
+    ),
+    %% Present but the wrong type is no better than absent.
+    lists:foreach(
+        fun({Key, Bad}) ->
+            Params = (init_params())#{Key => Bad},
+            ?assertEqual(
+                ?JSONRPC_INVALID_PARAMS,
+                error_code_of(legacy(<<"initialize">>, Params))
+            )
+        end,
+        [
+            {<<"protocolVersion">>, #{}},
+            {<<"capabilities">>, 42},
+            {<<"clientInfo">>, <<"nope">>}
+        ]
+    ),
+    %% A complete one still negotiates.
+    Result = result_of(legacy(<<"initialize">>, init_params())),
+    ?assertEqual(?MCP_LATEST_LEGACY_VERSION, maps:get(<<"protocolVersion">>, Result)).

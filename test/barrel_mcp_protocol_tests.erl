@@ -75,7 +75,11 @@ test_handle_initialize() ->
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => 1,
         <<"method">> => <<"initialize">>,
-        <<"params">> => #{}
+        <<"params">> => #{
+            <<"protocolVersion">> => <<"2025-11-25">>,
+            <<"capabilities">> => #{},
+            <<"clientInfo">> => #{<<"name">> => <<"tests">>, <<"version">> => <<"0">>}
+        }
     },
     Response = barrel_mcp_protocol:handle(Request),
     ?assertEqual(<<"2.0">>, maps:get(<<"jsonrpc">>, Response)),

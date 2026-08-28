@@ -1171,6 +1171,50 @@ input_required_result(Requests, State, Method, Params, Ctx) ->
             {error, Missing}
     end.
 
+%% Every legacy revision publishes protocolVersion, capabilities and
+%% clientInfo as required; the reference SDK types them with no default.
+invalid_initialize_param(Params) when is_map(Params) ->
+    Required = [
+        {<<"protocolVersion">>, fun(V) -> is_binary(V) orelse is_integer(V) end},
+        {<<"capabilities">>, fun is_map/1},
+        {<<"clientInfo">>, fun is_map/1}
+    ],
+    Bad = [
+        K
+     || {K, Ok} <- Required,
+        not (maps:is_key(K, Params) andalso Ok(maps:get(K, Params)))
+    ],
+    case Bad of
+        [] -> ok;
+        [Key | _] -> {error, Key}
+    end;
+invalid_initialize_param(_Params) ->
+    {error, <<"params">>}.
+
+initialize(Params, Id, Ctx) ->
+    NegotiatedVersion = negotiate_protocol_version(
+        maps:get(<<"protocolVersion">>, Params, undefined)
+    ),
+    %% Persist client capabilities (notably `sampling') so the server can
+    %% later issue server-to-client requests via barrel_mcp_session.
+    %% Also persist the negotiated protocol_version on the session.
+    _ =
+        case barrel_mcp_ctx:session_id(Ctx) of
+            SessionId when is_binary(SessionId) ->
+                ClientCaps = maps:get(<<"capabilities">>, Params, #{}),
+                _ = barrel_mcp_session:set_client_capabilities(SessionId, ClientCaps),
+                _ = barrel_mcp_session:set_protocol_version(SessionId, NegotiatedVersion),
+                ok;
+            undefined ->
+                ok
+        end,
+    success_response(Id, #{
+        <<"protocolVersion">> => NegotiatedVersion,
+        <<"capabilities">> =>
+            maybe_advertise_completions(legacy_capabilities(NegotiatedVersion)),
+        <<"serverInfo">> => server_info()
+    }).
+
 %% `requiredCapabilities' is a ClientCapabilities object, not a list of
 %% names: the reference server builds one at
 %% `mcp/server/mcpserver/resolve.py:695'. The dotted names
@@ -1290,28 +1334,18 @@ log_bad_request_state(Id, Reason) ->
 %%====================================================================
 
 handle_request(<<"initialize">>, Params, Id, Ctx) ->
-    NegotiatedVersion = negotiate_protocol_version(
-        maps:get(<<"protocolVersion">>, Params, undefined)
-    ),
-    %% Persist client capabilities (notably `sampling') so the server can
-    %% later issue server-to-client requests via barrel_mcp_session.
-    %% Also persist the negotiated protocol_version on the session.
-    _ =
-        case barrel_mcp_ctx:session_id(Ctx) of
-            SessionId when is_binary(SessionId) ->
-                ClientCaps = maps:get(<<"capabilities">>, Params, #{}),
-                _ = barrel_mcp_session:set_client_capabilities(SessionId, ClientCaps),
-                _ = barrel_mcp_session:set_protocol_version(SessionId, NegotiatedVersion),
-                ok;
-            undefined ->
-                ok
-        end,
-    success_response(Id, #{
-        <<"protocolVersion">> => NegotiatedVersion,
-        <<"capabilities">> =>
-            maybe_advertise_completions(legacy_capabilities(NegotiatedVersion)),
-        <<"serverInfo">> => server_info()
-    });
+    case invalid_initialize_param(Params) of
+        {error, Key} ->
+            error_response(
+                Id,
+                ?JSONRPC_INVALID_PARAMS,
+                <<"Invalid initialize params: ", Key/binary>>
+            );
+        ok ->
+            initialize(Params, Id, Ctx)
+    end;
+%% Open a long-lived notification stream. The transport owns the
+
 %% Open a long-lived notification stream. The transport owns the
 %% stream, so this only settles what the client asked for; nothing is
 %% sent from here.
