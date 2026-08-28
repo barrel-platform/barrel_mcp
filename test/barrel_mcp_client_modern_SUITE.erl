@@ -60,13 +60,17 @@
     unusable_elicitation_url_never_reaches_the_handler/1,
     excludes_peer_tools_with_unusable_schemas/1,
     drops_a_bad_output_schema_but_keeps_the_tool/1,
-    legacy_peers_are_audited_too/1
+    legacy_peers_are_audited_too/1,
+    lists_resources_prompts_and_templates/1,
+    completion_round_trip/1,
+    refuses_subscribe_without_the_sub_capability/1
 ]).
 
 -export([echo_tool/1, a_resource/1, a_prompt/1, legacy_only_server/1]).
 -export([version_error_server/1, result_type_server/1, slow_server/1]).
 -export([confirm_tool/2, insatiable_tool/2, region_tool/1, connect_tool/2]).
 -export([bad_url_server/1, tool_catalogue_server/1]).
+-export([a_template/1, a_completion/2, no_subscribe_server/1]).
 
 -define(BASE_PORT, 22000).
 -define(MODERN, <<"2026-07-28">>).
@@ -112,7 +116,10 @@ all() ->
         unusable_elicitation_url_never_reaches_the_handler,
         excludes_peer_tools_with_unusable_schemas,
         drops_a_bad_output_schema_but_keeps_the_tool,
-        legacy_peers_are_audited_too
+        legacy_peers_are_audited_too,
+        lists_resources_prompts_and_templates,
+        completion_round_trip,
+        refuses_subscribe_without_the_sub_capability
     ].
 
 init_per_suite(Config) ->
@@ -1454,3 +1461,109 @@ mirrors_task_id_header(Config) ->
         barrel_mcp_client:tasks_get(Client, <<"no-such-task">>)
     ),
     close(Client).
+
+%%====================================================================
+%% Catalogue listings
+%%====================================================================
+
+a_template(_Args) -> <<"templated">>.
+
+a_completion(_Partial, _Ctx) -> {ok, [<<"alpha">>, <<"beta">>]}.
+
+%% The three listings beside tools/list, each in its single-page and
+%% walk-every-page form.
+lists_resources_prompts_and_templates(Config) ->
+    ok = barrel_mcp:reg_resource_template(<<"tpl">>, ?MODULE, a_template, #{
+        uri_template => <<"file:///{name}">>,
+        name => <<"Templated">>
+    }),
+    Client = connect(Config, ?MODERN),
+    try
+        {ok, Resources} = barrel_mcp_client:list_resources(Client),
+        ?assert(lists:member(<<"file:///present">>, [maps:get(<<"uri">>, R) || R <- Resources])),
+        {ok, AllResources} = barrel_mcp_client:list_resources_all(Client),
+        ?assertEqual(length(Resources), length(AllResources)),
+
+        {ok, Prompts} = barrel_mcp_client:list_prompts(Client),
+        ?assert(lists:member(<<"greet">>, [maps:get(<<"name">>, P) || P <- Prompts])),
+        {ok, AllPrompts} = barrel_mcp_client:list_prompts_all(Client),
+        ?assertEqual(length(Prompts), length(AllPrompts)),
+
+        {ok, Templates} = barrel_mcp_client:list_resource_templates(Client),
+        ?assert(
+            lists:member(
+                <<"file:///{name}">>,
+                [maps:get(<<"uriTemplate">>, T) || T <- Templates]
+            )
+        ),
+        {ok, AllTemplates} = barrel_mcp_client:list_resource_templates_all(Client),
+        ?assertEqual(length(Templates), length(AllTemplates))
+    after
+        close(Client),
+        barrel_mcp:unreg_resource_template(<<"tpl">>)
+    end.
+
+completion_round_trip(Config) ->
+    ok = barrel_mcp:reg_completion({prompt, <<"greet">>, <<"who">>}, ?MODULE, a_completion, #{}),
+    Client = connect(Config, ?MODERN),
+    try
+        {ok, Result} = barrel_mcp_client:complete(
+            Client,
+            #{<<"type">> => <<"ref/prompt">>, <<"name">> => <<"greet">>},
+            #{<<"name">> => <<"who">>, <<"value">> => <<"a">>}
+        ),
+        Completion = maps:get(<<"completion">>, Result),
+        ?assertEqual([<<"alpha">>, <<"beta">>], maps:get(<<"values">>, Completion))
+    after
+        close(Client),
+        barrel_mcp:unreg_completion({prompt, <<"greet">>, <<"who">>})
+    end.
+
+%%====================================================================
+%% Sub-capabilities
+%%====================================================================
+
+%% Advertises `resources' with no `subscribe', which is a server that
+%% has resources/read and no subscribe method at all.
+no_subscribe_server(#{body := Body}) ->
+    Request = json:decode(Body),
+    Id = maps:get(<<"id">>, Request, null),
+    Result =
+        case maps:get(<<"method">>, Request, undefined) of
+            <<"initialize">> ->
+                #{
+                    <<"protocolVersion">> => ?MCP_LATEST_LEGACY_VERSION,
+                    <<"capabilities">> => #{<<"resources">> => #{}},
+                    <<"serverInfo">> => #{
+                        <<"name">> => <<"nosub">>,
+                        <<"version">> => <<"0">>
+                    }
+                };
+            <<"resources/list">> ->
+                #{<<"resources">> => []};
+            _ ->
+                #{}
+        end,
+    Response = #{<<"jsonrpc">> => <<"2.0">>, <<"id">> => Id, <<"result">> => Result},
+    {200, #{<<"content-type">> => <<"application/json">>}, iolist_to_binary(json:encode(Response))}.
+
+%% A server that advertised the family but not the sub-capability has no
+%% subscribe method, so the client refuses rather than sending one.
+refuses_subscribe_without_the_sub_capability(Config) ->
+    Port = ?config(port, Config) + 500,
+    {ok, _} = barrel_mcp_test_http:start(nosub_mock, Port, fun ?MODULE:no_subscribe_server/1),
+    try
+        Client = connect_url(?MCP_LATEST_LEGACY_VERSION, url(Port)),
+        try
+            ?assertEqual(
+                {error, {unsupported, <<"resources/subscribe">>}},
+                barrel_mcp_client:subscribe(Client, <<"file:///x">>)
+            ),
+            %% The family is still usable.
+            ?assertMatch({ok, _}, barrel_mcp_client:list_resources(Client))
+        after
+            close(Client)
+        end
+    after
+        barrel_mcp_test_http:stop(nosub_mock)
+    end.
