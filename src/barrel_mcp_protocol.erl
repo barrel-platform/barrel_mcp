@@ -692,9 +692,7 @@ tool_call_plan(Params, Id, Ctx, Mrtr) ->
                     ReplyTo = maps:get(reply_to, ToolCtx),
                     RequestId = maps:get(request_id, ToolCtx),
                     ReplyTo ! {tool_failed, RequestId, Err},
-                    %% Return a transient pid so the in-flight
-                    %% record has something monitorable.
-                    spawn(fun() -> ok end)
+                    undefined
             end
         end
     },
@@ -815,8 +813,10 @@ long_running_tool(Name) ->
 %% cannot be started without the collector being told to watch it: that
 %% handoff is what keeps a worker that dies silently from stranding the
 %% task, and a second call site would otherwise be free to forget it.
--spec spawn_task_collector(term(), binary(), fun((pid()) -> pid())) ->
-    {pid(), pid()}.
+%% `undefined' when the tool could not be started at all, which the
+%% collector settles as `no_worker'.
+-spec spawn_task_collector(term(), binary(), fun((pid()) -> pid() | undefined)) ->
+    {pid(), pid() | undefined}.
 spawn_task_collector(Owner, TaskId, SpawnWorker) ->
     Collector = spawn(fun() -> task_collector_init(Owner, TaskId) end),
     Worker = SpawnWorker(Collector),
@@ -832,6 +832,8 @@ spawn_task_collector(Owner, TaskId, SpawnWorker) ->
 %% handoff is immediate when it happens.
 task_collector_init(Owner, TaskId) ->
     receive
+        {task_worker, undefined} ->
+            barrel_mcp_tasks:fail(Owner, TaskId, no_worker);
         {task_worker, Worker} ->
             _ = monitor(process, Worker),
             task_collector_loop(Owner, TaskId)
@@ -919,7 +921,7 @@ resume_task(Owner, TaskId, Info, Ctx) ->
                 Pid;
             {error, _} = Err ->
                 Collector ! {tool_failed, TaskId, Err},
-                spawn(fun() -> ok end)
+                undefined
         end
     end).
 
@@ -1803,11 +1805,17 @@ drive_as_task(Plan, _ToolName, Ctx, AuthInfo, TaskId) ->
             auth_info => AuthInfo
         })
     end),
-    _ = barrel_mcp_tasks:set_worker(
-        Owner,
-        TaskId,
-        #{worker => Worker, request_id => RequestId}
-    ),
+    _ =
+        case is_pid(Worker) of
+            true ->
+                barrel_mcp_tasks:set_worker(
+                    Owner,
+                    TaskId,
+                    #{worker => Worker, request_id => RequestId}
+                );
+            false ->
+                ok
+        end,
     Task = read_task_for(Owner, TaskId, Ctx),
     success_response(RequestId, create_task_result(TaskId, Task, Ctx)).
 

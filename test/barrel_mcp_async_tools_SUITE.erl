@@ -19,7 +19,8 @@
     cancel_returns_empty_body/1,
     progress_emits_events/1,
     tool_error_returns_isError/1,
-    auth_info_passed_to_tool/1
+    auth_info_passed_to_tool/1,
+    unknown_tool_leaves_the_session_usable/1
 ]).
 
 %% Tool handlers used by the suite.
@@ -32,7 +33,8 @@ all() ->
         cancel_returns_empty_body,
         progress_emits_events,
         tool_error_returns_isError,
-        auth_info_passed_to_tool
+        auth_info_passed_to_tool,
+        unknown_tool_leaves_the_session_usable
     ].
 
 init_per_suite(Config) ->
@@ -458,3 +460,40 @@ collect_progress(N, Acc) ->
     after 5000 ->
         lists:reverse(Acc)
     end.
+
+%%====================================================================
+%% No worker
+%%====================================================================
+
+%% A tool that cannot be started has no pid, so nothing is recorded as
+%% in flight. The error still reaches the caller and the session is
+%% still good for the next call.
+unknown_tool_leaves_the_session_usable(Config) ->
+    Port = ?config(port, Config),
+    {ok, _} = barrel_mcp:start_http_stream(#{
+        port => Port,
+        session_enabled => true
+    }),
+    ok = barrel_mcp_registry:reg(tool, <<"present">>, ?MODULE, error_tool, #{}),
+    {200, IH, _} = post_init(Port),
+    SessionId = proplists:get_value(<<"mcp-session-id">>, IH),
+    Missing = call(Port, SessionId, tool_call_body(<<"absent">>, 31)),
+    ?assertMatch(#{<<"error">> := _}, Missing),
+    Present = call(Port, SessionId, tool_call_body(<<"present">>, 32)),
+    ?assertMatch(#{<<"result">> := _}, Present),
+    ok = barrel_mcp_registry:unreg(tool, <<"present">>),
+    ok.
+
+call(Port, SessionId, Body) ->
+    {ok, 200, _, RB} = hackney:request(
+        post,
+        url(Port),
+        [
+            {<<"content-type">>, <<"application/json">>},
+            {<<"accept">>, <<"application/json, text/event-stream">>},
+            {<<"mcp-session-id">>, SessionId}
+        ],
+        Body,
+        [with_body]
+    ),
+    json:decode(RB).

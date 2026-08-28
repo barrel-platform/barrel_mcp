@@ -163,7 +163,9 @@ test_handle_tools_call_not_found() ->
         progress_token => undefined,
         emit_progress => fun(_, _, _) -> ok end
     },
-    _Pid = (maps:get(spawn, Plan))(Ctx),
+    %% No worker to hand back, and nothing invented so a monitor has
+    %% something to fire on.
+    ?assertEqual(undefined, (maps:get(spawn, Plan))(Ctx)),
     receive
         {tool_failed, 1, {error, {not_found, tool, <<"nonexistent">>}}} -> ok
     after 2000 ->

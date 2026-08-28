@@ -147,19 +147,7 @@ dispatch(simple, <<"POST">>, Headers, Body, Responder, Config) ->
 dispatch(simple, <<"OPTIONS">>, Headers, _Body, Responder, Config) ->
     reply(Responder, 204, cors_headers(Headers, Config, #{}), <<>>);
 dispatch(simple, _Method, Headers, _Body, Responder, Config) ->
-    reply(
-        Responder,
-        405,
-        cors_headers(
-            Headers,
-            Config,
-            #{
-                <<"content-type">> => <<"application/json">>,
-                <<"allow">> => <<"POST, OPTIONS">>
-            }
-        ),
-        <<"{\"error\":\"Method not allowed\"}">>
-    );
+    method_not_allowed(Headers, Responder, Config, <<"POST, OPTIONS">>);
 %% --- Streamable transport ---
 dispatch(stream, <<"POST">>, Headers, Body, Responder, Config) ->
     stream_post(Headers, Body, Responder, Config);
@@ -176,24 +164,15 @@ dispatch(stream, <<"DELETE">>, Headers, _Body, Responder, Config) ->
 dispatch(stream, <<"OPTIONS">>, Headers, _Body, Responder, Config) ->
     reply(Responder, 204, cors_headers(Headers, Config, #{}), <<>>);
 dispatch(stream, _Method, Headers, _Body, Responder, Config) ->
-    reply(
-        Responder,
-        405,
-        cors_headers(
-            Headers,
-            Config,
-            #{
-                <<"content-type">> => <<"application/json">>,
-                <<"allow">> => <<"POST, GET, DELETE, OPTIONS">>
-            }
-        ),
-        <<"{\"error\":\"Method not allowed\"}">>
-    ).
+    method_not_allowed(Headers, Responder, Config, <<"POST, GET, DELETE, OPTIONS">>).
 
 %% Sessions off means only 2026-07-28 is served, which has neither a
 %% standalone GET stream nor a DELETE. An older client that tries either
 %% "SHOULD" get 405 (2026-07-28/.../streamable-http.mdx:683).
 modern_only_method(Headers, Responder, Config) ->
+    method_not_allowed(Headers, Responder, Config, <<"POST, OPTIONS">>).
+
+method_not_allowed(Headers, Responder, Config, Allow) ->
     reply(
         Responder,
         405,
@@ -202,7 +181,7 @@ modern_only_method(Headers, Responder, Config) ->
             Config,
             #{
                 <<"content-type">> => <<"application/json">>,
-                <<"allow">> => <<"POST, OPTIONS">>
+                <<"allow">> => Allow
             }
         ),
         <<"{\"error\":\"Method not allowed\"}">>
@@ -878,10 +857,14 @@ handle_async_tool_call(
                 Streaming, Headers, Responder, Config, Reply
             ),
             WorkerPid = Spawn(Ctx),
-            case SessionId of
-                undefined ->
+            %% No worker means nothing to cancel, and its `tool_failed'
+            %% is already on its way.
+            case {SessionId, is_pid(WorkerPid)} of
+                {undefined, _} ->
                     ok;
-                _ ->
+                {_, false} ->
+                    ok;
+                {_, true} ->
                     ok = barrel_mcp_session:record_in_flight(
                         SessionId, RequestId, WorkerPid, Self
                     )
