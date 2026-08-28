@@ -63,7 +63,8 @@
     legacy_peers_are_audited_too/1,
     lists_resources_prompts_and_templates/1,
     completion_round_trip/1,
-    refuses_subscribe_without_the_sub_capability/1
+    refuses_subscribe_without_the_sub_capability/1,
+    legacy_client_answers_a_server_request/1
 ]).
 
 -export([echo_tool/1, a_resource/1, a_prompt/1, legacy_only_server/1]).
@@ -71,6 +72,7 @@
 -export([confirm_tool/2, insatiable_tool/2, region_tool/1, connect_tool/2]).
 -export([bad_url_server/1, tool_catalogue_server/1]).
 -export([a_template/1, a_completion/2, no_subscribe_server/1]).
+-export([eliciting_tool/2]).
 
 -define(BASE_PORT, 22000).
 -define(MODERN, <<"2026-07-28">>).
@@ -119,7 +121,8 @@ all() ->
         legacy_peers_are_audited_too,
         lists_resources_prompts_and_templates,
         completion_round_trip,
-        refuses_subscribe_without_the_sub_capability
+        refuses_subscribe_without_the_sub_capability,
+        legacy_client_answers_a_server_request
     ].
 
 init_per_suite(Config) ->
@@ -1566,4 +1569,45 @@ refuses_subscribe_without_the_sub_capability(Config) ->
         end
     after
         barrel_mcp_test_http:stop(nosub_mock)
+    end.
+
+%%====================================================================
+%% Server-initiated requests, from the client's side
+%%====================================================================
+
+eliciting_tool(_Args, Ctx) ->
+    SessionId = maps:get(session_id, Ctx),
+    Params = barrel_mcp:elicit_form(<<"Your name?">>, #{
+        <<"type">> => <<"object">>,
+        <<"properties">> => #{<<"name">> => #{<<"type">> => <<"string">>}}
+    }),
+    case barrel_mcp:elicit_create(SessionId, Params, #{timeout_ms => 5000}) of
+        {ok, #{<<"content">> := #{<<"name">> := Name}}} ->
+            <<"hello ", Name/binary>>;
+        Other ->
+            {tool_error, [
+                #{
+                    <<"type">> => <<"text">>,
+                    <<"text">> => iolist_to_binary(io_lib:format("~p", [Other]))
+                }
+            ]}
+    end.
+
+%% The legacy era's server-to-client direction, driven from the end that
+%% receives it. Everything else here tests our server asking; this tests
+%% our client answering.
+legacy_client_answers_a_server_request(Config) ->
+    ok = barrel_mcp:reg_tool(<<"eliciting">>, ?MODULE, eliciting_tool, #{}),
+    Client = connect_with(
+        Config,
+        #{mode => sync, owner => self()},
+        #{protocol_version => ?MCP_LATEST_LEGACY_VERSION}
+    ),
+    try
+        {ok, Result} = barrel_mcp_client:call_tool(Client, <<"eliciting">>, #{}),
+        [Block] = maps:get(<<"content">>, Result),
+        ?assertEqual(<<"hello ada">>, maps:get(<<"text">>, Block))
+    after
+        close(Client),
+        barrel_mcp_registry:unreg(tool, <<"eliciting">>)
     end.
