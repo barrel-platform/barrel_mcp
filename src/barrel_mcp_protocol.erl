@@ -1340,29 +1340,19 @@ handle_request(<<"ping">>, _Params, Id, _State) ->
     success_response(Id, #{});
 %% Tools
 handle_request(<<"tools/list">>, Params, Id, Ctx) ->
-    Cursor = maps:get(<<"cursor">>, Params, undefined),
-    {Page, Next} = paginate(
-        barrel_mcp_registry:all(tool),
-        Cursor,
-        fun({N, _}) -> N end
-    ),
-    Tools = lists:map(
-        fun({Name, Handler}) ->
-            Base = #{
-                <<"name">> => Name,
-                <<"description">> => maps:get(description, Handler, <<>>),
-                <<"inputSchema">> => maps:get(input_schema, Handler, #{<<"type">> => <<"object">>})
-            },
-            with_optional_fields(Base, Handler, Ctx, [
-                {<<"outputSchema">>, output_schema, output_schema},
-                {<<"title">>, title, title},
-                {<<"icons">>, icons, icons},
-                {<<"annotations">>, annotations, always}
-            ])
-        end,
-        Page
-    ),
-    success_response(Id, with_next_cursor(#{<<"tools">> => Tools}, Next));
+    registry_page(tool, <<"tools">>, Params, Id, fun({Name, Handler}) ->
+        Base = #{
+            <<"name">> => Name,
+            <<"description">> => maps:get(description, Handler, <<>>),
+            <<"inputSchema">> => maps:get(input_schema, Handler, #{<<"type">> => <<"object">>})
+        },
+        with_optional_fields(Base, Handler, Ctx, [
+            {<<"outputSchema">>, output_schema, output_schema},
+            {<<"title">>, title, title},
+            {<<"icons">>, icons, icons},
+            {<<"annotations">>, annotations, always}
+        ])
+    end);
 handle_request(<<"tools/call">>, Params, Id, Ctx) ->
     case mrtr_context(<<"tools/call">>, Params, Ctx) of
         {error, Reason} ->
@@ -1377,35 +1367,19 @@ handle_request(<<"tools/call">>, Params, Id, Ctx) ->
     end;
 %% Resources
 handle_request(<<"resources/list">>, Params, Id, _State) ->
-    Cursor = maps:get(<<"cursor">>, Params, undefined),
-    {Page, Next} = paginate(
-        barrel_mcp_registry:all(resource),
-        Cursor,
-        fun({N, _}) -> N end
-    ),
-    Resources = lists:map(
-        fun({_Name, Handler}) ->
-            Base = #{
-                <<"uri">> => maps:get(uri, Handler, <<>>),
-                <<"name">> => maps:get(name, Handler, <<>>),
-                <<"description">> => maps:get(description, Handler, <<>>),
-                <<"mimeType">> => maps:get(mime_type, Handler, <<"text/plain">>)
-            },
-            with_optional_fields(Base, Handler, [
-                {<<"title">>, title},
-                {<<"icons">>, icons},
-                {<<"annotations">>, annotations}
-            ])
-        end,
-        Page
-    ),
-    success_response(
-        Id,
-        with_next_cursor(
-            #{<<"resources">> => Resources},
-            Next
-        )
-    );
+    registry_page(resource, <<"resources">>, Params, Id, fun({_Name, Handler}) ->
+        Base = #{
+            <<"uri">> => maps:get(uri, Handler, <<>>),
+            <<"name">> => maps:get(name, Handler, <<>>),
+            <<"description">> => maps:get(description, Handler, <<>>),
+            <<"mimeType">> => maps:get(mime_type, Handler, <<"text/plain">>)
+        },
+        with_optional_fields(Base, Handler, [
+            {<<"title">>, title},
+            {<<"icons">>, icons},
+            {<<"annotations">>, annotations}
+        ])
+    end);
 handle_request(<<"resources/read">>, Params, Id, Ctx) ->
     Uri = maps:get(<<"uri">>, Params, <<>>),
     %% Exact-URI lookup first.
@@ -1437,36 +1411,20 @@ handle_request(<<"resources/read">>, Params, Id, Ctx) ->
         end
     end);
 handle_request(<<"resources/templates/list">>, Params, Id, _State) ->
-    Cursor = maps:get(<<"cursor">>, Params, undefined),
-    {Page, Next} = paginate(
-        barrel_mcp_registry:all(resource_template),
-        Cursor,
-        fun({N, _}) -> N end
-    ),
-    Templates = lists:map(
-        fun({_Name, Handler}) ->
-            Base = #{
-                <<"uriTemplate">> => maps:get(uri_template, Handler, <<>>),
-                <<"name">> => maps:get(name, Handler, <<>>),
-                <<"description">> => maps:get(description, Handler, <<>>),
-                <<"mimeType">> => maps:get(mime_type, Handler, <<"text/plain">>)
-            },
-            Compact = maps:filter(fun(_K, V) -> V =/= <<>> end, Base),
-            with_optional_fields(Compact, Handler, [
-                {<<"title">>, title},
-                {<<"icons">>, icons},
-                {<<"annotations">>, annotations}
-            ])
-        end,
-        Page
-    ),
-    success_response(
-        Id,
-        with_next_cursor(
-            #{<<"resourceTemplates">> => Templates},
-            Next
-        )
-    );
+    registry_page(resource_template, <<"resourceTemplates">>, Params, Id, fun({_Name, Handler}) ->
+        Base = #{
+            <<"uriTemplate">> => maps:get(uri_template, Handler, <<>>),
+            <<"name">> => maps:get(name, Handler, <<>>),
+            <<"description">> => maps:get(description, Handler, <<>>),
+            <<"mimeType">> => maps:get(mime_type, Handler, <<"text/plain">>)
+        },
+        Compact = maps:filter(fun(_K, V) -> V =/= <<>> end, Base),
+        with_optional_fields(Compact, Handler, [
+            {<<"title">>, title},
+            {<<"icons">>, icons},
+            {<<"annotations">>, annotations}
+        ])
+    end);
 handle_request(<<"resources/subscribe">>, Params, Id, Ctx) ->
     Uri = maps:get(<<"uri">>, Params, <<>>),
     case barrel_mcp_ctx:session_id(Ctx) of
@@ -1495,43 +1453,27 @@ handle_request(<<"resources/unsubscribe">>, Params, Id, Ctx) ->
     end;
 %% Prompts
 handle_request(<<"prompts/list">>, Params, Id, _State) ->
-    Cursor = maps:get(<<"cursor">>, Params, undefined),
-    {Page, Next} = paginate(
-        barrel_mcp_registry:all(prompt),
-        Cursor,
-        fun({N, _}) -> N end
-    ),
-    Prompts = lists:map(
-        fun({Name, Handler}) ->
-            Base = #{
-                <<"name">> => Name,
-                <<"description">> => maps:get(description, Handler, <<>>),
-                <<"arguments">> => lists:map(
-                    fun(Arg) ->
-                        #{
-                            <<"name">> => maps:get(name, Arg, <<>>),
-                            <<"description">> => maps:get(description, Arg, <<>>),
-                            <<"required">> => maps:get(required, Arg, false)
-                        }
-                    end,
-                    maps:get(arguments, Handler, [])
-                )
-            },
-            with_optional_fields(Base, Handler, [
-                {<<"title">>, title},
-                {<<"icons">>, icons},
-                {<<"annotations">>, annotations}
-            ])
-        end,
-        Page
-    ),
-    success_response(
-        Id,
-        with_next_cursor(
-            #{<<"prompts">> => Prompts},
-            Next
-        )
-    );
+    registry_page(prompt, <<"prompts">>, Params, Id, fun({Name, Handler}) ->
+        Base = #{
+            <<"name">> => Name,
+            <<"description">> => maps:get(description, Handler, <<>>),
+            <<"arguments">> => lists:map(
+                fun(Arg) ->
+                    #{
+                        <<"name">> => maps:get(name, Arg, <<>>),
+                        <<"description">> => maps:get(description, Arg, <<>>),
+                        <<"required">> => maps:get(required, Arg, false)
+                    }
+                end,
+                maps:get(arguments, Handler, [])
+            )
+        },
+        with_optional_fields(Base, Handler, [
+            {<<"title">>, title},
+            {<<"icons">>, icons},
+            {<<"annotations">>, annotations}
+        ])
+    end);
 handle_request(<<"prompts/get">>, Params, Id, Ctx) ->
     Name = maps:get(<<"name">>, Params, <<>>),
     Args = maps:get(<<"arguments">>, Params, #{}),
@@ -2160,6 +2102,18 @@ renderable(Feature, Revision) ->
 %% `{Page, NextCursor}' where `NextCursor' is the last key of the
 %% page when more items remain, or `undefined' otherwise.
 %% `Cursor' is the opaque last-seen key from a prior response.
+%% The four catalogue listings differ only in what they list and how one
+%% entry is rendered. `tasks/list' is not one of them: it lists from
+%% barrel_mcp_tasks and keys on `taskId', not the registry.
+registry_page(Kind, WireKey, Params, Id, Render) ->
+    Cursor = maps:get(<<"cursor">>, Params, undefined),
+    {Page, Next} = paginate(
+        barrel_mcp_registry:all(Kind),
+        Cursor,
+        fun({N, _}) -> N end
+    ),
+    success_response(Id, with_next_cursor(#{WireKey => lists:map(Render, Page)}, Next)).
+
 paginate(Items, Cursor, KeyFn) ->
     Sorted = lists:sort(fun(A, B) -> KeyFn(A) =< KeyFn(B) end, Items),
     AfterCursor = drop_until_after(Sorted, Cursor, KeyFn),
