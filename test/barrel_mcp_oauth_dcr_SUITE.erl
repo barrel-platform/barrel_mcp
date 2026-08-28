@@ -26,6 +26,8 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
+-import(barrel_mcp_test_helpers, [wait_ready/2]).
+
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([
     dcr_then_client_credentials_unlocks_server/1,
@@ -276,20 +278,3 @@ json_encode(M) -> iolist_to_binary(json:encode(M)).
 %%====================================================================
 %% Helpers
 %%====================================================================
-
-wait_ready(_Pid, 0) ->
-    {error, not_ready};
-wait_ready(Pid, N) ->
-    case
-        (try
-            barrel_mcp_client:server_capabilities(Pid)
-        catch
-            _:_ -> error
-        end)
-    of
-        {ok, _} ->
-            ok;
-        _ ->
-            timer:sleep(100),
-            wait_ready(Pid, N - 1)
-    end.

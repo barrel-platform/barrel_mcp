@@ -13,6 +13,8 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("barrel_mcp.hrl").
 
+-import(barrel_mcp_test_helpers, [wait_until/2, url/1]).
+
 -export([
     all/0,
     init_per_suite/1,
@@ -1360,9 +1362,6 @@ with_catalogue(Config, Fun) ->
 %% Helpers
 %%====================================================================
 
-url(Port) ->
-    iolist_to_binary(io_lib:format("http://127.0.0.1:~B/mcp", [Port])).
-
 connect(Config, Version) ->
     connect_url(Version, url(?config(port, Config))).
 
@@ -1425,17 +1424,6 @@ catch_close(Pid) ->
         _:_ -> ok
     end,
     ok.
-
-wait_until(_Fun, Remaining) when Remaining =< 0 ->
-    ok;
-wait_until(Fun, Remaining) ->
-    case Fun() of
-        true ->
-            ok;
-        false ->
-            timer:sleep(50),
-            wait_until(Fun, Remaining - 50)
-    end.
 
 %% A port per case, by position rather than by hash: two case names
 %% hashing to the same slot means the second one gets eaddrinuse while

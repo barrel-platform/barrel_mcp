@@ -12,6 +12,8 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("barrel_mcp.hrl").
 
+-import(barrel_mcp_test_helpers, [wait_until/2]).
+
 -export([
     all/0,
     init_per_suite/1,
@@ -340,14 +342,3 @@ case_index(TC) ->
 case_index(TC, [TC | _], N) -> N;
 case_index(TC, [_ | Rest], N) -> case_index(TC, Rest, N + 1);
 case_index(_TC, [], N) -> N.
-
-wait_until(_Fun, Remaining) when Remaining =< 0 ->
-    ok;
-wait_until(Fun, Remaining) ->
-    case Fun() of
-        true ->
-            ok;
-        false ->
-            timer:sleep(100),
-            wait_until(Fun, Remaining - 100)
-    end.

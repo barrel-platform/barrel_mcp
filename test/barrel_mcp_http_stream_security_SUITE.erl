@@ -12,6 +12,8 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
+-import(barrel_mcp_test_helpers, [url/1]).
+
 -export([
     all/0,
     init_per_suite/1,
@@ -514,9 +516,6 @@ ets_session_table_protected(_Config) ->
 %%====================================================================
 %% Helpers (no -include_lib for eunit here; it's at the top)
 %%====================================================================
-
-url(Port) ->
-    iolist_to_binary(io_lib:format("http://127.0.0.1:~B/mcp", [Port])).
 
 init_body() ->
     json:encode(#{

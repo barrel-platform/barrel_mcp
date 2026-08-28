@@ -16,6 +16,8 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("barrel_mcp.hrl").
 
+-import(barrel_mcp_test_helpers, [header/2, url/1]).
+
 -export([
     all/0,
     init_per_suite/1,
@@ -855,9 +857,6 @@ metadata_headers(_Meta, Method, Params) ->
 %% Helpers
 %%====================================================================
 
-url(Port) ->
-    iolist_to_binary(io_lib:format("http://127.0.0.1:~B/mcp", [Port])).
-
 %% Derive the mirrored metadata headers from the body itself, exactly
 %% as a conforming client does. Using the same module the server
 %% validates with is deliberate: if the two ever disagree, these tests
@@ -929,13 +928,6 @@ post(Port, Body, ExtraHeaders) ->
         post, url(Port), Headers, Body, [with_body]
     ),
     {Status, RespHeaders, RespBody}.
-
-header(Name, Headers) ->
-    Lower = string:lowercase(Name),
-    case lists:search(fun({K, _}) -> string:lowercase(K) =:= Lower end, Headers) of
-        {value, {_, V}} -> V;
-        false -> undefined
-    end.
 
 modern_meta() ->
     #{

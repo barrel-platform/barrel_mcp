@@ -11,6 +11,8 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
+-import(barrel_mcp_test_helpers, [wait_ready/2]).
+
 -export([test_handler/1]).
 
 -define(PORT, 19191).
@@ -143,23 +145,6 @@ start_client() ->
     {ok, Pid} = barrel_mcp_client:start(Spec),
     wait_ready(Pid, 30),
     {ok, Pid}.
-
-wait_ready(_Pid, 0) ->
-    error(client_not_ready);
-wait_ready(Pid, N) ->
-    case
-        (try
-            barrel_mcp_client:server_capabilities(Pid)
-        catch
-            _:_ -> error
-        end)
-    of
-        {ok, _} ->
-            ok;
-        _ ->
-            timer:sleep(100),
-            wait_ready(Pid, N - 1)
-    end.
 
 wait_dead(Pid) ->
     Mon = erlang:monitor(process, Pid),

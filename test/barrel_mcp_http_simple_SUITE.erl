@@ -14,6 +14,8 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("barrel_mcp.hrl").
 
+-import(barrel_mcp_test_helpers, [header/2]).
+
 -export([all/0, init_per_suite/1, end_per_suite/1, init_per_testcase/2, end_per_testcase/2]).
 -export([
     answers_a_tool_call/1,
@@ -188,13 +190,6 @@ raw_post(Body, ExtraHeaders) ->
         post, url(), Headers, Body, [with_body]
     ),
     {Status, RespHeaders, Raw}.
-
-header(Name, Headers) ->
-    Lower = string:lowercase(Name),
-    case lists:search(fun({K, _}) -> string:lowercase(K) =:= Lower end, Headers) of
-        {value, {_, V}} -> V;
-        false -> undefined
-    end.
 
 request(Id, Method, Params) ->
     json:encode(#{

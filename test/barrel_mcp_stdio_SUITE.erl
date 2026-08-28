@@ -12,6 +12,8 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("barrel_mcp.hrl").
 
+-import(barrel_mcp_test_helpers, [wait_until/2]).
+
 -export([
     all/0,
     init_per_suite/1,
@@ -679,15 +681,4 @@ collect_ids(Dev, N, Acc) ->
     case barrel_mcp_stdio_io:next_line(Dev) of
         timeout -> error({missing_responses, N, Acc});
         Response -> collect_ids(Dev, N - 1, [maps:get(<<"id">>, Response) | Acc])
-    end.
-
-wait_until(_Fun, Remaining) when Remaining =< 0 ->
-    ok;
-wait_until(Fun, Remaining) ->
-    case Fun() of
-        true ->
-            ok;
-        false ->
-            timer:sleep(50),
-            wait_until(Fun, Remaining - 50)
     end.

@@ -14,6 +14,8 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("barrel_mcp.hrl").
 
+-import(barrel_mcp_test_helpers, [header/2, url/1]).
+
 -export([
     all/0,
     init_per_suite/1,
@@ -640,9 +642,6 @@ flip_last(Blob) ->
         end,
     <<Head/binary, New>>.
 
-url(Port) ->
-    iolist_to_binary(io_lib:format("http://127.0.0.1:~B/mcp", [Port])).
-
 call(Port, Id, Params, Capabilities) ->
     Meta = #{
         ?MCP_META_PROTOCOL_VERSION => ?MODERN,
@@ -725,13 +724,6 @@ init_body() ->
             <<"clientInfo">> => #{<<"name">> => <<"mrtr">>, <<"version">> => <<"1.0">>}
         }
     }).
-
-header(Name, Headers) ->
-    Lower = string:lowercase(Name),
-    case lists:search(fun({K, _}) -> string:lowercase(K) =:= Lower end, Headers) of
-        {value, {_, V}} -> V;
-        false -> undefined
-    end.
 
 result_of(Body) -> maps:get(<<"result">>, json:decode(Body)).
 

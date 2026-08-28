@@ -8,6 +8,10 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("barrel_mcp.hrl").
 
+-import(barrel_mcp_test_helpers, [wait_until/2]).
+
+wait_until(Fun) -> wait_until(Fun, 2000).
+
 -define(HTTPS, <<"https://mcp.example.com/ui/set_api_key">>).
 
 setup() ->
@@ -214,17 +218,3 @@ modern_ctx_with(Caps) ->
         },
         #{}
     ).
-
-wait_until(Fun) ->
-    wait_until(Fun, 2000).
-
-wait_until(_Fun, Remaining) when Remaining =< 0 ->
-    ok;
-wait_until(Fun, Remaining) ->
-    case Fun() of
-        true ->
-            ok;
-        false ->
-            timer:sleep(25),
-            wait_until(Fun, Remaining - 25)
-    end.

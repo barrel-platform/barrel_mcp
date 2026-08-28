@@ -13,6 +13,8 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("barrel_mcp.hrl").
 
+-import(barrel_mcp_test_helpers, [wait_until/2, header/2, url/1]).
+
 -export([
     all/0,
     init_per_suite/1,
@@ -275,9 +277,6 @@ legacy_cannot_listen(Config) ->
 %% Helpers
 %%====================================================================
 
-url(Port) ->
-    iolist_to_binary(io_lib:format("http://127.0.0.1:~B/mcp", [Port])).
-
 json_headers() ->
     [
         {<<"content-type">>, <<"application/json">>},
@@ -392,24 +391,6 @@ take(Buf, data) ->
 subscription_id(Envelope) ->
     Params = maps:get(<<"params">>, Envelope),
     maps:get(?MCP_META_SUBSCRIPTION_ID, maps:get(<<"_meta">>, Params)).
-
-header(Name, Headers) ->
-    Lower = string:lowercase(Name),
-    case lists:search(fun({K, _}) -> string:lowercase(K) =:= Lower end, Headers) of
-        {value, {_, V}} -> V;
-        false -> undefined
-    end.
-
-wait_until(_Fun, Remaining) when Remaining =< 0 ->
-    ok;
-wait_until(Fun, Remaining) ->
-    case Fun() of
-        true ->
-            ok;
-        false ->
-            timer:sleep(50),
-            wait_until(Fun, Remaining - 50)
-    end.
 
 %% A port per case, by position rather than by hash: two case names
 %% hashing to the same slot means the second one gets eaddrinuse while

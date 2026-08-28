@@ -6,6 +6,8 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
+-import(barrel_mcp_test_helpers, [wait_ready/2]).
+
 -export([slow_handler/1]).
 
 -define(PORT, 19393).
@@ -94,23 +96,6 @@ start_client(Extras) ->
     {ok, Pid} = barrel_mcp_client:start(Spec),
     wait_ready(Pid, 30),
     {ok, Pid}.
-
-wait_ready(_Pid, 0) ->
-    error(client_not_ready);
-wait_ready(Pid, N) ->
-    case
-        (try
-            barrel_mcp_client:server_capabilities(Pid)
-        catch
-            _:_ -> error
-        end)
-    of
-        {ok, _} ->
-            ok;
-        _ ->
-            timer:sleep(100),
-            wait_ready(Pid, N - 1)
-    end.
 
 %% slow tool handler — gives the test time to inspect the progress
 %% map before the response settles.
