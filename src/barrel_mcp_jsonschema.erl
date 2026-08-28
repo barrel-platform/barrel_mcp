@@ -1236,11 +1236,35 @@ resolve_uri(Base, Reference) ->
             end
     end.
 
+%% RFC 3986: scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ).
+%% Scanned rather than matched because `resolve_uri/2' is on the eval
+%% path, once per `$ref' application, and a binary pattern is compiled
+%% on every `re:run/3'.
 has_scheme(Uri) ->
-    case re:run(Uri, <<"^[A-Za-z][A-Za-z0-9+.-]*:">>, [{capture, none}]) of
-        match -> true;
-        nomatch -> false
+    case scheme_end(Uri) of
+        error -> false;
+        {ok, _} -> true
     end.
+
+%% The offset of the `:' ending the scheme, or `error'.
+scheme_end(<<C, Rest/binary>>) when
+    (C >= $a andalso C =< $z) orelse (C >= $A andalso C =< $Z)
+->
+    scheme_rest(Rest, 1);
+scheme_end(_Uri) ->
+    error.
+
+scheme_rest(<<$:, _/binary>>, N) ->
+    {ok, N};
+scheme_rest(<<C, Rest/binary>>, N) when
+    (C >= $a andalso C =< $z) orelse
+        (C >= $A andalso C =< $Z) orelse
+        (C >= $0 andalso C =< $9) orelse
+        C =:= $+ orelse C =:= $- orelse C =:= $.
+->
+    scheme_rest(Rest, N + 1);
+scheme_rest(_Rest, _N) ->
+    error.
 
 with_scheme_of(Base, Reference) ->
     case binary:split(Base, <<":">>) of
@@ -1251,13 +1275,25 @@ with_scheme_of(Base, Reference) ->
 replace_path(Base, Reference) ->
     <<(authority_of(Base))/binary, Reference/binary>>.
 
-%% Scheme and authority, without the path.
+%% Scheme and authority, without the path. `<<>>' for anything with no
+%% `://', a `urn:' among them.
 authority_of(Base) ->
-    case
-        re:run(Base, <<"^([A-Za-z][A-Za-z0-9+.-]*://[^/]*)">>, [{capture, all_but_first, binary}])
-    of
-        {match, [Prefix]} -> Prefix;
-        nomatch -> <<>>
+    case scheme_end(Base) of
+        error ->
+            <<>>;
+        {ok, N} ->
+            case Base of
+                <<Scheme:N/binary, "://", Rest/binary>> ->
+                    <<Scheme/binary, "://", (up_to_slash(Rest))/binary>>;
+                _ ->
+                    <<>>
+            end
+    end.
+
+up_to_slash(Bin) ->
+    case binary:match(Bin, <<"/">>) of
+        nomatch -> Bin;
+        {Pos, _} -> binary:part(Bin, 0, Pos)
     end.
 
 merge_relative(Base, Reference) ->

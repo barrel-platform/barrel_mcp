@@ -19,6 +19,7 @@
 -export([official_suite/1, no_network_dereference/1, bounds_are_enforced/1]).
 -export([invalid_schemas_are_refused_at_registration/1, output_schema_by_revision/1]).
 -export([vendored_metaschema_is_unchanged/1, dialects_other_than_2020_12_are_refused/1]).
+-export([every_reference_form_resolves/1]).
 -export([a_tool/1]).
 
 all() ->
@@ -29,7 +30,8 @@ all() ->
         invalid_schemas_are_refused_at_registration,
         output_schema_by_revision,
         vendored_metaschema_is_unchanged,
-        dialects_other_than_2020_12_are_refused
+        dialects_other_than_2020_12_are_refused,
+        every_reference_form_resolves
     ].
 
 a_tool(_Args) -> <<"ok">>.
@@ -93,6 +95,46 @@ no_network_dereference(_Config) ->
     {ok, Compiled} = barrel_mcp_jsonschema:compile(Schema, Registry),
     ?assertEqual(ok, barrel_mcp_jsonschema:validate(<<"x">>, Compiled, #{})),
     ?assertMatch({error, _}, barrel_mcp_jsonschema:validate(1, Compiled, #{})).
+
+%% `resolve_uri/2' runs once per `$ref' application, so it is scanned
+%% rather than matched. Each branch of it gets a reference form here:
+%% absolute, scheme with no authority, network-path, absolute-path,
+%% relative, and one with dot segments.
+every_reference_form_resolves(_Config) ->
+    Base = <<"https://example.com/schemas/parent.json">>,
+    Registry = #{
+        <<"https://other.example/abs.json">> => #{<<"type">> => <<"string">>},
+        <<"urn:example:thing">> => #{<<"type">> => <<"string">>},
+        <<"https://elsewhere.example/net.json">> => #{<<"type">> => <<"string">>},
+        <<"https://example.com/root.json">> => #{<<"type">> => <<"string">>},
+        <<"https://example.com/schemas/sibling.json">> => #{<<"type">> => <<"string">>},
+        <<"https://example.com/other.json">> => #{<<"type">> => <<"string">>}
+    },
+    Refs = [
+        <<"https://other.example/abs.json">>,
+        <<"urn:example:thing">>,
+        <<"//elsewhere.example/net.json">>,
+        <<"/root.json">>,
+        <<"sibling.json">>,
+        <<"../other.json">>
+    ],
+    lists:foreach(
+        fun(Ref) ->
+            Schema = #{<<"$id">> => Base, <<"$ref">> => Ref},
+            {ok, Compiled} = barrel_mcp_jsonschema:compile(Schema, Registry),
+            ?assertEqual(
+                ok,
+                barrel_mcp_jsonschema:validate(<<"x">>, Compiled, #{}),
+                Ref
+            ),
+            ?assertMatch(
+                {error, _},
+                barrel_mcp_jsonschema:validate(1, Compiled, #{}),
+                Ref
+            )
+        end,
+        Refs
+    ).
 
 %% A schema deep enough or wide enough to be a denial of service is
 %% refused rather than run.
