@@ -33,11 +33,17 @@
     subscriptions_are_capped/1,
     outbound_notifications_are_bounded/1,
     legacy_subscribe_is_served/1,
+    server_to_client_request_round_trip/1,
+    batches_are_served/1,
+    batches_are_refused_from_2025_06_18/1,
+    close_all_ends_a_subscription/1,
+    a_crashing_tool_answers_internal_error/1,
     eof_stops_the_server/1,
     client_subscribes_over_real_stdio/1
 ]).
 
 -export([echo_tool/1, slow_tool/1, a_tool/1, a_resource/1]).
+-export([asking_tool/2, boom_tool/1]).
 
 -define(MODERN, <<"2026-07-28">>).
 -define(LEGACY, <<"2025-11-25">>).
@@ -58,6 +64,11 @@ all() ->
         subscriptions_are_capped,
         outbound_notifications_are_bounded,
         legacy_subscribe_is_served,
+        server_to_client_request_round_trip,
+        batches_are_served,
+        batches_are_refused_from_2025_06_18,
+        close_all_ends_a_subscription,
+        a_crashing_tool_answers_internal_error,
         eof_stops_the_server,
         client_subscribes_over_real_stdio
     ].
@@ -100,6 +111,25 @@ slow_tool(Args) ->
 a_tool(_Args) -> <<"ok">>.
 
 a_resource(_Args) -> <<"body">>.
+
+%% Asks the connected client to sample, which on stdio goes out as a
+%% server-to-client request and comes back as a response frame.
+asking_tool(_Args, Ctx) ->
+    SessionId = maps:get(session_id, Ctx),
+    case barrel_mcp_session:sampling_create_message(SessionId, #{}, #{timeout_ms => 3000}) of
+        {ok, Result, _Usage} ->
+            maps:get(<<"answer">>, Result, <<"no answer">>);
+        {error, Reason} ->
+            {tool_error, [
+                #{
+                    <<"type">> => <<"text">>,
+                    <<"text">> =>
+                        iolist_to_binary(io_lib:format("~p", [Reason]))
+                }
+            ]}
+    end.
+
+boom_tool(_Args) -> error(boom).
 
 %%====================================================================
 %% Cases
@@ -322,6 +352,140 @@ legacy_subscribe_is_served(_Config) ->
         barrel_mcp_registry:unreg(resource, <<"watched">>)
     end.
 
+%% The whole server-to-client round trip: the request leaves on stdout,
+%% the answer arrives as an ordinary inbound frame, and the tool that
+%% was waiting gets it.
+server_to_client_request_round_trip(_Config) ->
+    ok = barrel_mcp:reg_tool(<<"asking">>, ?MODULE, asking_tool, #{}),
+    {Dev, Server} = start_server(),
+    try
+        send(
+            Dev,
+            legacy_request(
+                1,
+                <<"initialize">>,
+                initialize_params(#{
+                    <<"sampling">> => #{}
+                })
+            )
+        ),
+        ?assertMatch(#{<<"id">> := 1}, barrel_mcp_stdio_io:next_line(Dev)),
+
+        send(Dev, legacy_request(2, <<"tools/call">>, call(<<"asking">>, #{}))),
+
+        %% The server asks. Its id is minted by the session, not by us.
+        Ask = barrel_mcp_stdio_io:next_line(Dev),
+        ?assertEqual(<<"sampling/createMessage">>, maps:get(<<"method">>, Ask)),
+        AskId = maps:get(<<"id">>, Ask),
+
+        send(Dev, #{
+            <<"jsonrpc">> => <<"2.0">>,
+            <<"id">> => AskId,
+            <<"result">> => #{<<"answer">> => <<"42">>}
+        }),
+        Response = barrel_mcp_stdio_io:next_line(Dev),
+        ?assertEqual(2, maps:get(<<"id">>, Response)),
+        [Block] = maps:get(<<"content">>, maps:get(<<"result">>, Response)),
+        ?assertEqual(<<"42">>, maps:get(<<"text">>, Block))
+    after
+        stop_server(Dev, Server),
+        barrel_mcp_registry:unreg(tool, <<"asking">>)
+    end.
+
+%% Batching is served on the revisions that have it, and this transport
+%% has no test for it anywhere else.
+batches_are_served(_Config) ->
+    {Dev, Server} = start_server(),
+    try
+        %% 2025-03-26 is the revision that requires them. Before a
+        %% handshake the server knows no revision and refuses.
+        send(
+            Dev,
+            legacy_request(1, <<"initialize">>, (initialize_params())#{
+                <<"protocolVersion">> => <<"2025-03-26">>
+            })
+        ),
+        ?assertMatch(#{<<"id">> := 1}, barrel_mcp_stdio_io:next_line(Dev)),
+
+        Batch = [
+            #{
+                <<"jsonrpc">> => <<"2.0">>,
+                <<"id">> => Id,
+                <<"method">> => <<"tools/call">>,
+                <<"params">> => call(<<"echo">>, #{<<"input">> => Id})
+            }
+         || Id <- [<<"a">>, <<"b">>]
+        ],
+        barrel_mcp_stdio_io:feed(Dev, [json:encode(Batch), <<"\n">>]),
+        Responses = barrel_mcp_stdio_io:next_line(Dev),
+        ?assert(is_list(Responses)),
+        ?assertEqual(
+            [<<"a">>, <<"b">>],
+            lists:sort([maps:get(<<"id">>, R) || R <- Responses])
+        )
+    after
+        stop_server(Dev, Server)
+    end.
+
+%% A batch on a revision that removed them is one refusal, not a list.
+batches_are_refused_from_2025_06_18(_Config) ->
+    {Dev, Server} = start_server(),
+    try
+        send(Dev, legacy_request(1, <<"initialize">>, initialize_params())),
+        ?assertMatch(#{<<"id">> := 1}, barrel_mcp_stdio_io:next_line(Dev)),
+        Batch = [
+            #{
+                <<"jsonrpc">> => <<"2.0">>,
+                <<"id">> => <<"a">>,
+                <<"method">> => <<"ping">>,
+                <<"params">> => #{}
+            }
+        ],
+        barrel_mcp_stdio_io:feed(Dev, [json:encode(Batch), <<"\n">>]),
+        Response = barrel_mcp_stdio_io:next_line(Dev),
+        ?assertEqual(
+            ?JSONRPC_INVALID_REQUEST,
+            maps:get(<<"code">>, maps:get(<<"error">>, Response))
+        )
+    after
+        stop_server(Dev, Server)
+    end.
+
+%% A clean shutdown is distinguishable from a dropped connection: the
+%% stream is cancelled and then completed.
+close_all_ends_a_subscription(_Config) ->
+    {Dev, Server} = start_server(),
+    try
+        ?assertEqual(
+            <<"notifications/subscriptions/acknowledged">>,
+            maps:get(<<"method">>, open_listen(Dev, 5))
+        ),
+        ok = barrel_mcp_subscriptions:close_all(),
+        Cancelled = barrel_mcp_stdio_io:next_line(Dev),
+        ?assertEqual(<<"notifications/cancelled">>, maps:get(<<"method">>, Cancelled)),
+        Closed = barrel_mcp_stdio_io:next_line(Dev),
+        ?assertEqual(5, maps:get(<<"id">>, Closed)),
+        ?assertEqual(
+            <<"complete">>,
+            maps:get(<<"resultType">>, maps:get(<<"result">>, Closed))
+        )
+    after
+        stop_server(Dev, Server)
+    end.
+
+a_crashing_tool_answers_internal_error(_Config) ->
+    ok = barrel_mcp:reg_tool(<<"boom">>, ?MODULE, boom_tool, #{}),
+    {Dev, Server} = start_server(),
+    try
+        send(Dev, request(6, <<"tools/call">>, call(<<"boom">>, #{}))),
+        Response = barrel_mcp_stdio_io:next_line(Dev),
+        ?assertEqual(6, maps:get(<<"id">>, Response)),
+        ?assert(maps:is_key(<<"error">>, Response) orelse maps:is_key(<<"result">>, Response))
+    after
+        stop_server(Dev, Server),
+        barrel_mcp_registry:unreg(tool, <<"boom">>)
+    end.
+
 eof_stops_the_server(_Config) ->
     {Dev, Server} = start_server(),
     MRef = monitor(process, Server),
@@ -461,9 +625,12 @@ legacy_request(Id, Method, Params) ->
     }.
 
 initialize_params() ->
+    initialize_params(#{}).
+
+initialize_params(Capabilities) ->
     #{
         <<"protocolVersion">> => ?LEGACY,
-        <<"capabilities">> => #{},
+        <<"capabilities">> => Capabilities,
         <<"clientInfo">> => #{<<"name">> => <<"ct">>, <<"version">> => <<"0">>}
     }.
 

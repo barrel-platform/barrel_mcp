@@ -1893,6 +1893,9 @@ drive_as_task(Plan, _ToolName, Ctx, AuthInfo, TaskId) ->
     Task = read_task_for(Owner, TaskId, Ctx),
     success_response(RequestId, create_task_result(TaskId, Task, Ctx)).
 
+session_of(undefined) -> undefined;
+session_of(Ctx) -> barrel_mcp_ctx:session_id(Ctx).
+
 run_async_plan(Plan, Timeout, AuthInfo) ->
     Self = self(),
     PlanCtx = maps:get(ctx, Plan, undefined),
@@ -1901,7 +1904,9 @@ run_async_plan(Plan, Timeout, AuthInfo) ->
     Meta = maps:get(meta, Plan, #{}),
     Ctx = #{
         request_id => RequestId,
-        session_id => undefined,
+        %% stdio has a session even though it answers inline, and a tool
+        %% needs it to reach the client at all.
+        session_id => session_of(PlanCtx),
         progress_token => undefined,
         meta => Meta,
         emit_progress => fun(_, _, _) -> ok end,
