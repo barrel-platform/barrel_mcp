@@ -109,22 +109,20 @@ decode_value(V) when is_binary(V) ->
             end
     end.
 
+%% A bound variable in a binary pattern is compared rather than bound
+%% again, so the fence and what it wraps come out of one match. A value
+%% too short for the fence gives a negative payload size, which fails
+%% the match rather than raising.
 sentinel_payload(V) ->
     Prefix = ?SENTINEL_PREFIX,
     Suffix = ?SENTINEL_SUFFIX,
     PLen = byte_size(Prefix),
     SLen = byte_size(Suffix),
-    Size = byte_size(V),
-    case Size >= PLen + SLen of
-        false ->
-            none;
-        true ->
-            Head = binary:part(V, 0, PLen),
-            Tail = binary:part(V, Size - SLen, SLen),
-            case {Head, Tail} of
-                {Prefix, Suffix} -> {ok, binary:part(V, PLen, Size - PLen - SLen)};
-                _ -> none
-            end
+    case V of
+        <<Prefix:PLen/binary, Payload:(byte_size(V) - PLen - SLen)/binary, Suffix:SLen/binary>> ->
+            {ok, Payload};
+        _ ->
+            none
     end.
 
 %% @doc Whether a string can travel as a plain header value.
