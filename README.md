@@ -51,7 +51,7 @@ Add to your `rebar.config`:
 {deps, [
     {barrel_mcp,
         {git, "https://github.com/barrel-platform/barrel_mcp.git",
-              {tag, "v3.0.0"}}}
+              {tag, "v3.0.1"}}}
 ]}.
 ```
 
