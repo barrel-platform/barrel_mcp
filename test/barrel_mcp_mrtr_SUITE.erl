@@ -227,8 +227,9 @@ roots_tool(_Args, Ctx) ->
             {input_required, #{<<"ws">> => #{method => <<"roots/list">>, params => #{}}}, asked}
     end.
 
+%% Past the inline window, so the call becomes a task.
 slow_tool(_Args) ->
-    timer:sleep(80),
+    timer:sleep(300),
     <<"done">>.
 
 %%====================================================================

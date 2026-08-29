@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tools declare `task_support => forbidden | optional | required`
+  (`long_running => true` still means `optional`), listed as
+  `execution.taskSupport` in the modern era. A `required` tool refuses
+  a client that did not declare `io.modelcontextprotocol/tasks` with
+  `-32021`. In the modern era a task-supporting tool answers
+  synchronously when it finishes, or asks its MRTR question, within
+  `task_inline_ms` (default 100); only past that window is a task
+  created and its `CreateTaskResult` returned, with the worker already
+  running (SEP-2663 "Task Creation"). A task's `error` is the JSON-RPC
+  error object. The legacy era still gets a task at once.
 - The OAuth client handle runs the authorization-code flow itself. An
   `{oauth, #{redirect_uri, authorize, ...}}` config with no
   `access_token` answers a 401 by discovering the protected resource

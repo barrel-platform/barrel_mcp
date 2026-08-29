@@ -13,6 +13,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -export([slow_tool/1, killable_tool/1, asking_tool/2]).
+-export([fast_tool/1, crashing_tool/1, asks_then_works/2]).
 
 tasks_test_() ->
     {setup, fun setup/0, fun cleanup/1, [
@@ -117,7 +118,9 @@ terminal_idempotent() ->
 %% entirely and blocked for up to 60 seconds instead.
 %%====================================================================
 
+%% Past the inline window, so the call becomes a task.
 slow_tool(_Args) ->
+    timer:sleep(300),
     timer:sleep(50),
     <<"finished">>.
 
@@ -145,11 +148,19 @@ drive_async_plan_test_() ->
         {"An unexpired task is never evicted to make room", fun no_eviction_of_live_tasks/0},
         {"A task parks on the input it asked for", fun task_parks_on_input/0},
         {"An answered task resumes and completes", fun task_resumes_after_update/0},
-        {"A reused key is refused", fun reused_key_refused/0}
+        {"A reused key is refused", fun reused_key_refused/0},
+        {"A fast task-supporting tool answers synchronously", fun fast_tool_answers_inline/0},
+        {"A required tool refuses a client without the extension",
+            fun required_tool_refuses_undeclared/0},
+        {"A crash fails the task with an error and no result", fun crash_fails_task/0},
+        {"An MRTR round before the work is synchronous, the work is a task", fun mrtr_then_task/0},
+        {"tools/list shows taskSupport in the modern era", fun tools_list_shows_task_support/0}
     ]}.
 
 %% Asks once, then finishes with whatever came back.
+%% Asks after the inline window, so the question parks a task.
 asking_tool(_Args, Ctx) ->
+    timer:sleep(300),
     case barrel_mcp:input(Ctx, <<"who">>) of
         {ok, #{<<"content">> := #{<<"name">> := Name}}} ->
             <<"hello ", Name/binary>>;
@@ -176,9 +187,19 @@ setup_slow() ->
     ok = barrel_mcp_registry:reg(tool, <<"asking">>, ?MODULE, asking_tool, #{
         long_running => true
     }),
+    ok = barrel_mcp_registry:reg(tool, <<"fast">>, ?MODULE, fast_tool, #{task_support => optional}),
+    ok = barrel_mcp_registry:reg(tool, <<"crashing">>, ?MODULE, crashing_tool, #{
+        task_support => optional
+    }),
+    ok = barrel_mcp_registry:reg(tool, <<"asks_then_works">>, ?MODULE, asks_then_works, #{
+        task_support => required
+    }),
     ok.
 
 cleanup_slow(_) ->
+    barrel_mcp_registry:unreg(tool, <<"fast">>),
+    barrel_mcp_registry:unreg(tool, <<"crashing">>),
+    barrel_mcp_registry:unreg(tool, <<"asks_then_works">>),
     barrel_mcp_registry:unreg(tool, <<"slow_stdio">>),
     barrel_mcp_registry:unreg(tool, <<"killable">>),
     barrel_mcp_registry:unreg(tool, <<"asking">>),
@@ -634,3 +655,122 @@ await_timeout_cleans_up_test() ->
     ?assertEqual({error, timeout}, barrel_mcp_tasks:await_result(Owner, TaskId, 100)),
     ok = barrel_mcp_tasks:finish(Owner, TaskId, #{<<"content">> => []}),
     ?assertMatch({ok, _}, barrel_mcp_tasks:get(Owner, TaskId)).
+
+%%====================================================================
+%% Synchronous first, a task when it takes long
+%%====================================================================
+
+fast_tool(_Args) ->
+    <<"quick">>.
+
+crashing_tool(_Args) ->
+    error(boom).
+
+%% Round one asks; round two has the answer and works past the window.
+asks_then_works(_Args, Ctx) ->
+    case barrel_mcp:input(Ctx, <<"user_name">>) of
+        none ->
+            {input_required,
+                #{
+                    <<"user_name">> => #{
+                        method => <<"elicitation/create">>,
+                        params => #{<<"message">> => <<"Your name?">>}
+                    }
+                },
+                round1};
+        {ok, Answer} ->
+            timer:sleep(400),
+            <<"hello ", (answered_name(Answer))/binary>>
+    end.
+
+answered_name(#{<<"content">> := #{<<"user_name">> := Name}}) -> Name;
+answered_name(#{<<"result">> := Result}) -> answered_name(Result);
+answered_name(_) -> <<"stranger">>.
+
+fast_tool_answers_inline() ->
+    Resp = drive(call_request(<<"fast">>, modern_meta(tasks_caps()))),
+    Result = maps:get(<<"result">>, Resp),
+    ?assertEqual(<<"complete">>, maps:get(<<"resultType">>, Result)),
+    ?assertNot(maps:is_key(<<"taskId">>, Result)),
+    [Block] = maps:get(<<"content">>, Result),
+    ?assertEqual(<<"quick">>, maps:get(<<"text">>, Block)).
+
+required_tool_refuses_undeclared() ->
+    Resp = drive(call_request(<<"asks_then_works">>, modern_meta(#{}))),
+    Error = maps:get(<<"error">>, Resp),
+    ?assertEqual(-32021, maps:get(<<"code">>, Error)),
+    ?assertMatch(
+        #{<<"requiredCapabilities">> := #{<<"extensions">> := _}},
+        maps:get(<<"data">>, Error)
+    ).
+
+crash_fails_task() ->
+    %% The crash lands after the inline window, so it fails a task.
+    application:set_env(barrel_mcp, task_inline_ms, 0),
+    try
+        Resp = drive(call_request(<<"crashing">>, modern_meta(tasks_caps()))),
+        Result = maps:get(<<"result">>, Resp),
+        ?assertEqual(<<"task">>, maps:get(<<"resultType">>, Result)),
+        TaskId = maps:get(<<"taskId">>, Result),
+        Owner = {principal, anonymous},
+        wait_for_status(Owner, TaskId, <<"failed">>, 40),
+        {ok, Task} = barrel_mcp_tasks:get(Owner, TaskId, modern),
+        ?assertMatch(#{<<"error">> := #{<<"code">> := _, <<"message">> := _}}, Task),
+        ?assertNot(maps:is_key(<<"result">>, Task))
+    after
+        application:unset_env(barrel_mcp, task_inline_ms)
+    end.
+
+mrtr_then_task() ->
+    Caps = (tasks_caps())#{<<"elicitation">> => #{}},
+    Round1 = drive(call_request(<<"asks_then_works">>, modern_meta(Caps))),
+    R1 = maps:get(<<"result">>, Round1),
+    ?assertEqual(<<"input_required">>, maps:get(<<"resultType">>, R1)),
+    ?assertNot(maps:is_key(<<"taskId">>, R1)),
+    State = maps:get(<<"requestState">>, R1),
+    Req = call_request(<<"asks_then_works">>, modern_meta(Caps)),
+    Params = maps:get(<<"params">>, Req),
+    Round2 = drive(Req#{
+        <<"params">> => Params#{
+            <<"requestState">> => State,
+            <<"inputResponses">> => #{
+                <<"user_name">> => #{
+                    <<"result">> => #{
+                        <<"action">> => <<"accept">>,
+                        <<"content">> => #{<<"user_name">> => <<"Ada">>}
+                    }
+                }
+            }
+        }
+    }),
+    R2 = maps:get(<<"result">>, Round2),
+    ?assertEqual(<<"task">>, maps:get(<<"resultType">>, R2)),
+    TaskId = maps:get(<<"taskId">>, R2),
+    ?assert(is_integer(maps:get(<<"ttlMs">>, R2))),
+    ?assert(is_integer(maps:get(<<"pollIntervalMs">>, R2))),
+    Owner = {principal, anonymous},
+    %% Durable before the handle is handed out.
+    ?assertMatch({ok, _}, barrel_mcp_tasks:get(Owner, TaskId, modern)),
+    wait_for_status(Owner, TaskId, <<"completed">>, 40),
+    {ok, Task} = barrel_mcp_tasks:get(Owner, TaskId, modern),
+    [Block] = maps:get(<<"content">>, maps:get(<<"result">>, Task)),
+    ?assertEqual(<<"hello Ada">>, maps:get(<<"text">>, Block)).
+
+tools_list_shows_task_support() ->
+    Req = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 9,
+        <<"method">> => <<"tools/list">>,
+        <<"params">> => #{<<"_meta">> => modern_meta(#{})}
+    },
+    Resp = barrel_mcp_protocol:handle(Req),
+    Tools = maps:get(<<"tools">>, maps:get(<<"result">>, Resp)),
+    ByName = maps:from_list([{maps:get(<<"name">>, T), T} || T <- Tools]),
+    ?assertEqual(
+        #{<<"taskSupport">> => <<"optional">>},
+        maps:get(<<"execution">>, maps:get(<<"fast">>, ByName))
+    ),
+    ?assertEqual(
+        #{<<"taskSupport">> => <<"required">>},
+        maps:get(<<"execution">>, maps:get(<<"asks_then_works">>, ByName))
+    ).

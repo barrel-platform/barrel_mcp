@@ -24,7 +24,7 @@
     task_owner/1,
     tasks_enabled/1,
     create_task_result/3,
-    long_running_tool/1,
+    missing_tasks_capability/1,
     spawn_task_collector/3
 ]).
 
@@ -847,13 +847,8 @@ tasks_enabled(Ctx) ->
         false -> true
     end.
 
-%% @doc Whether a tool was registered as long-running.
--spec long_running_tool(binary()) -> boolean().
-long_running_tool(Name) ->
-    case barrel_mcp_registry:find(tool, Name) of
-        {ok, Handler} -> maps:get(long_running, Handler, false);
-        error -> false
-    end.
+task_support(Name) ->
+    barrel_mcp_registry:task_support(Name).
 
 %% @doc Run a tool's outcome into its task rather than back to the
 %% caller, which has already been handed the task id.
@@ -1458,12 +1453,13 @@ handle_request(<<"tools/list">>, Params, Id, Ctx) ->
             <<"description">> => maps:get(description, Handler, <<>>),
             <<"inputSchema">> => maps:get(input_schema, Handler, #{<<"type">> => <<"object">>})
         },
-        with_optional_fields(Base, Handler, Ctx, [
+        Listed = with_optional_fields(Base, Handler, Ctx, [
             {<<"outputSchema">>, output_schema, output_schema},
             {<<"title">>, title, title},
             {<<"icons">>, icons, icons},
             {<<"annotations">>, annotations, always}
-        ])
+        ]),
+        with_execution(Listed, Handler, Ctx)
     end);
 handle_request(<<"tools/call">>, Params, Id, Ctx) ->
     case mrtr_context(<<"tools/call">>, Params, Ctx) of
@@ -1858,6 +1854,15 @@ drive_async_plan(Plan, Timeout) ->
 drive_async_plan(Plan, Timeout, AuthInfo) ->
     drive_async_plan(Plan, Timeout, AuthInfo, fun(_Worker) -> ok end).
 
+%% `ToolExecution.taskSupport' is the extension's field, listed only in
+%% the era that has the extension and only for tools that take part.
+with_execution(Listed, Handler, Ctx) ->
+    Support = maps:get(task_support, Handler, forbidden),
+    case barrel_mcp_ctx:is_modern(Ctx) andalso Support =/= forbidden of
+        true -> Listed#{<<"execution">> => #{<<"taskSupport">> => atom_to_binary(Support, utf8)}};
+        false -> Listed
+    end.
+
 %% @doc As {@link drive_async_plan/3}, telling `OnSpawn' the worker pid
 %% before waiting on it. A caller that must reap the worker if its own
 %% peer goes away has no other way to learn the pid: the wait is
@@ -1865,28 +1870,103 @@ drive_async_plan(Plan, Timeout, AuthInfo) ->
 -spec drive_async_plan(map(), timeout(), term(), fun((pid() | undefined) -> term())) -> map().
 drive_async_plan(Plan, Timeout, AuthInfo, OnSpawn) ->
     Ctx = maps:get(ctx, Plan, undefined),
-    case long_running_plan(Plan, Ctx) of
-        {true, ToolName} ->
-            finalize(drive_as_task(Plan, ToolName, Ctx, AuthInfo), Ctx);
-        false ->
+    RequestId = maps:get(request_id, Plan),
+    case task_plan(Plan, Ctx) of
+        {required, _ToolName} ->
+            finalize(missing_tasks_capability(RequestId), Ctx);
+        {task, ToolName} ->
+            case barrel_mcp_ctx:is_modern(Ctx) of
+                true ->
+                    finalize(drive_inline_then_task(Plan, ToolName, Ctx, AuthInfo, OnSpawn), Ctx);
+                false ->
+                    finalize(drive_as_task(Plan, ToolName, Ctx, AuthInfo), Ctx)
+            end;
+        inline ->
             finalize(run_async_plan(Plan, Timeout, AuthInfo, OnSpawn), Ctx)
     end.
 
-%% A tool is only run as a task when the caller can actually poll one.
-%% Without a request context (a hand-built plan) there is nothing to
-%% decide from, so it runs inline.
-long_running_plan(_Plan, undefined) ->
-    false;
-long_running_plan(Plan, Ctx) ->
+%% What a call becomes: `inline' for a tool without task support, or
+%% one the client cannot poll and does not require a task for; `{task,
+%% Name}' when it can; `{required, Name}' when the tool insists and the
+%% client did not declare the extension. Without a request context (a
+%% hand-built plan) there is nothing to decide from.
+task_plan(_Plan, undefined) ->
+    inline;
+task_plan(Plan, Ctx) ->
     case maps:get(tool_name, Plan, undefined) of
         undefined ->
-            false;
+            inline;
         Name ->
-            case long_running_tool(Name) andalso tasks_enabled(Ctx) of
-                true -> {true, Name};
-                false -> false
+            case {task_support(Name), tasks_enabled(Ctx)} of
+                {forbidden, _} -> inline;
+                {optional, false} -> inline;
+                {required, false} -> {required, Name};
+                {_, true} -> {task, Name}
             end
     end.
+
+%% tasks.md "Task Creation": a task-supporting tool may still answer
+%% synchronously when it can, and an MRTR round before the work starts
+%% is synchronous too; see {@link barrel_mcp_task_relay}.
+drive_inline_then_task(Plan, ToolName, Ctx, AuthInfo, OnSpawn) ->
+    RequestId = maps:get(request_id, Plan),
+    Spawn = maps:get(spawn, Plan),
+    Relay = barrel_mcp_task_relay:start(),
+    ToolCtx = #{
+        request_id => RequestId,
+        session_id => session_of(Ctx),
+        progress_token => undefined,
+        meta => maps:get(meta, Plan, #{}),
+        emit_progress => fun(_, _, _) -> ok end,
+        emit_log => fun(_, _, _) -> ok end,
+        reply_to => Relay,
+        auth_info => AuthInfo
+    },
+    Worker = Spawn(ToolCtx),
+    barrel_mcp_task_relay:worker(Relay, Worker),
+    _ = OnSpawn(Worker),
+    case await_plan_outcome(Plan, RequestId, barrel_mcp_task_relay:inline_ms()) of
+        timeout ->
+            ok = barrel_mcp_task_relay:hold(Relay),
+            %% Anything that arrived between the timeout and the hold
+            %% is ahead of us in the mailbox: answer it synchronously.
+            case await_plan_outcome(Plan, RequestId, 0) of
+                timeout ->
+                    unlink(Relay),
+                    {_Method, Params} = maps:get(mrtr_binding, Plan, {<<>>, #{}}),
+                    case
+                        barrel_mcp_task_relay:escalate(
+                            Relay, Worker, task_owner(Ctx), ToolName, Params, #{
+                                request_id => RequestId, mcp_ctx => Ctx
+                            }
+                        )
+                    of
+                        {ok, Result} ->
+                            success_response(RequestId, Result);
+                        {error, too_many_tasks} ->
+                            error_response(
+                                RequestId, ?JSONRPC_INTERNAL_ERROR, <<"Too many concurrent tasks">>
+                            )
+                    end;
+                Response ->
+                    barrel_mcp_task_relay:stop(Relay),
+                    Response
+            end;
+        Response ->
+            barrel_mcp_task_relay:stop(Relay),
+            Response
+    end.
+
+%% @doc The `-32021' a client without the tasks extension gets from a
+%% tool that requires one (tasks.md "Capability Negotiation").
+-spec missing_tasks_capability(term()) -> map().
+missing_tasks_capability(Id) ->
+    error_with_data(
+        Id,
+        ?MCP_MISSING_CLIENT_CAPABILITY,
+        <<"Client did not declare a required capability">>,
+        #{<<"requiredCapabilities">> => extension_object(?MCP_EXT_TASKS)}
+    ).
 
 %% Hand back the task id straight away and let the worker report into
 %% the task. The caller is not waiting on it.
@@ -1959,6 +2039,14 @@ run_async_plan(Plan, Timeout, AuthInfo, OnSpawn) ->
         auth_info => AuthInfo
     },
     _ = OnSpawn(Spawn(Ctx)),
+    case await_plan_outcome(Plan, RequestId, Timeout) of
+        timeout -> error_response(RequestId, internal_error_code(PlanCtx), <<"Tool timed out">>);
+        Response -> Response
+    end.
+
+%% One outcome message for `RequestId', turned into its response, or
+%% `timeout'.
+await_plan_outcome(Plan, RequestId, Timeout) ->
     receive
         {tool_result, RequestId, Result} ->
             success_response(
@@ -2026,7 +2114,7 @@ run_async_plan(Plan, Timeout, AuthInfo, OnSpawn) ->
             %% stamp resultType and serverInfo the way every result gets.
             success_response(RequestId, decorate_result(tool_failure_result(Reason)))
     after Timeout ->
-        error_response(RequestId, internal_error_code(PlanCtx), <<"Tool timed out">>)
+        timeout
     end.
 
 format_tool_result(Result) when is_binary(Result) ->

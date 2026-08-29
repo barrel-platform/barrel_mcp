@@ -51,6 +51,7 @@
 -include("barrel_mcp.hrl").
 
 %% API
+-export([task_support/1]).
 -export([
     start_link/0,
     wait_for_ready/0,
@@ -699,12 +700,41 @@ build_tool(Module, Function, Opts, InputSchema) ->
                 input_schema => InputSchema,
                 header_params => HeaderParams,
                 validate_input => maps:get(validate_input, Opts, false),
-                long_running => maps:get(long_running, Opts, false),
+                task_support => task_support_opt(Opts),
                 validate_output => maps:get(validate_output, Opts, false)
             },
             Merged = maps:merge(Base, opt_field(output_schema, Opts)),
             Merged1 = maps:merge(Merged, opt_field(annotations, Opts)),
             add_metadata(Merged1, Opts)
+    end.
+
+%% @doc A registered tool's `taskSupport'; `forbidden' for a tool that
+%% does not exist, so a call falls through to the not-found path.
+-spec task_support(binary()) -> forbidden | optional | required.
+task_support(Name) ->
+    case find(tool, Name) of
+        {ok, Handler} -> maps:get(task_support, Handler, forbidden);
+        error -> forbidden
+    end.
+
+%% `task_support' is the extension's vocabulary (ToolExecution.taskSupport):
+%% `forbidden' (default), `optional' or `required'. `long_running => true'
+%% is the older spelling of `optional'.
+task_support_opt(Opts) ->
+    case maps:get(task_support, Opts, undefined) of
+        undefined ->
+            case maps:get(long_running, Opts, false) of
+                true -> optional;
+                _ -> forbidden
+            end;
+        Level when Level =:= forbidden; Level =:= optional; Level =:= required ->
+            Level;
+        <<"optional">> ->
+            optional;
+        <<"required">> ->
+            required;
+        _ ->
+            forbidden
     end.
 
 %% `inputSchema' is object rooted in every revision. `outputSchema' is

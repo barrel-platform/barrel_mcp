@@ -812,25 +812,45 @@ handle_async_tool_call(
     Timeout = maps:get(timeout, AsyncPlan, 60000),
     %% What the reply needs: the session to echo (legacy only) and the
     %% request context that decorates a modern result.
+    Params = maps:get(<<"params">>, Request, #{}),
     Reply = #{
         session_id => SessionId,
         ctx => maps:get(ctx, AsyncPlan, undefined),
-        plan => AsyncPlan
+        plan => AsyncPlan,
+        %% Kept on the task, since a resumed MRTR run starts from them.
+        params => Params
     },
-    Params = maps:get(<<"params">>, Request, #{}),
     ToolName = maps:get(<<"name">>, Params, <<>>),
     RequestCtx = maps:get(ctx, Reply),
-    %% A tool may be long-running, but a client that never declared the
-    %% tasks extension has no way to poll one, so it is run
-    %% synchronously instead.
-    LongRunning =
-        barrel_mcp_protocol:long_running_tool(ToolName) andalso
-            tasks_available(RequestCtx),
+    %% A tool may support tasks, but a client that never declared the
+    %% extension has no way to poll one: it runs synchronously, or is
+    %% refused when the tool insists. A legacy client gets a task at
+    %% once; a modern one gets a task only when the tool takes longer
+    %% than the inline window (barrel_mcp_task_relay).
+    Support = barrel_mcp_registry:task_support(ToolName),
+    Enabled = tasks_available(RequestCtx),
+    Modern = RequestCtx =/= undefined andalso barrel_mcp_ctx:is_modern(RequestCtx),
+    TaskMode =
+        case {Support, Enabled} of
+            {forbidden, _} -> inline;
+            {optional, false} -> inline;
+            {required, false} -> refuse;
+            {_, true} when Modern -> escalate;
+            {_, true} -> task
+        end,
     Meta = maps:get(<<"_meta">>, Params, #{}),
     ProgressToken = maps:get(<<"progressToken">>, Meta, undefined),
     Self = self(),
-    case LongRunning of
-        true ->
+    case TaskMode of
+        refuse ->
+            reply_json(
+                Headers,
+                Responder,
+                Config,
+                200,
+                barrel_mcp_protocol:missing_tasks_capability(RequestId)
+            );
+        task ->
             handle_long_running_call(
                 Headers,
                 Responder,
@@ -843,7 +863,7 @@ handle_async_tool_call(
                 Spawn,
                 AuthInfo
             );
-        false ->
+        _ when TaskMode =:= inline; TaskMode =:= escalate ->
             %% Opting into progress or logging turns the reply into an
             %% SSE stream, opened before the tool runs.
             LogLevel = request_log_level(Reply),
@@ -863,6 +883,11 @@ handle_async_tool_call(
                     {true, undefined} -> session_log_on_stream_fun(Self, RequestId, SessionId);
                     {false, _} -> emit_log_fun(Reply, SessionId)
                 end,
+            Relay =
+                case TaskMode of
+                    escalate -> barrel_mcp_task_relay:start();
+                    inline -> undefined
+                end,
             Ctx = #{
                 session_id => SessionId,
                 request_id => RequestId,
@@ -870,7 +895,7 @@ handle_async_tool_call(
                 meta => Meta,
                 emit_progress => EmitProgress,
                 emit_log => EmitLog,
-                reply_to => Self,
+                reply_to => reply_target(Relay, Self),
                 %% Where a server request raised by this tool goes: its
                 %% own response stream, the way the reference server
                 %% routes by related_request_id.
@@ -881,6 +906,7 @@ handle_async_tool_call(
                 Streaming, Headers, Responder, Config, Reply
             ),
             WorkerPid = Spawn(Ctx),
+            _ = Relay =/= undefined andalso barrel_mcp_task_relay:worker(Relay, WorkerPid),
             %% No worker means nothing to cancel, and its `tool_failed'
             %% is already on its way.
             case {SessionId, is_pid(WorkerPid)} of
@@ -893,9 +919,15 @@ handle_async_tool_call(
                         SessionId, RequestId, WorkerPid, Self
                     )
             end,
-            Outcome0 = wait_for_tool(
-                RequestId, Timeout, OnProgress, cancels_on_disconnect(Reply)
-            ),
+            Outcome0 =
+                case Relay of
+                    undefined ->
+                        wait_for_tool(RequestId, Timeout, OnProgress, cancels_on_disconnect(Reply));
+                    _ ->
+                        wait_inline_or_escalate(
+                            Relay, WorkerPid, RequestId, ToolName, Reply, OnProgress
+                        )
+                end,
             Outcome = settle_disconnect(Outcome0, WorkerPid),
             case SessionId of
                 undefined -> ok;
@@ -1102,6 +1134,42 @@ start_task_worker({Headers, Responder, Config}, Reply, Work) ->
     ),
     reply(Responder, 200, Hdrs, barrel_mcp_protocol:encode(Envelope)).
 
+reply_target(undefined, Self) -> Self;
+reply_target(Relay, _Self) -> Relay.
+
+%% The inline window, then the task. Anything that reached this process
+%% between the window closing and the hold is answered in place.
+wait_inline_or_escalate(Relay, WorkerPid, RequestId, ToolName, Reply, OnProgress) ->
+    Cancel = cancels_on_disconnect(Reply),
+    case wait_for_tool(RequestId, barrel_mcp_task_relay:inline_ms(), OnProgress, Cancel) of
+        timeout ->
+            ok = barrel_mcp_task_relay:hold(Relay),
+            case wait_for_tool(RequestId, 0, OnProgress, Cancel) of
+                timeout ->
+                    unlink(Relay),
+                    RequestCtx = maps:get(ctx, Reply),
+                    case
+                        barrel_mcp_task_relay:escalate(
+                            Relay,
+                            WorkerPid,
+                            task_owner(RequestCtx),
+                            ToolName,
+                            maps:get(params, Reply, #{}),
+                            #{request_id => RequestId, mcp_ctx => RequestCtx}
+                        )
+                    of
+                        {ok, Result} -> {task, Result};
+                        {error, too_many_tasks} -> {failed, too_many_tasks}
+                    end;
+                Outcome ->
+                    barrel_mcp_task_relay:stop(Relay),
+                    Outcome
+            end;
+        Outcome ->
+            barrel_mcp_task_relay:stop(Relay),
+            Outcome
+    end.
+
 %% `tasks_available/1' and `task_owner/1' live in the protocol core so
 %% stdio decides the same way this transport does.
 tasks_available(undefined) -> false;
@@ -1281,6 +1349,8 @@ collect_tool_outcome(RequestId, Deadline, OnEmit, CancelOnDisconnect) ->
 %% Turn a tool outcome into the JSON-RPC envelope for it. Split out of
 %% the reply so the plain and the streaming path produce byte-identical
 %% envelopes. `cancelled' has no envelope: there is nothing to answer.
+tool_outcome_envelope(Reply, RequestId, {task, Result}) ->
+    tool_success(Reply, RequestId, Result, #{});
 tool_outcome_envelope(Reply, RequestId, {input_required, Requests, State}) ->
     barrel_mcp_protocol:input_required_envelope(
         maps:get(plan, Reply, #{}), Requests, State, RequestId

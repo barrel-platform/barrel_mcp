@@ -829,5 +829,10 @@ to_rfc3339(Ms) when is_integer(Ms) ->
         )
     ).
 
-format_error(B) when is_binary(B) -> B;
-format_error(T) -> iolist_to_binary(io_lib:format("~p", [T])).
+%% tasks.md "Task Execution Errors": the `error' field is the JSON-RPC
+%% error, so a bare reason is wrapped as an internal error.
+format_error(#{<<"code">> := _, <<"message">> := _} = E) ->
+    E;
+format_error(B) when is_binary(B) -> #{<<"code">> => -32603, <<"message">> => B};
+format_error(T) ->
+    #{<<"code">> => -32603, <<"message">> => iolist_to_binary(io_lib:format("~p", [T]))}.
