@@ -86,9 +86,13 @@ A `--requirements` run also executes the scenarios its YAML lists as
 `not_scored` (extensions, and scenarios pending against the runner's
 own reference fixture); the runner reports them and exits 0
 regardless. The case reads that list from the runner's YAML and
-prints those failures apart. At 2026-07-28 that is the nine
-`server-tasks-*` scenarios (SEP-2663 tasks as a core feature), which
-this server does not implement yet.
+prints those failures apart, so a regression there is still visible.
+The SEP-2663 task scenarios on the server side and the extension
+grants (client credentials, EMA, WIF, DPoP) on the client side are
+among them and pass here; the one thing left in that report is the
+runner's own `wire-schema-valid` check validating a `CreateTaskResult`
+against the core `CallToolResult` schema, which no implementation can
+satisfy.
 
 ## Run locally
 

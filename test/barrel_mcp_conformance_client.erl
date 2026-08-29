@@ -85,10 +85,50 @@ env(Name, Default) ->
 auth(Scenario, Context, Url) ->
     case string:find(Scenario, "auth") of
         nomatch -> none;
-        _ -> oauth(Context, Url)
+        _ -> grant(Scenario, Context, Url)
     end.
 
-oauth(Context, _Url) ->
+%% The scenario context says which grant it exercises: an IdP token
+%% endpoint means enterprise-managed authorization, a signed workload
+%% JWT means jwt-bearer, a private key means client credentials with
+%% private_key_jwt, a bare secret without a redirect flow means client
+%% credentials with a secret, and the rest is the authorization-code
+%% flow. Endpoints are never in the context: every grant discovers
+%% them from the 401.
+grant(Scenario, #{<<"idp_token_endpoint">> := Idp, <<"idp_id_token">> := IdToken} = Context, _Url) ->
+    _ = Scenario,
+    {oauth_enterprise, #{
+        client_id => maps:get(<<"client_id">>, Context),
+        client_secret => maps:get(<<"client_secret">>, Context, undefined),
+        idp_token_endpoint => Idp,
+        subject_token => IdToken,
+        subject_token_type => <<"urn:ietf:params:oauth:token-type:id_token">>,
+        allow_insecure_oauth => true
+    }};
+grant(_Scenario, #{<<"valid_jwt">> := Assertion} = Context, _Url) ->
+    {oauth_jwt_bearer, #{
+        client_id => maps:get(<<"client_id">>, Context),
+        assertion => Assertion,
+        allow_insecure_oauth => true
+    }};
+grant(_Scenario, #{<<"private_key_pem">> := Pem} = Context, _Url) ->
+    {oauth_client_credentials, #{
+        client_id => maps:get(<<"client_id">>, Context),
+        private_key => {Pem, maps:get(<<"signing_algorithm">>, Context, <<"ES256">>)},
+        allow_insecure_oauth => true
+    }};
+grant(Scenario, #{<<"client_secret">> := Secret} = Context, _Url) when
+    Scenario =:= "auth/client-credentials-basic"
+->
+    {oauth_client_credentials, #{
+        client_id => maps:get(<<"client_id">>, Context),
+        client_secret => Secret,
+        allow_insecure_oauth => true
+    }};
+grant(Scenario, Context, Url) ->
+    oauth(Scenario, Context, Url).
+
+oauth(Scenario, Context, _Url) ->
     Base = #{
         redirect_uri => <<"http://127.0.0.1:9797/callback">>,
         authorize => fun headless_authorize/1,
@@ -116,7 +156,12 @@ oauth(Context, _Url) ->
             #{<<"client_metadata_url">> := Cimd} -> WithClient#{client_id_metadata_url => Cimd};
             _ -> WithClient
         end,
-    {oauth, maps:filter(fun(_, V) -> V =/= undefined end, WithCimd)}.
+    WithDpop =
+        case string:find(Scenario, "dpop") of
+            nomatch -> WithCimd;
+            _ -> WithCimd#{dpop => true}
+        end,
+    {oauth, maps:filter(fun(_, V) -> V =/= undefined end, WithDpop)}.
 
 headless_authorize(Url) ->
     case hackney:request(get, Url, [], <<>>, [with_body, {follow_redirect, false}]) of
