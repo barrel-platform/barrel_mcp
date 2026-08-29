@@ -182,3 +182,144 @@ wait_until(Fun, Timeout) ->
             timer:sleep(50),
             wait_until(Fun, Timeout - 50)
     end.
+
+%%====================================================================
+%% Oversized and refused responses close the connection
+%%====================================================================
+
+overflow_test_() ->
+    {setup, fun overflow_setup/0, fun overflow_cleanup/1,
+        {timeout, 60, [
+            {"an oversized JSON response closes the connection",
+                {timeout, 30, fun test_oversized_json_response/0}},
+            {"an oversized per-request SSE response closes the connection",
+                {timeout, 30, fun test_oversized_request_stream/0}},
+            {"an oversized standalone stream closes the connection",
+                {timeout, 30, fun test_oversized_event_stream/0}},
+            {"a refused standalone stream is closed, not pooled",
+                {timeout, 30, fun test_refused_event_stream/0}}
+        ]}}.
+
+-define(RAW_PORT, 19300).
+
+overflow_setup() ->
+    {ok, _} = application:ensure_all_started(hackney),
+    ok.
+
+overflow_cleanup(_) ->
+    ok.
+
+%% A one-shot raw server: accepts one connection, reads the request
+%% head, hands the socket to `Serve', then reports whether the peer
+%% closed it. hackney's pool would keep a finished connection open,
+%% so `tcp_closed' is the proof that the client called close.
+raw_server(Serve) ->
+    Test = self(),
+    spawn_link(fun() ->
+        {ok, L} = gen_tcp:listen(?RAW_PORT, [
+            binary, {active, false}, {reuseaddr, true}, {packet, raw}
+        ]),
+        Test ! listening,
+        {ok, S} = gen_tcp:accept(L, 10000),
+        ok = gen_tcp:close(L),
+        {ok, _Head} = gen_tcp:recv(S, 0, 5000),
+        Serve(S),
+        Test ! {peer, wait_closed(S, 10000)}
+    end),
+    receive
+        listening -> ok
+    after 5000 -> error(no_listener)
+    end.
+
+wait_closed(S, Timeout) ->
+    inet:setopts(S, [{active, once}]),
+    receive
+        {tcp_closed, S} -> closed;
+        {tcp_error, S, _} -> closed;
+        {tcp, S, _} -> wait_closed(S, Timeout)
+    after Timeout -> still_open
+    end.
+
+%% Writes until the peer goes away; a closed socket ends the loop.
+pump(S, Chunk) ->
+    case gen_tcp:send(S, Chunk) of
+        ok -> pump(S, Chunk);
+        {error, _} -> ok
+    end.
+
+peer_closed() ->
+    receive
+        {peer, Outcome} -> Outcome
+    after 15000 -> error(no_peer_report)
+    end.
+
+expect_too_large(Pid) ->
+    receive
+        {mcp_closed, Pid, Got} -> ?assertMatch({response_too_large, N} when is_integer(N), Got)
+    after 15000 -> error(no_close)
+    end.
+
+connect_raw(Opts) ->
+    barrel_mcp_client_http:connect(
+        self(),
+        maps:merge(#{url => url(?RAW_PORT, "/mcp"), open_event_stream => false}, Opts)
+    ).
+
+test_oversized_json_response() ->
+    raw_server(fun(S) ->
+        ok = gen_tcp:send(S, [
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n",
+            "transfer-encoding: chunked\r\n\r\n"
+        ]),
+        %% 64 KiB chunks, more than the 16 MiB cap can hold.
+        Chunk = [io_lib:format("~.16b\r\n", [65536]), binary:copy(<<"x">>, 65536), "\r\n"],
+        pump(S, iolist_to_binary(Chunk))
+    end),
+    {ok, Pid} = connect_raw(#{}),
+    ok = barrel_mcp_client_http:send(Pid, <<"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}">>),
+    expect_too_large(Pid),
+    ?assertEqual(closed, peer_closed()),
+    barrel_mcp_client_http:close(Pid).
+
+test_oversized_request_stream() ->
+    raw_server(fun(S) ->
+        ok = gen_tcp:send(S, [
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n",
+            "transfer-encoding: chunked\r\n\r\n"
+        ]),
+        %% A data line that never ends: the SSE buffer only grows.
+        Chunk = [io_lib:format("~.16b\r\n", [65536]), binary:copy(<<"d">>, 65536), "\r\n"],
+        pump(S, iolist_to_binary(Chunk))
+    end),
+    {ok, Pid} = connect_raw(#{}),
+    ok = barrel_mcp_client_http:send(Pid, <<"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}">>),
+    expect_too_large(Pid),
+    ?assertEqual(closed, peer_closed()),
+    barrel_mcp_client_http:close(Pid).
+
+test_oversized_event_stream() ->
+    raw_server(fun(S) ->
+        ok = gen_tcp:send(S, [
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n",
+            "transfer-encoding: chunked\r\n\r\n"
+        ]),
+        Chunk = [io_lib:format("~.16b\r\n", [65536]), binary:copy(<<"d">>, 65536), "\r\n"],
+        pump(S, iolist_to_binary(Chunk))
+    end),
+    {ok, Pid} = connect_raw(#{open_event_stream => true}),
+    ok = barrel_mcp_client_http:open_event_stream(Pid),
+    expect_too_large(Pid),
+    ?assertEqual(closed, peer_closed()),
+    barrel_mcp_client_http:close(Pid).
+
+test_refused_event_stream() ->
+    raw_server(fun(S) ->
+        ok = gen_tcp:send(S, [
+            "HTTP/1.1 405 Method Not Allowed\r\ncontent-type: text/plain\r\n",
+            "content-length: 2\r\n\r\nno"
+        ])
+    end),
+    {ok, Pid} = connect_raw(#{open_event_stream => true}),
+    ok = barrel_mcp_client_http:open_event_stream(Pid),
+    ?assertEqual(closed, peer_closed()),
+    barrel_mcp_client_http:close(Pid).

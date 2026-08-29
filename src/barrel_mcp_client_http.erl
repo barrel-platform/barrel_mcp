@@ -288,8 +288,9 @@ handle_info(
             Combined = <<Buf/binary, Chunk/binary>>,
             case byte_size(Combined) > ?MAX_SSE_BUFFER_BYTES of
                 true ->
-                    %% Drop the request from tracking; further chunks
-                    %% for this Ref fall through the unknown-ref clause.
+                    %% Close the connection too, or hackney keeps
+                    %% streaming into a buffer nothing reads.
+                    _ = hackney:close(Ref),
                     Owner ! {mcp_closed, self(), {response_too_large, byte_size(Combined)}},
                     {noreply, State#state{requests = maps:remove(Ref, Reqs)}};
                 false ->
@@ -302,8 +303,7 @@ handle_info(
             Combined = <<Buf/binary, Chunk/binary>>,
             case byte_size(Combined) > ?MAX_RESP_BYTES of
                 true ->
-                    %% Drop the request from tracking; further chunks
-                    %% for this Ref fall through the unknown-ref clause.
+                    _ = hackney:close(Ref),
                     Owner ! {mcp_closed, self(), {response_too_large, byte_size(Combined)}},
                     {noreply, State#state{requests = maps:remove(Ref, Reqs)}};
                 false ->
@@ -570,8 +570,9 @@ stop_stream(#state{sse_ref = Ref} = State) ->
 
 handle_sse_status(_Ref, Status, State) when Status >= 200, Status < 300 ->
     {noreply, State};
-handle_sse_status(_Ref, _Status, State) ->
+handle_sse_status(Ref, _Status, State) ->
     %% Server doesn't support GET SSE (e.g. 405). Quietly drop.
+    _ = hackney:close(Ref),
     {noreply, State#state{sse_ref = undefined}}.
 
 handle_sse_headers(_Ref, _Headers, State) ->
@@ -584,6 +585,7 @@ handle_sse_chunk(Chunk, #state{sse_buffer = Buf, owner = Owner} = State) ->
             %% Drop the long-lived SSE channel; reopen on the next
             %% timer tick so a transient overrun doesn't permanently
             %% disable server-to-client traffic.
+            _ = hackney:close(State#state.sse_ref),
             Owner ! {mcp_closed, self(), {response_too_large, byte_size(Combined)}},
             erlang:send_after(1000, self(), reopen_sse),
             {noreply, State#state{

@@ -22,7 +22,7 @@
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_http_listener).
 
--export([start/3, start_link/3, stop/1]).
+-export([start/3, start_link/3, stop/1, acceptors/1]).
 
 %% Spawned entry points (must be exported for `spawn/3`-style traces
 %% and for clarity; called via funs internally).
@@ -122,7 +122,7 @@ listener_init(Parent, Name, ListenOpts, EngineConfig) ->
                     ),
                     Counter = atomics:new(1, [{signed, false}]),
                     Listener = self(),
-                    _ = [
+                    Spawn = fun() ->
                         spawn_link(fun() ->
                             acceptor_loop(
                                 LSock,
@@ -133,10 +133,10 @@ listener_init(Parent, Name, ListenOpts, EngineConfig) ->
                                 Max
                             )
                         end)
-                     || _ <- lists:seq(1, N)
-                    ],
+                    end,
+                    Acceptors = maps:from_list([{Spawn(), true} || _ <- lists:seq(1, N)]),
                     proc_lib:init_ack({ok, self()}),
-                    listener_loop(Parent, LSock, Transport, Counter);
+                    listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors);
                 _ ->
                     close_listen(Transport, LSock),
                     proc_lib:init_ack({error, {already_started, Name}}),
@@ -147,7 +147,7 @@ listener_init(Parent, Name, ListenOpts, EngineConfig) ->
             exit(normal)
     end.
 
-listener_loop(Parent, LSock, Transport, Counter) ->
+listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors) ->
     receive
         {'EXIT', Parent, _Reason} ->
             %% The supervisor is taking us down. Same teardown as an
@@ -169,16 +169,44 @@ listener_loop(Parent, LSock, Transport, Counter) ->
             %% stopping with `{shutdown, _}' would kill it), so it
             %% cannot reliably release the slot itself.
             _ = monitor(process, Pid),
-            listener_loop(Parent, LSock, Transport, Counter);
+            listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors);
         {'DOWN', _Ref, process, _Pid, _Reason} ->
             atomics:sub(Counter, 1, 1),
-            listener_loop(Parent, LSock, Transport, Counter);
+            listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors);
+        {acceptors, From, Ref} ->
+            From ! {Ref, maps:keys(Acceptors)},
+            listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors);
+        {'EXIT', Pid, Reason} when is_map_key(Pid, Acceptors) ->
+            %% An acceptor ends normally only when the listen socket is
+            %% gone; anything else leaves the pool short, so refill it.
+            Acceptors1 =
+                case Reason of
+                    normal ->
+                        maps:remove(Pid, Acceptors);
+                    shutdown ->
+                        maps:remove(Pid, Acceptors);
+                    _ ->
+                        logger:warning("mcp http acceptor exited: ~p; replacing", [Reason]),
+                        (maps:remove(Pid, Acceptors))#{Spawn() => true}
+                end,
+            listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors1);
         {'EXIT', _Pid, _Reason} ->
-            %% A connection or acceptor process exited; ignore (the
-            %% slot is released by the matching `DOWN' above).
-            listener_loop(Parent, LSock, Transport, Counter);
+            %% A connection process exited; the slot is released by the
+            %% matching `DOWN' above.
+            listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors);
         _Other ->
-            listener_loop(Parent, LSock, Transport, Counter)
+            listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors)
+    end.
+
+%% @doc The live acceptor pids of a listener. For tests.
+-spec acceptors(atom()) -> [pid()].
+acceptors(Name) ->
+    Ref = make_ref(),
+    Name ! {acceptors, self(), Ref},
+    receive
+        {Ref, Pids} -> Pids
+    after 5000 ->
+        error({no_listener, Name})
     end.
 
 listen(ListenOpts) ->
@@ -502,10 +530,23 @@ spawn_handler(Proto, Conn, StreamId, Method, Path, Headers, Handler) ->
                 Handler(Proto, Conn, StreamId, Method, Path, Headers)
             catch
                 Class:Reason:Stack ->
-                    logger:error(
-                        "mcp http handler crash: ~p:~p~n~p",
-                        [Class, Reason, Stack]
-                    ),
+                    %% A connection that went away mid-handler is not a
+                    %% crash: the exit is the listener's shutdown or the
+                    %% connection statem already gone.
+                    _ =
+                        case {Class, Reason} of
+                            {exit, shutdown} ->
+                                ok;
+                            {exit, {shutdown, _}} ->
+                                ok;
+                            {exit, {noproc, {gen_statem, call, _}}} ->
+                                ok;
+                            _ ->
+                                logger:error(
+                                    "mcp http handler crash: ~p:~p~n~p",
+                                    [Class, Reason, Stack]
+                                )
+                        end,
                     try
                         Proto:send_response(
                             Conn,

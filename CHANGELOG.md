@@ -53,6 +53,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An HTTP acceptor that dies is replaced; the listener used to run one
+  short for the rest of its life. `barrel_mcp_http_listener:acceptors/1`
+  lists the live pool.
+- The HTTP client closes the hackney connection when it drops a
+  response for exceeding the size cap, and when the server refuses the
+  standalone event stream, instead of leaving it streaming or pooled.
+- A request handler that loses its connection mid-response (listener
+  shutdown, or the connection statem already gone) is no longer logged
+  as a handler crash.
+- The `registered` list in the application resource names every
+  locally registered process.
 - The legacy HTTP+SSE client resolves the `endpoint` event against
   the stream's URL and refuses one on another origin (scheme, host or
   port) with `{mcp_closed, _, {cross_origin, Url}}`, sending nothing

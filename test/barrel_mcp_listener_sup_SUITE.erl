@@ -25,6 +25,7 @@
 -export([
     listener_is_supervised/1,
     restarts_after_crash/1,
+    acceptor_is_replaced/1,
     application_stop_releases_port/1,
     stop_then_start_again/1,
     standalone_without_application/1
@@ -36,6 +37,7 @@ all() ->
     [
         listener_is_supervised,
         restarts_after_crash,
+        acceptor_is_replaced,
         application_stop_releases_port,
         stop_then_start_again,
         standalone_without_application
@@ -183,3 +185,25 @@ case_index(TC) ->
 case_index(TC, [TC | _], N) -> N;
 case_index(TC, [_ | Rest], N) -> case_index(TC, Rest, N + 1);
 case_index(_TC, [], N) -> N.
+
+%% An acceptor that dies used to leave the pool one short for the life
+%% of the listener.
+acceptor_is_replaced(Config) ->
+    Port = ?config(port, Config),
+    {ok, _} = barrel_mcp:start_http_stream(#{port => Port, acceptors => 2}),
+    [A, B] = barrel_mcp_http_listener:acceptors(barrel_mcp_http_stream_listener),
+    exit(A, kill),
+    wait_until(
+        fun() ->
+            case barrel_mcp_http_listener:acceptors(barrel_mcp_http_stream_listener) of
+                [_, _] = Pids ->
+                    lists:member(B, Pids) andalso not lists:member(A, Pids) andalso
+                        lists:all(fun is_process_alive/1, Pids);
+                _ ->
+                    false
+            end
+        end,
+        5000
+    ),
+    ?assert(serves(Port)),
+    ok.

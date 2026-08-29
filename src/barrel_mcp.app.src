@@ -6,7 +6,10 @@
         barrel_mcp_sup,
         barrel_mcp_session,
         barrel_mcp_tasks,
-        barrel_mcp_client_sup
+        barrel_mcp_client_sup,
+        barrel_mcp_elicitation,
+        barrel_mcp_listener_sup,
+        barrel_mcp_subscriptions
     ]},
     {mod, {barrel_mcp_app, []}},
     {applications, [kernel, stdlib, crypto, h1, h2, hackney]},

@@ -1,7 +1,7 @@
 %%%-------------------------------------------------------------------
 %%% @author Benoit Chesneau
 %%% @copyright 2024-2026 Benoit Chesneau
-%%% @doc MCP Streamable HTTP Transport (Protocol Version 2025-03-26).
+%%% @doc MCP Streamable HTTP Transport (protocol 2025-03-26 through 2026-07-28).
 %%%
 %%% Implements the MCP Streamable HTTP transport for Claude Code
 %%% integration on the built-in h1/h2 server
