@@ -57,6 +57,13 @@
     input_required_request_state/2,
     input_required_multiple_inputs/2,
     input_required_multi_round/2,
+    greet/1,
+    slow_compute/2,
+    failing_job/1,
+    protocol_error_job/1,
+    confirm_delete/2,
+    multi_input/2,
+    tool_with_task/2,
     input_required_tampered_state/2,
     schema_2020_12/1,
     missing_capability/2,
@@ -408,6 +415,26 @@ fixture() ->
         {<<"test_input_required_result_request_state">>, input_required_request_state, #{}},
         {<<"test_input_required_result_multiple_inputs">>, input_required_multiple_inputs, #{}},
         {<<"test_input_required_result_multi_round">>, input_required_multi_round, #{}},
+        %% SEP-2663 fixtures: a sync tool and the task-supporting ones.
+        {<<"greet">>, greet, #{
+            input_schema => #{
+                <<"type">> => <<"object">>,
+                <<"properties">> => #{<<"name">> => #{<<"type">> => <<"string">>}}
+            }
+        }},
+        {<<"slow_compute">>, slow_compute, #{
+            task_support => optional,
+            input_schema => #{
+                <<"type">> => <<"object">>,
+                <<"properties">> => #{<<"seconds">> => #{<<"type">> => <<"number">>}}
+            }
+        }},
+        %% The required-task-error scenario calls this one undeclared.
+        {<<"failing_job">>, failing_job, #{task_support => required}},
+        {<<"protocol_error_job">>, protocol_error_job, #{task_support => optional}},
+        {<<"confirm_delete">>, confirm_delete, #{task_support => optional}},
+        {<<"multi_input">>, multi_input, #{task_support => optional}},
+        {<<"test_tool_with_task">>, tool_with_task, #{task_support => required}},
         {<<"test_input_required_result_tampered_state">>, input_required_tampered_state, #{}},
         {<<"json_schema_2020_12_tool">>, schema_2020_12, #{input_schema => schema_2020_12_input()}},
         {<<"test_missing_capability">>, missing_capability, #{}},
@@ -1119,3 +1146,69 @@ find_root(Dir) ->
                 Parent -> find_root(Parent)
             end
     end.
+
+%%====================================================================
+%% SEP-2663 fixtures
+%%====================================================================
+
+greet(Args) ->
+    Name = maps:get(<<"name">>, Args, <<"world">>),
+    <<"Hello, ", Name/binary, "!">>.
+
+%% `seconds: 0' answers inside the inline window; anything else becomes
+%% a task. Sleeping in steps keeps a cancel prompt.
+slow_compute(Args, _Ctx) ->
+    Seconds = maps:get(<<"seconds">>, Args, 2),
+    Steps = max(0, round(Seconds * 10)),
+    _ = [timer:sleep(100) || _ <- lists:seq(1, Steps)],
+    text(<<"computed">>).
+
+failing_job(_Args) ->
+    timer:sleep(1000),
+    {tool_error, [text(<<"the job failed">>)]}.
+
+protocol_error_job(_Args) ->
+    timer:sleep(300),
+    error(protocol_error_job).
+
+%% One question, asked once the task exists, answered through
+%% tasks/update.
+confirm_delete(_Args, Ctx) ->
+    case barrel_mcp:input(Ctx, <<"confirm">>) of
+        none ->
+            timer:sleep(300),
+            {input_required, #{<<"confirm">> => elicitation_request(<<"Delete it?">>)}, asked};
+        {ok, _} ->
+            text(<<"deleted">>)
+    end.
+
+%% Two questions at once, so a partial tasks/update leaves one pending.
+multi_input(_Args, Ctx) ->
+    case {barrel_mcp:input(Ctx, <<"first">>), barrel_mcp:input(Ctx, <<"second">>)} of
+        {{ok, _}, {ok, _}} ->
+            text(<<"both answered">>);
+        _ ->
+            timer:sleep(300),
+            {input_required,
+                #{
+                    <<"first">> => elicitation_request(<<"First?">>),
+                    <<"second">> => elicitation_request(<<"Second?">>)
+                },
+                asked}
+    end.
+
+%% Round one is a synchronous MRTR round; round two, with the name in
+%% hand, works past the inline window and completes as a task.
+tool_with_task(_Args, Ctx) ->
+    case barrel_mcp:input(Ctx, <<"user_name">>) of
+        none ->
+            {input_required, #{<<"user_name">> => elicitation_request(<<"Your name?">>)}, round1};
+        {ok, Answer} ->
+            timer:sleep(500),
+            text(<<"Hello, ", (task_answered_name(Answer))/binary, "!">>)
+    end.
+
+task_answered_name(#{<<"content">> := #{<<"user_name">> := Name}}) when is_binary(Name) -> Name;
+task_answered_name(#{<<"content">> := #{<<"name">> := Name}}) when is_binary(Name) -> Name;
+task_answered_name(#{<<"result">> := Result}) -> task_answered_name(Result);
+task_answered_name(_) -> <<"stranger">>.
