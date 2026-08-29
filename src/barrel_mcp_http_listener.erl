@@ -187,6 +187,8 @@ listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors) ->
                         maps:remove(Pid, Acceptors);
                     _ ->
                         logger:warning("mcp http acceptor exited: ~p; replacing", [Reason]),
+                        %% A replacement that dies at once must not spin.
+                        timer:sleep(?ACCEPT_ERROR_BACKOFF),
                         (maps:remove(Pid, Acceptors))#{Spawn() => true}
                 end,
             listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors1);

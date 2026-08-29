@@ -40,12 +40,19 @@ worker(Relay, Worker) ->
     ok.
 
 %% @doc Stop forwarding and wait for the acknowledgement, after which
-%% nothing more lands in the caller's mailbox.
+%% nothing more lands in the caller's mailbox. A relay that has already
+%% ended (its worker finished and it forwarded everything) counts as
+%% held: what it forwarded is in the caller's mailbox.
 -spec hold(pid()) -> ok.
 hold(Relay) ->
+    Ref = monitor(process, Relay),
     Relay ! {hold, self()},
     receive
-        {relay_held, Relay} -> ok
+        {relay_held, Relay} ->
+            erlang:demonitor(Ref, [flush]),
+            ok;
+        {'DOWN', Ref, process, Relay, _Reason} ->
+            ok
     after infinity -> ok
     end.
 

@@ -117,6 +117,8 @@
     %% person's consent step never blocks this process.
     challenged = [] :: [#req{}],
     auth_flow :: undefined | {pid(), reference()},
+    %% Pending stream resumptions by request id, so a cancel can drop one.
+    resumes = #{} :: #{term() => reference()},
     %% Per-tool `x-mcp-header' bindings, learned from `tools/list'.
     %% Held here rather than passed per send: the headers are derived
     %% from the body about to go out, and this is where that happens.
@@ -243,7 +245,13 @@ handle_cast({cancel_request, RequestId}, #state{requests = Reqs} = State) ->
     Refs = [R || {R, #req{request_id = Id}} <- maps:to_list(Reqs), Id =:= RequestId],
     Rest = lists:foldl(fun maps:remove/2, Reqs, Refs),
     _ = [close_ref(R) || R <- Refs],
-    {noreply, State#state{requests = Rest}};
+    Resumes = State#state.resumes,
+    _ =
+        case maps:find(RequestId, Resumes) of
+            {ok, Timer} -> erlang:cancel_timer(Timer);
+            error -> ok
+        end,
+    {noreply, State#state{requests = Rest, resumes = maps:remove(RequestId, Resumes)}};
 handle_cast(close, State) ->
     _ = send_delete(State),
     {stop, normal, State};
@@ -251,7 +259,10 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %% Resume an unanswered response stream from its last event.
-handle_info({resume, #req{last_event_id = Id} = R}, #state{requests = Reqs} = State) ->
+handle_info(
+    {resume, #req{last_event_id = Id, request_id = ReqId} = R}, #state{requests = Reqs} = State0
+) ->
+    State = State0#state{resumes = maps:remove(ReqId, State0#state.resumes)},
     Headers = [{<<"last-event-id">>, Id} | build_headers(State)],
     case
         hackney:request(
@@ -440,8 +451,11 @@ finalize_request(
             undefined -> State#state.sse_retry_ms;
             Ms -> Ms
         end,
-    _ = erlang:send_after(Delay, self(), {resume, R#req{resumes = N + 1}}),
-    State#state{requests = maps:remove(Ref, Reqs)};
+    Timer = erlang:send_after(Delay, self(), {resume, R#req{resumes = N + 1}}),
+    State#state{
+        requests = maps:remove(Ref, Reqs),
+        resumes = (State#state.resumes)#{R#req.request_id => Timer}
+    };
 finalize_request(Ref, #req{format = sse} = _R, #state{requests = Reqs, auth = Auth} = State) ->
     %% SSE stream ended (server done). Drop the request slot.
     State#state{requests = maps:remove(Ref, Reqs), auth = barrel_mcp_client_auth:settled(Auth)};
@@ -727,10 +741,12 @@ handle_sse_chunk(Chunk, #state{sse_buffer = Buf, owner = Owner} = State) ->
         false ->
             {Events, NewBuf} = parse_sse(Combined),
             State1 = forward_sse_events(Events, State),
+            %% A server asking for less than 100 ms would have us hammer
+            %% it on every close.
             Retry =
                 case sse_retry_ms(Combined) of
                     undefined -> State1#state.sse_retry_ms;
-                    Ms -> Ms
+                    Ms -> max(100, Ms)
                 end,
             {noreply, State1#state{sse_buffer = NewBuf, sse_retry_ms = Retry}}
     end.
