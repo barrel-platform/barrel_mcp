@@ -88,11 +88,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata document, and a terminal error on the first document found
   when its `issuer` differs from the issuer queried, when it does not
   advertise `S256` PKCE, or when an endpoint is not `https`.
-- `barrel_mcp_clients` is no longer a process. The client supervisor's
-  child list is the registry, so a crashed client keeps its
-  `ServerId` across the restart. While a restart is still failing,
-  `whereis_client/1` answers `undefined`, `start_client/2` answers
-  `{error, {restarting, Id}}` and `stop_client/1` clears it.
+- `barrel_mcp_clients` is no longer a process. The supervision tree is
+  the registry: one `barrel_mcp_client_shell` supervisor per
+  `ServerId`, holding the client with its own restart budget from the
+  spec's `restart => #{intensity, period}` (5 in 60 s by default). A
+  crashed client keeps its `ServerId` across the restart; while a
+  restart is still failing, `whereis_client/1` answers `undefined`,
+  `start_client/2` answers `{error, {restarting, Id}}` and
+  `stop_client/1` clears it. A client that exhausts its budget, or
+  leaves normally, frees its id and no other client is affected.
 - A legacy (2024-11-05 through 2025-11-25) `tools/call` over Streamable
   HTTP is answered as an SSE stream whenever the client's `Accept`
   lists `text/event-stream`, which the transport already requires it

@@ -96,7 +96,12 @@
             | {bearer, binary()}
             | {oauth, map()}
             | {oauth_client_credentials, map()}
-            | {oauth_enterprise, map()},
+            | {oauth_enterprise, map()}
+            | {oauth_jwt_bearer, map()},
+        %% The client's own restart budget under `barrel_mcp_clients':
+        %% at most `intensity' restarts in `period' seconds (5 in 60 by
+        %% default) before its id is given up on.
+        restart => #{intensity => non_neg_integer(), period => pos_integer()},
         %% Which revision to speak. `auto' (the default) probes with
         %% `server/discover' and falls back to the `initialize'
         %% handshake when the server does not answer it. Pinning a

@@ -7,10 +7,10 @@
 %%% namespacing across servers is the host's policy and is not
 %%% enforced here.
 %%%
-%%% The registry is the supervisor's child list. A client is a
-%%% transient child of {@link barrel_mcp_client_sup} under its
-%%% `ServerId', so a restart keeps the id bound to the new pid and
-%%% there is no second table to fall out of step with it.
+%%% The registry is the supervision tree: {@link barrel_mcp_client_sup}
+%%% holds one {@link barrel_mcp_client_shell} per `ServerId', and the
+%%% shell holds the client. A restart keeps the id bound to the new
+%%% pid, and there is no second table to fall out of step with it.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_clients).
@@ -30,8 +30,8 @@
 
 %% @doc Start a supervised `barrel_mcp_client' worker registered as
 %% `ServerId'. Fails with `{already_registered, Pid}' if a worker
-%% already holds that id, and `{restarting, ServerId}' while the
-%% supervisor is still retrying a failed restart of it.
+%% already holds that id, and `{restarting, ServerId}' while its shell
+%% is still retrying a failed restart of it.
 %%
 %% Example:
 %% ```
@@ -43,18 +43,28 @@
 -spec start_client(term(), barrel_mcp_client:connect_spec()) ->
     {ok, pid()} | {error, term()}.
 start_client(ServerId, Spec) ->
-    %% `start_child/2' drops a terminated spec to allow a reconnect,
-    %% which would also drop one the supervisor is still retrying.
-    case lists:keyfind(ServerId, 1, supervisor:which_children(?SUP)) of
-        {_, restarting, _, _} ->
-            {error, {restarting, ServerId}};
-        _ ->
-            case barrel_mcp_client_sup:start_child(ServerId, Spec) of
-                {ok, _} = Ok -> Ok;
-                {error, {already_started, Pid}} -> {error, {already_registered, Pid}};
-                {error, _} = Err -> Err
-            end
+    case barrel_mcp_client_sup:start_child(ServerId, Spec) of
+        {ok, Shell} ->
+            case barrel_mcp_client_shell:client(Shell) of
+                Pid when is_pid(Pid) -> {ok, Pid};
+                _ -> {error, {restarting, ServerId}}
+            end;
+        {error, {already_started, Shell}} ->
+            case barrel_mcp_client_shell:client(Shell) of
+                Pid when is_pid(Pid) -> {error, {already_registered, Pid}};
+                _ -> {error, {restarting, ServerId}}
+            end;
+        {error, {shutdown, Reason}} ->
+            %% The shell's client refused to start, so the shell shut
+            %% itself down: the id is free again and the reason is
+            %% the client's.
+            {error, unwrap_start_error(Reason)};
+        {error, _} = Err ->
+            Err
     end.
+
+unwrap_start_error({failed_to_start_child, client, Reason}) -> Reason;
+unwrap_start_error(Reason) -> Reason.
 
 %% @doc Stop the client worker registered as `ServerId'. Returns
 %% `{error, not_found}' if no worker holds that id.
@@ -62,6 +72,8 @@ start_client(ServerId, Spec) ->
 stop_client(ServerId) ->
     case supervisor:terminate_child(?SUP, ServerId) of
         ok ->
+            %% A temporary child's spec goes with it; this only matters
+            %% for a spec left behind, and either answer is fine.
             _ = supervisor:delete_child(?SUP, ServerId),
             ok;
         {error, not_found} ->
@@ -73,11 +85,22 @@ stop_client(ServerId) ->
 -spec whereis_client(term()) -> pid() | undefined.
 whereis_client(ServerId) ->
     case lists:keyfind(ServerId, 1, supervisor:which_children(?SUP)) of
-        {_, Pid, _, _} when is_pid(Pid) -> Pid;
-        _ -> undefined
+        {_, Shell, _, _} when is_pid(Shell) ->
+            case barrel_mcp_client_shell:client(Shell) of
+                Pid when is_pid(Pid) -> Pid;
+                _ -> undefined
+            end;
+        _ ->
+            undefined
     end.
 
 %% @doc Snapshot the registry as `[{ServerId, Pid}]'.
 -spec list_clients() -> [{term(), pid()}].
 list_clients() ->
-    [{Id, Pid} || {Id, Pid, _, _} <- supervisor:which_children(?SUP), is_pid(Pid)].
+    [
+        {Id, Pid}
+     || {Id, Shell, _, _} <- supervisor:which_children(?SUP),
+        is_pid(Shell),
+        Pid <- [barrel_mcp_client_shell:client(Shell)],
+        is_pid(Pid)
+    ].
