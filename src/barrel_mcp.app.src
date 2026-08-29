@@ -1,6 +1,6 @@
 {application, barrel_mcp, [
     {description, "MCP Protocol Library for Erlang"},
-    {vsn, "3.0.0"},
+    {vsn, "3.0.1"},
     {registered, [
         barrel_mcp_registry,
         barrel_mcp_sup,
@@ -15,7 +15,7 @@
     {applications, [kernel, stdlib, crypto, h1, h2, hackney]},
     {env, [
         {server_name, <<"barrel">>},
-        {server_version, <<"3.0.0">>},
+        {server_version, <<"3.0.1">>},
         %% 30 minutes default
         {session_ttl, 1800000}
     ]},
