@@ -37,6 +37,7 @@
 
 -export([
     python_client_against_erlang_server/1,
+    post_only_python_client_against_erlang_server/1,
     erlang_client_against_python_server/1,
     modern_python_client_against_erlang_server/1,
     modern_erlang_client_against_python_server/1,
@@ -50,9 +51,9 @@
     echo_tool/1,
     slow_tool/2,
     trigger_update_tool/1,
-    ask_llm_tool/1,
-    ask_user_tool/1,
-    list_roots_tool/1,
+    ask_llm_tool/2,
+    ask_user_tool/2,
+    list_roots_tool/2,
     progress_tool/2,
     structured_tool/1,
     error_tool/1,
@@ -79,6 +80,7 @@
 all() ->
     [
         python_client_against_erlang_server,
+        post_only_python_client_against_erlang_server,
         erlang_client_against_python_server,
         modern_python_client_against_erlang_server,
         modern_erlang_client_against_python_server,
@@ -123,7 +125,18 @@ python_client_against_erlang_server(Config) ->
         legacy_direction_a(Python)
     end).
 
+%% The same reference client, forbidden its standalone GET stream. A
+%% server request then has only the running call's own response stream
+%% to travel on, which is what the official runner's client relies on.
+post_only_python_client_against_erlang_server(Config) ->
+    with_python(python, Config, "INTEROP_PYTHON", fun(Python) ->
+        legacy_direction_a(Python, ["--post-only"])
+    end).
+
 legacy_direction_a(Python) ->
+    legacy_direction_a(Python, []).
+
+legacy_direction_a(Python, Flags) ->
     ok = ensure_fixture(),
     {ok, _} = barrel_mcp:start_http_stream(#{
         port => ?PORT,
@@ -132,7 +145,8 @@ legacy_direction_a(Python) ->
     Url = io_lib:format("http://127.0.0.1:~B/mcp", [?PORT]),
     Script = filename:join(["test", "interop", "client.py"]),
     Cwd = root_dir(),
-    {Status, Output} = run_python(Python, [Script, lists:flatten(Url)], Cwd),
+    Args = [Script, lists:flatten(Url) | Flags],
+    {Status, Output} = run_python(Python, Args, Cwd),
     case Status of
         0 ->
             true = string:find(Output, "OK") =/= nomatch,
@@ -914,7 +928,7 @@ trigger_update_tool(_) ->
 
 %% Ask the only sampling-capable session for a message and return
 %% the text. Mirrors examples/sampling_host's ask_sampler/1.
-ask_llm_tool(_) ->
+ask_llm_tool(_, Ctx) ->
     [SessionId | _] = barrel_mcp:list_sessions_with_sampling(),
     Params = #{
         <<"messages">> =>
@@ -933,14 +947,19 @@ ask_llm_tool(_) ->
         barrel_mcp:sampling_create_message(
             SessionId,
             Params,
-            #{timeout_ms => 5000}
+            ask_opts(Ctx)
         ),
     maps:get(<<"text">>, maps:get(<<"content">>, Result)).
+
+%% The running call's own stream when it has one, else the session's
+%% GET stream. A client that never opens the GET stream needs the first.
+ask_opts(Ctx) ->
+    #{timeout_ms => 5000, channel => maps:get(channel, Ctx, undefined)}.
 
 %% Ask the only elicitation-capable session for a structured
 %% answer and return what the user picked. Form-mode payload
 %% per the spec.
-ask_user_tool(_) ->
+ask_user_tool(_, Ctx) ->
     [SessionId | _] = barrel_mcp:list_sessions_with_elicitation(),
     Params = #{
         <<"mode">> => <<"form">>,
@@ -955,11 +974,7 @@ ask_user_tool(_) ->
                     }
             }
     },
-    {ok, Result} = barrel_mcp:elicit_create(
-        SessionId,
-        Params,
-        #{timeout_ms => 5000}
-    ),
+    {ok, Result} = barrel_mcp:elicit_create(SessionId, Params, ask_opts(Ctx)),
     %% The Python callback returns action=accept,
     %% content={"colour": "blue"}. Surface the colour as text.
     Content = maps:get(<<"content">>, Result, #{}),
@@ -967,12 +982,9 @@ ask_user_tool(_) ->
 
 %% Ask the only roots-capable session for its roots and return the
 %% first root's name (so we have a deterministic string to assert on).
-list_roots_tool(_) ->
+list_roots_tool(_, Ctx) ->
     [SessionId | _] = barrel_mcp:list_sessions_with_roots(),
-    {ok, Roots} = barrel_mcp:roots_list(
-        SessionId,
-        #{timeout_ms => 5000}
-    ),
+    {ok, Roots} = barrel_mcp:roots_list(SessionId, ask_opts(Ctx)),
     [#{<<"name">> := N} | _] = Roots,
     N.
 

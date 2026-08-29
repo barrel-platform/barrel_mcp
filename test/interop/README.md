@@ -16,7 +16,10 @@ handshake era, v2 speaks `2026-07-28` and replaced `FastMCP` with
   side stands up a Streamable HTTP listener; the client connects,
   lists / calls the registered tool, reads a resource, lists prompts.
   The handshake-era script also sets the log level and drives
-  sampling, elicitation and roots. The modern one additionally covers:
+  sampling, elicitation and roots; it runs a second time with
+  `--post-only`, never opening the GET stream, so those three server
+  requests must arrive on the call's own response stream. The modern
+  one additionally covers:
   - the `server/discover` probe and the `_meta` serverInfo stamp
   - `resultType` on every result and the freshness hints on a
     cacheable one
@@ -45,7 +48,7 @@ configured, so the default `rebar3 ct` keeps working without Python.
 
 ```sh
 make interop-setup   # creates both venvs
-make interop-test    # runs all four cases
+make interop-test    # Python cases, then the conformance runner
 ```
 
 The venvs live at `test/interop/.venv/` and
