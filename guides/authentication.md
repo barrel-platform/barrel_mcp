@@ -742,6 +742,39 @@ response.
 | Enterprise SSO; user identity must flow to MCP | `enterprise_managed` (`{oauth_enterprise, ...}`) |
 | No `client_id` yet | [Client registration](#client-registration) first, then one of the above |
 
+### Endpoints discovered from the challenge
+
+The three non-interactive grants above also work without any endpoint
+in the config. On the first 401 the handle discovers the protected
+resource metadata and the authorization server the way the
+authorization-code flow does, and takes the token endpoint, the
+resource indicator, the ID-JAG audience (the issuer) and the scope
+from there:
+
+```erlang
+auth => {oauth_client_credentials, #{client_id => <<"svc">>, client_secret => <<"...">>}}
+auth => {oauth_client_credentials, #{client_id => <<"svc">>,
+                                     private_key => {PemBinary, <<"ES256">>}}}   % private_key_jwt
+auth => {oauth_enterprise, #{client_id => <<"...">>, client_secret => <<"...">>,
+                             idp_token_endpoint => <<"https://idp/token">>,
+                             subject_token => IdToken,
+                             subject_token_type => <<"urn:ietf:params:oauth:token-type:id_token">>}}
+auth => {oauth_jwt_bearer, #{client_id => <<"workload">>, assertion => SignedJwt}}
+```
+
+`{oauth_jwt_bearer, ...}` is RFC 7523 with an assertion you obtained
+elsewhere, for workload identity federation (SEP-1933).
+
+### DPoP
+
+Add `dpop => true` to any of the OAuth configs to bind tokens to a
+key the handle generates (RFC 9449, SEP-1932). Every token request and
+every MCP request then carries a `DPoP` proof; a token the server
+issues as `token_type: DPoP` is presented with the `DPoP` scheme, and a
+`use_dpop_nonce` challenge from either server is answered with a fresh
+proof carrying the nonce. The key lives in the handle and is never
+stored.
+
 ## Plaintext authorization servers
 
 Every authorization-server URL the client uses, configured or

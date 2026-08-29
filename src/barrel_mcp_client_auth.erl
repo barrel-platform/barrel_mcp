@@ -12,7 +12,7 @@
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_client_auth).
 
--export([new/1, header/1, refresh/2, challenge/2, settled/1]).
+-export([new/1, header/1, refresh/2, challenge/2, settled/1, request_headers/3]).
 
 -export_type([t/0, handle/0, challenge/0]).
 
@@ -28,7 +28,9 @@
     status := 401 | 403,
     www_authenticate := binary() | undefined,
     server_url := binary(),
-    protocol_version := binary() | undefined
+    protocol_version := binary() | undefined,
+    %% The `DPoP-Nonce' response header, when the server sent one.
+    dpop_nonce => binary() | undefined
 }.
 
 %% A handle that can run a whole authorization from a challenge
@@ -37,7 +39,12 @@
 -callback challenge(handle(), challenge()) -> {ok, handle()} | {error, term()}.
 %% The transport reports a request the server accepted.
 -callback settled(handle()) -> handle().
--optional_callbacks([challenge/2, settled/1]).
+%% Headers for one request beyond `Authorization', such as a DPoP proof
+%% bound to this method and URL. The handle comes back because a proof
+%% changes state (`jti', nonce).
+-callback request_headers(handle(), Method :: binary(), Url :: binary()) ->
+    {[{binary(), binary()}], handle()}.
+-optional_callbacks([challenge/2, settled/1, request_headers/3]).
 
 %% Build the auth handle from a config term.
 %%   `none' — no auth header sent.
@@ -79,6 +86,7 @@
     | {oauth, map()}
     | {oauth_client_credentials, map()}
     | {oauth_enterprise, map()}
+    | {oauth_jwt_bearer, map()}
 ) ->
     t() | {error, term()}.
 new(none) ->
@@ -101,6 +109,12 @@ new({oauth_client_credentials, Config}) when is_map(Config) ->
     end;
 new({oauth_enterprise, Config}) when is_map(Config) ->
     Cfg = Config#{grant_type => enterprise_managed},
+    case barrel_mcp_client_auth_oauth:init(Cfg) of
+        {ok, H} -> {barrel_mcp_client_auth_oauth, H};
+        Err -> Err
+    end;
+new({oauth_jwt_bearer, Config}) when is_map(Config) ->
+    Cfg = Config#{grant_type => jwt_bearer},
     case barrel_mcp_client_auth_oauth:init(Cfg) of
         {ok, H} -> {barrel_mcp_client_auth_oauth, H};
         Err -> Err
@@ -137,6 +151,19 @@ challenge({Mod, H}, Challenge) ->
     case Result of
         {ok, H1} -> {ok, {Mod, H1}};
         Err -> Err
+    end.
+
+%% @doc Extra headers for one request, and the handle after issuing them.
+-spec request_headers(t(), binary(), binary()) -> {[{binary(), binary()}], t()}.
+request_headers(none, _Method, _Url) ->
+    {[], none};
+request_headers({Mod, H}, Method, Url) ->
+    case erlang:function_exported(Mod, request_headers, 3) of
+        true ->
+            {Headers, H1} = Mod:request_headers(H, Method, Url),
+            {Headers, {Mod, H1}};
+        false ->
+            {[], {Mod, H}}
     end.
 
 %% @doc Tell the handle a request was accepted.

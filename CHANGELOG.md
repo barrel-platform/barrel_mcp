@@ -54,8 +54,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `/authorize` `/token` `/register` fallbacks of that revision.
   An optional `store => {Module, Arg}` (`barrel_mcp_client_auth_store`)
   persists the client and tokens.
-- `barrel_mcp_client_auth` has two optional callbacks, `challenge/2`
-  and `settled/1`. The HTTP transport hands a 401, or a 403
+- The non-interactive grants discover their endpoints from the 401:
+  `{oauth_client_credentials, ...}` and `{oauth_enterprise, ...}` no
+  longer need `token_endpoint`, `as_token_endpoint`, `audience` or
+  `resource` in the config, and `{oauth_jwt_bearer, #{client_id,
+  assertion}}` (RFC 7523, SEP-1933) is new. Client credentials accept
+  `private_key => {Pem, Alg}` for `private_key_jwt` assertions, signed
+  by the new `barrel_mcp_jwt` (ES256, RS256, HS256).
+- `dpop => true` binds tokens with DPoP (RFC 9449, SEP-1932): a P-256
+  proof key per handle, a proof on every token request and every MCP
+  request (`ath`, `htu`, `htm`, `jti`), the `DPoP` authorization
+  scheme once the server issues a bound token, and both nonce
+  challenges (`use_dpop_nonce` from the authorization server and the
+  resource server) answered with a fresh proof.
+- `barrel_mcp_client_auth` has three optional callbacks, `challenge/2`,
+  `settled/1` and `request_headers/3`. The HTTP transport hands a 401, or a 403
   `insufficient_scope`, to a worker running the handle's `challenge/2`
   and keeps serving; refused requests wait for that one flow and are
   reissued when it returns, three rounds at most per request.

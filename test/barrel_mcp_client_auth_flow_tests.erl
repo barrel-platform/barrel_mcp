@@ -51,7 +51,12 @@ flow_test_() ->
             {"the registered auth method is used for refresh", fun test_refresh_uses_method/0},
             {"2025-03-26: metadata at the server origin, no PRM", fun test_legacy_metadata/0},
             {"2025-03-26: fixed endpoints when there is no metadata", fun test_legacy_fallbacks/0},
-            {"2024-11-05 has no authorization", fun test_2024/0}
+            {"2024-11-05 has no authorization", fun test_2024/0},
+            {"client credentials with a secret, endpoint discovered", fun test_cc_basic/0},
+            {"client credentials with private_key_jwt", fun test_cc_jwt/0},
+            {"enterprise-managed authorization, discovered", fun test_ema/0},
+            {"jwt-bearer with a workload assertion", fun test_jwt_bearer/0},
+            {"DPoP: proof on the token request, nonce honoured, DPoP scheme", fun test_dpop/0}
         ]}}.
 
 %%====================================================================
@@ -146,10 +151,47 @@ handle(Base, #{path := Path} = Req) ->
             true = ets:insert(?TAB, {last_registration, Body}),
             {201, json_ct(), json(maps:get(register, Script))};
         <<"/token">> ->
-            {200, json_ct(), json(maps:get(token, Script))};
+            token_response(Req, Script);
+        <<"/idp/token">> ->
+            Form = barrel_mcp_test_http:form(Req),
+            true = ets:insert(?TAB, {last_exchange, Form}),
+            {200, json_ct(),
+                json(#{
+                    <<"access_token">> => <<"id-jag-1">>,
+                    <<"issued_token_type">> => <<"urn:ietf:params:oauth:token-type:id-jag">>
+                })};
         _ ->
             {404, json_ct(), <<"{}">>}
     end.
+
+%% With `dpop_nonce' in the script the first proof without that nonce
+%% is refused the way RFC 9449 8.2 describes; the token then comes
+%% back as a DPoP-bound one.
+token_response(Req, Script) ->
+    Proof = barrel_mcp_test_http:header(<<"dpop">>, Req),
+    case {maps:get(dpop_nonce, Script, undefined), Proof} of
+        {undefined, _} ->
+            {200, json_ct(), json(maps:get(token, Script))};
+        {Nonce, P} when is_binary(P) ->
+            case maps:get(<<"nonce">>, jwt_claims(P), undefined) of
+                Nonce ->
+                    {200, json_ct(),
+                        json((maps:get(token, Script))#{<<"token_type">> => <<"DPoP">>})};
+                _ ->
+                    {400, (json_ct())#{<<"dpop-nonce">> => Nonce},
+                        json(#{<<"error">> => <<"use_dpop_nonce">>})}
+            end;
+        {_, _} ->
+            {400, json_ct(), json(#{<<"error">> => <<"invalid_dpop_proof">>})}
+    end.
+
+jwt_claims(Jwt) ->
+    [_, Payload | _] = binary:split(Jwt, <<".">>, [global]),
+    json:decode(base64:decode(Payload, #{mode => urlsafe, padding => false})).
+
+jwt_header(Jwt) ->
+    [Header | _] = binary:split(Jwt, <<".">>, [global]),
+    json:decode(base64:decode(Header, #{mode => urlsafe, padding => false})).
 
 prm_response(Path, Script) ->
     Where = maps:get(prm_at, Script, any),
@@ -548,3 +590,149 @@ delete(Key, Arg) ->
 
 deletions(Arg) ->
     [D || {{store, {A, {deleted, _} = D}}, true} <- ets:tab2list(?TAB), A =:= Arg].
+
+%%====================================================================
+%% The non-interactive grants, endpoints discovered from the challenge
+%%====================================================================
+
+grant_handle(Spec) ->
+    Auth = barrel_mcp_client_auth:new(Spec),
+    ?assertNotMatch({error, _}, Auth),
+    Auth.
+
+grant_challenge(Auth) ->
+    barrel_mcp_client_auth:challenge(Auth, challenge(401, www())).
+
+test_cc_basic() ->
+    script(#{}),
+    Auth = grant_handle(
+        {oauth_client_credentials, #{
+            client_id => <<"svc">>, client_secret => <<"s3">>, allow_insecure_oauth => true
+        }}
+    ),
+    {ok, Auth1} = grant_challenge(Auth),
+    ?assertEqual({ok, <<"Bearer at-1">>}, barrel_mcp_client_auth:header(Auth1)),
+    ?assertEqual(
+        [
+            <<"/.well-known/oauth-protected-resource">>,
+            <<"/.well-known/oauth-authorization-server">>,
+            <<"/token">>
+        ],
+        paths()
+    ),
+    [TokenReq] = token_requests(),
+    Form = barrel_mcp_test_http:form(TokenReq),
+    ?assertEqual(<<"client_credentials">>, maps:get(<<"grant_type">>, Form)),
+    ?assertEqual(?SERVER, maps:get(<<"resource">>, Form)),
+    ?assertEqual(
+        <<"Basic ", (base64:encode(<<"svc:s3">>))/binary>>,
+        barrel_mcp_test_http:header(<<"authorization">>, TokenReq)
+    ).
+
+test_cc_jwt() ->
+    script(#{}),
+    Key = barrel_mcp_jwt:generate_key(),
+    Pem = public_key:pem_encode([public_key:pem_entry_encode('PrivateKeyInfo', Key)]),
+    Auth = grant_handle(
+        {oauth_client_credentials, #{
+            client_id => <<"svc">>, private_key => {Pem, <<"ES256">>}, allow_insecure_oauth => true
+        }}
+    ),
+    {ok, _} = grant_challenge(Auth),
+    [TokenReq] = token_requests(),
+    Form = barrel_mcp_test_http:form(TokenReq),
+    ?assertEqual(
+        <<"urn:ietf:params:oauth:client-assertion-type:jwt-bearer">>,
+        maps:get(<<"client_assertion_type">>, Form)
+    ),
+    Assertion = maps:get(<<"client_assertion">>, Form),
+    Claims = jwt_claims(Assertion),
+    ?assertEqual(<<"svc">>, maps:get(<<"iss">>, Claims)),
+    ?assertEqual(<<"svc">>, maps:get(<<"sub">>, Claims)),
+    ?assertEqual(?BASE, maps:get(<<"aud">>, Claims)),
+    ?assertEqual(<<"ES256">>, maps:get(<<"alg">>, jwt_header(Assertion))),
+    ?assertEqual(undefined, barrel_mcp_test_http:header(<<"authorization">>, TokenReq)).
+
+test_ema() ->
+    script(#{}),
+    Auth = grant_handle(
+        {oauth_enterprise, #{
+            client_id => <<"xaa">>,
+            client_secret => <<"xs">>,
+            idp_token_endpoint => <<?BASE/binary, "/idp/token">>,
+            subject_token => <<"id-token-1">>,
+            subject_token_type => <<"urn:ietf:params:oauth:token-type:id_token">>,
+            allow_insecure_oauth => true
+        }}
+    ),
+    {ok, Auth1} = grant_challenge(Auth),
+    ?assertEqual({ok, <<"Bearer at-1">>}, barrel_mcp_client_auth:header(Auth1)),
+    [{last_exchange, Exchange}] = ets:lookup(?TAB, last_exchange),
+    ?assertEqual(
+        <<"urn:ietf:params:oauth:grant-type:token-exchange">>, maps:get(<<"grant_type">>, Exchange)
+    ),
+    %% The ID-JAG audience is the discovered issuer, the resource the PRM's.
+    ?assertEqual(?BASE, maps:get(<<"audience">>, Exchange)),
+    ?assertEqual(?SERVER, maps:get(<<"resource">>, Exchange)),
+    [TokenReq] = token_requests(),
+    Form = barrel_mcp_test_http:form(TokenReq),
+    ?assertEqual(
+        <<"urn:ietf:params:oauth:grant-type:jwt-bearer">>, maps:get(<<"grant_type">>, Form)
+    ),
+    ?assertEqual(<<"id-jag-1">>, maps:get(<<"assertion">>, Form)).
+
+test_jwt_bearer() ->
+    script(#{}),
+    Auth = grant_handle(
+        {oauth_jwt_bearer, #{
+            client_id => <<"workload">>,
+            assertion => <<"workload-jwt">>,
+            allow_insecure_oauth => true
+        }}
+    ),
+    {ok, Auth1} = grant_challenge(Auth),
+    ?assertEqual({ok, <<"Bearer at-1">>}, barrel_mcp_client_auth:header(Auth1)),
+    [TokenReq] = token_requests(),
+    Form = barrel_mcp_test_http:form(TokenReq),
+    ?assertEqual(
+        <<"urn:ietf:params:oauth:grant-type:jwt-bearer">>, maps:get(<<"grant_type">>, Form)
+    ),
+    ?assertEqual(<<"workload-jwt">>, maps:get(<<"assertion">>, Form)),
+    ?assertEqual(<<"workload">>, maps:get(<<"client_id">>, Form)).
+
+test_dpop() ->
+    script(#{dpop_nonce => <<"as-nonce-1">>}),
+    {ok, H} = run(#{dpop => true}, #{dpop_nonce => <<"as-nonce-1">>}, challenge(401, www())),
+    %% Two token requests: the refused first proof, then one with the nonce.
+    [First, Second] = token_requests(),
+    P1 = barrel_mcp_test_http:header(<<"dpop">>, First),
+    P2 = barrel_mcp_test_http:header(<<"dpop">>, Second),
+    ?assertEqual(<<"dpop+jwt">>, maps:get(<<"typ">>, jwt_header(P1))),
+    ?assertMatch(#{<<"kty">> := <<"EC">>}, maps:get(<<"jwk">>, jwt_header(P1))),
+    C1 = jwt_claims(P1),
+    ?assertEqual(<<"POST">>, maps:get(<<"htm">>, C1)),
+    ?assertEqual(<<?BASE/binary, "/token">>, maps:get(<<"htu">>, C1)),
+    ?assertNot(maps:is_key(<<"nonce">>, C1)),
+    ?assertEqual(<<"as-nonce-1">>, maps:get(<<"nonce">>, jwt_claims(P2))),
+    %% A DPoP-bound token is presented with the DPoP scheme and a proof
+    %% carrying its hash.
+    ?assertEqual({ok, <<"DPoP at-1">>}, barrel_mcp_client_auth_oauth:header(H)),
+    {[{<<"dpop">>, Proof}], _} = barrel_mcp_client_auth_oauth:request_headers(
+        H, <<"POST">>, <<?SERVER/binary, "?x=1">>
+    ),
+    C3 = jwt_claims(Proof),
+    ?assertEqual(?SERVER, maps:get(<<"htu">>, C3)),
+    ?assertEqual(barrel_mcp_jwt:b64url(crypto:hash(sha256, <<"at-1">>)), maps:get(<<"ath">>, C3)),
+    %% The resource server's nonce challenge is remembered, not re-authorized.
+    {ok, H2} = barrel_mcp_client_auth_oauth:challenge(H, #{
+        status => 401,
+        www_authenticate => <<"DPoP error=\"use_dpop_nonce\"">>,
+        server_url => ?SERVER,
+        protocol_version => <<"2026-07-28">>,
+        dpop_nonce => <<"rs-nonce-1">>
+    }),
+    {[{<<"dpop">>, Proof2}], _} = barrel_mcp_client_auth_oauth:request_headers(
+        H2, <<"POST">>, ?SERVER
+    ),
+    ?assertEqual(<<"rs-nonce-1">>, maps:get(<<"nonce">>, jwt_claims(Proof2))),
+    ?assertEqual(2, length(token_requests())).

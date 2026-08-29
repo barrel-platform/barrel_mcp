@@ -387,12 +387,15 @@ code_change(_OldVsn, State, _Extra) ->
 start_post(Body, _Attempts, #state{legacy_sse = true, endpoint = undefined} = State) ->
     %% Nowhere to send it yet: the endpoint event has not arrived.
     {ok, State#state{queued = State#state.queued ++ [Body]}};
-start_post(Body, Attempts, State) ->
-    Headers = build_headers(State) ++ metadata_headers(Body, State#state.tool_headers),
+start_post(Body, Attempts, State0) ->
+    Url = post_url(State0),
+    {Extra, Auth} = barrel_mcp_client_auth:request_headers(State0#state.auth, <<"POST">>, Url),
+    State = State0#state{auth = Auth},
+    Headers = build_headers(State) ++ Extra ++ metadata_headers(Body, State#state.tool_headers),
     case
         hackney:request(
             post,
-            post_url(State),
+            Url,
             Headers,
             Body,
             [async, {recv_timeout, infinity}]
@@ -519,11 +522,12 @@ challenge_request(Ref, #req{headers = H} = R, Status, #state{requests = Reqs} = 
         challenged = [R | State#state.challenged]
     },
     case State1#state.auth_flow of
-        undefined -> start_auth_flow(Status, header_value(<<"www-authenticate">>, H), State1);
+        undefined -> start_auth_flow(Status, H, State1);
         _ -> State1
     end.
 
-start_auth_flow(Status, Www, #state{auth = Auth, url = Url} = State) ->
+start_auth_flow(Status, ResponseHeaders, #state{auth = Auth, url = Url} = State) ->
+    Www = header_value(<<"www-authenticate">>, ResponseHeaders),
     Version =
         case State#state.protocol_version of
             undefined -> State#state.requested_version;
@@ -533,7 +537,8 @@ start_auth_flow(Status, Www, #state{auth = Auth, url = Url} = State) ->
         status => Status,
         www_authenticate => Www,
         server_url => Url,
-        protocol_version => Version
+        protocol_version => Version,
+        dpop_nonce => header_value(<<"dpop-nonce">>, ResponseHeaders)
     },
     Transport = self(),
     Flow = spawn_monitor(fun() ->
@@ -647,8 +652,12 @@ is_jsonrpc(Body) ->
 
 start_stream(#state{sse_enabled = false} = State) ->
     State;
-start_stream(#state{sse_mode = get} = State) ->
-    Headers0 = build_headers(State),
+start_stream(#state{sse_mode = get} = State0) ->
+    {Extra, Auth} = barrel_mcp_client_auth:request_headers(
+        State0#state.auth, <<"GET">>, State0#state.url
+    ),
+    State = State0#state{auth = Auth},
+    Headers0 = build_headers(State) ++ Extra,
     Headers =
         case State#state.sse_last_event_id of
             undefined -> Headers0;

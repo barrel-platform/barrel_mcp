@@ -358,7 +358,9 @@ auth_flow_test_() ->
                 {timeout, 30, fun test_single_flight/0}},
             {"a crashed flow fails the waiting requests", {timeout, 30, fun test_flow_crash/0}},
             {"close kills a running flow", {timeout, 30, fun test_close_kills_flow/0}},
-            {"a request gives up after three rounds", {timeout, 30, fun test_retry_limit/0}}
+            {"a request gives up after three rounds", {timeout, 30, fun test_retry_limit/0}},
+            {"a DPoP nonce challenge is answered with a new proof, not a new token",
+                {timeout, 30, fun test_rs_nonce/0}}
         ]}}.
 
 auth_setup() ->
@@ -376,6 +378,28 @@ auth_cleanup(_) ->
 
 %% 200 with a JSON-RPC result for the right bearer, 401 otherwise. The
 %% `always_401' token never satisfies it.
+handle_auth(#{path := <<"/dpop">>} = Req) ->
+    %% RFC 9449 9: a proof without the server's nonce is refused with
+    %% the nonce to use; one carrying it is accepted.
+    Proof = barrel_mcp_test_http:header(<<"dpop">>, Req),
+    Nonce =
+        case Proof of
+            undefined -> undefined;
+            _ -> maps:get(<<"nonce">>, proof_claims(Proof), undefined)
+        end,
+    case Nonce of
+        <<"rs-1">> ->
+            #{<<"id">> := Id} = json:decode(maps:get(body, Req)),
+            {200, #{<<"content-type">> => <<"application/json">>},
+                iolist_to_binary(json:encode(#{jsonrpc => <<"2.0">>, id => Id, result => #{}}))};
+        _ ->
+            {401,
+                #{
+                    <<"www-authenticate">> => <<"DPoP error=\"use_dpop_nonce\"">>,
+                    <<"dpop-nonce">> => <<"rs-1">>
+                },
+                <<>>}
+    end;
 handle_auth(Req) ->
     case barrel_mcp_test_http:header(<<"authorization">>, Req) of
         <<"Bearer good">> ->
@@ -551,3 +575,20 @@ next_response() ->
             end
     after 5000 -> error(no_response)
     end.
+
+proof_claims(Jwt) ->
+    [_, Payload | _] = binary:split(Jwt, <<".">>, [global]),
+    json:decode(base64:decode(Payload, #{mode => urlsafe, padding => false})).
+
+test_rs_nonce() ->
+    Auth = barrel_mcp_client_auth:new({oauth, #{access_token => <<"bound">>, dpop => true}}),
+    {ok, Pid} = barrel_mcp_client_http:connect(self(), #{
+        url => url(?AUTH_PORT, "/dpop"), open_event_stream => false, auth => Auth
+    }),
+    ok = barrel_mcp_client_http:send(Pid, request(1)),
+    ?assertEqual(1, next_in()),
+    receive
+        {challenge, _} -> error(flow_started)
+    after 200 -> ok
+    end,
+    barrel_mcp_client_http:close(Pid).

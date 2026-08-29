@@ -88,7 +88,7 @@
 -behaviour(barrel_mcp_client_auth).
 
 %% Behaviour callbacks
--export([init/1, header/1, refresh/2, challenge/2, settled/1]).
+-export([init/1, header/1, refresh/2, challenge/2, settled/1, request_headers/3]).
 
 %% Public discovery + PKCE + token helpers (host-side).
 -export([
@@ -176,7 +176,15 @@
     client_assertion :: binary() | undefined,
     resource :: binary() | undefined,
     scopes :: [binary()] | undefined,
-    mode = auth_code :: auth_code | client_credentials | enterprise_managed,
+    mode = auth_code :: auth_code | client_credentials | enterprise_managed | jwt_bearer,
+    %% What the non-interactive grants present.
+    assertion :: binary() | undefined,
+    private_key :: {barrel_mcp_jwt:key(), binary()} | undefined,
+    %% RFC 9449: the proof key and the nonces the servers asked for.
+    dpop ::
+        undefined
+        | #{key := term(), as_nonce := binary() | undefined, rs_nonce := binary() | undefined},
+    token_type = bearer :: bearer | dpop,
     %% `flow': this handle runs the authorization-code flow itself from
     %% a 401. `token': the host obtained the tokens and we only refresh.
     phase = token :: token | flow,
@@ -211,11 +219,42 @@ init(Cfg) when is_map(Cfg) ->
     Insecure = insecure_opt(Cfg),
     Opts = #{allow_insecure_oauth => Insecure},
     case secure_urls(configured_endpoints(Cfg), Opts) of
-        ok -> init_mode(Cfg, Insecure);
-        {error, _} = Err -> Err
+        ok ->
+            case init_mode(Cfg, Insecure) of
+                {ok, H} -> with_credentials(H, Cfg);
+                {error, _} = Err -> Err
+            end;
+        {error, _} = Err ->
+            Err
     end;
 init(_) ->
     {error, missing_access_token}.
+
+%% `private_key' (PEM and algorithm) for private_key_jwt, `dpop' for
+%% RFC 9449 sender-constrained tokens.
+with_credentials(H, Cfg) ->
+    try
+        Key =
+            case maps:get(private_key, Cfg, undefined) of
+                undefined -> undefined;
+                {Pem, Alg} when is_binary(Pem) -> {barrel_mcp_jwt:decode_pem(Pem), Alg};
+                {_, _} = Given -> Given
+            end,
+        Dpop =
+            case maps:get(dpop, Cfg, false) of
+                true ->
+                    #{
+                        key => barrel_mcp_jwt:generate_key(),
+                        as_nonce => undefined,
+                        rs_nonce => undefined
+                    };
+                _ ->
+                    undefined
+            end,
+        {ok, H#h{private_key = Key, dpop = Dpop}}
+    catch
+        _:Reason -> {error, {invalid_private_key, Reason}}
+    end.
 
 %% The endpoints a config names directly, bypassing discovery.
 configured_endpoints(Cfg) ->
@@ -284,8 +323,38 @@ init_mode(
         {ok, H1} -> {ok, H1};
         {error, _} = Err -> Err
     end;
+%% No token endpoint yet: it is discovered from the first 401, the way
+%% the authorization-code flow discovers its authorization server.
+init_mode(#{grant_type := client_credentials, client_id := CI} = Cfg, Insecure) when
+    is_binary(CI), CI =/= <<>>
+->
+    {ok, #h{
+        insecure = Insecure,
+        mode = client_credentials,
+        phase = flow,
+        client_id = CI,
+        client_secret = maps:get(client_secret, Cfg, undefined),
+        client_assertion = maps:get(client_assertion, Cfg, undefined),
+        resource = maps:get(resource, Cfg, undefined),
+        scopes = maps:get(scopes, Cfg, undefined)
+    }};
 init_mode(#{grant_type := client_credentials}, _Insecure) ->
-    {error, missing_token_endpoint_or_client_id};
+    {error, missing_client_id};
+init_mode(#{grant_type := jwt_bearer, client_id := CI, assertion := Assertion} = Cfg, Insecure) when
+    is_binary(CI), CI =/= <<>>, is_binary(Assertion), Assertion =/= <<>>
+->
+    {ok, #h{
+        insecure = Insecure,
+        mode = jwt_bearer,
+        phase = flow,
+        client_id = CI,
+        assertion = Assertion,
+        token_endpoint = maps:get(token_endpoint, Cfg, undefined),
+        resource = maps:get(resource, Cfg, undefined),
+        scopes = maps:get(scopes, Cfg, undefined)
+    }};
+init_mode(#{grant_type := jwt_bearer}, _Insecure) ->
+    {error, missing_client_id_or_assertion};
 %% Enterprise-managed authorization (MCP `ext-auth' EMA):
 %% RFC 8693 token-exchange at the IdP -> ID-JAG, then RFC 7523
 %% jwt-bearer at the AS -> short-lived MCP access token.
@@ -335,6 +404,40 @@ init_mode(
         {ok, H1} -> {ok, H1};
         {error, _} = Err -> Err
     end;
+%% The authorization server, its issuer (the ID-JAG audience) and the
+%% resource are discovered from the first 401.
+init_mode(
+    #{
+        grant_type := enterprise_managed,
+        idp_token_endpoint := IDP,
+        client_id := CI,
+        subject_token := ST,
+        subject_token_type := STT
+    } = Cfg,
+    Insecure
+) when
+    is_binary(IDP),
+    IDP =/= <<>>,
+    is_binary(CI),
+    CI =/= <<>>,
+    is_binary(ST),
+    ST =/= <<>>,
+    is_binary(STT)
+->
+    {ok, #h{
+        insecure = Insecure,
+        mode = enterprise_managed,
+        phase = flow,
+        client_id = CI,
+        client_secret = maps:get(client_secret, Cfg, undefined),
+        client_assertion = maps:get(client_assertion, Cfg, undefined),
+        idp_token_endpoint = IDP,
+        subject_token = ST,
+        subject_token_type = STT,
+        audience = maps:get(audience, Cfg, undefined),
+        resource = maps:get(resource, Cfg, undefined),
+        scopes = maps:get(scopes, Cfg, undefined)
+    }};
 init_mode(#{grant_type := enterprise_managed}, _Insecure) ->
     {error, missing_endpoints_or_subject_token};
 init_mode(_, _Insecure) ->
@@ -342,8 +445,23 @@ init_mode(_, _Insecure) ->
 
 header(#h{access_token = undefined}) ->
     none;
+header(#h{access_token = AT, token_type = dpop}) ->
+    {ok, <<"DPoP ", AT/binary>>};
 header(#h{access_token = AT}) ->
     {ok, <<"Bearer ", AT/binary>>}.
+
+%% @doc RFC 9449 4: a proof per request, bound to the method and URL,
+%% carrying the token's hash and the nonce the resource server asked
+%% for. Nothing without a DPoP key or before a token exists.
+-spec request_headers(handle(), binary(), binary()) -> {[{binary(), binary()}], handle()}.
+request_headers(
+    #h{dpop = #{key := Key, rs_nonce := Nonce}, access_token = AT} = H, Method, Url
+) when
+    is_binary(AT)
+->
+    {[{<<"dpop">>, dpop_proof(Key, Method, Url, Nonce, AT)}], H};
+request_headers(H, _Method, _Url) ->
+    {[], H}.
 
 %% Client-credentials mode: re-acquire via the grant on every 401.
 %% No refresh_token involved.
@@ -351,6 +469,8 @@ refresh(#h{mode = client_credentials} = H, _Www) ->
     acquire_via_client_credentials(H);
 refresh(#h{mode = enterprise_managed} = H, _Www) ->
     acquire_via_ema(H);
+refresh(#h{mode = jwt_bearer} = H, _Www) ->
+    acquire_via_jwt_bearer(H);
 refresh(#h{refresh_token = undefined}, _Www) ->
     {error, no_refresh_token};
 refresh(#h{token_endpoint = undefined}, _Www) ->
@@ -1092,7 +1212,8 @@ do_refresh(
         resource => Res,
         scopes => Scopes,
         token_endpoint_auth_method => refresh_tea(H),
-        allow_insecure_oauth => Insecure
+        allow_insecure_oauth => Insecure,
+        dpop => dpop_opt(H)
     }),
     refresh_token(TE, Params).
 
@@ -1112,13 +1233,15 @@ acquire_via_client_credentials(
         insecure = Insecure
     } = H
 ) ->
+    _ = CA,
     Params = drop_undefined(#{
         client_id => CI,
         client_secret => CS,
-        client_assertion => CA,
+        client_assertion => client_assertion(H),
         resource => Res,
         scopes => Scopes,
-        allow_insecure_oauth => Insecure
+        allow_insecure_oauth => Insecure,
+        dpop => dpop_opt(H)
     }),
     case client_credentials(TE, Params) of
         {ok, R} -> {ok, apply_token_response(H, R)};
@@ -1153,7 +1276,8 @@ acquire_via_ema(
         subject_token_type => STT,
         audience => Aud,
         resource => Res,
-        allow_insecure_oauth => Insecure
+        allow_insecure_oauth => Insecure,
+        dpop => dpop_opt(H)
     }),
     case token_exchange(IDP, Step1) of
         {ok, IdJag} ->
@@ -1164,7 +1288,8 @@ acquire_via_ema(
                 assertion => IdJag,
                 resource => Res,
                 scopes => Scopes,
-                allow_insecure_oauth => Insecure
+                allow_insecure_oauth => Insecure,
+                dpop => dpop_opt(H)
             }),
             case jwt_bearer(AsTokenEndpoint, Step2) of
                 {ok, R} -> {ok, apply_token_response(H, R)};
@@ -1193,10 +1318,22 @@ apply_token_response(#h{} = H, #{<<"access_token">> := AT} = R) ->
             S when is_binary(S) -> binary:split(S, <<" ">>, [global, trim_all]);
             _ -> H#h.requested_scope
         end,
+    TokenType =
+        case string:lowercase(maps:get(<<"token_type">>, R, <<"bearer">>)) of
+            <<"dpop">> -> dpop;
+            _ -> bearer
+        end,
+    Dpop =
+        case {H#h.dpop, maps:get(<<"dpop_nonce">>, R, undefined)} of
+            {#{} = D, Nonce} when is_binary(Nonce) -> D#{as_nonce => Nonce};
+            {D, _} -> D
+        end,
     H#h{
         access_token = AT,
         refresh_token = maps:get(<<"refresh_token">>, R, H#h.refresh_token),
-        granted_scope = Granted
+        granted_scope = Granted,
+        token_type = TokenType,
+        dpop = Dpop
     };
 apply_token_response(H, _) ->
     H.
@@ -1210,21 +1347,144 @@ apply_token_response(H, _) ->
 %% redirect step and the code exchange as the challenge requires.
 -spec challenge(handle(), barrel_mcp_client_auth:challenge()) ->
     {ok, handle()} | {error, term()}.
-challenge(#h{mode = client_credentials} = H, _Challenge) ->
-    acquire_via_client_credentials(H);
-challenge(#h{mode = enterprise_managed} = H, _Challenge) ->
-    acquire_via_ema(H);
-challenge(#h{phase = token} = H, Challenge) ->
+%% RFC 9449 9: the resource server wants a nonce in the proof. Not a
+%% token problem; remember it and let the transport reissue.
+challenge(
+    #h{dpop = #{} = Dpop} = H, #{www_authenticate := Www, dpop_nonce := Nonce} = Challenge
+) when
+    is_binary(Www), is_binary(Nonce)
+->
+    case binary:match(Www, <<"use_dpop_nonce">>) of
+        nomatch -> challenge_grant(H, Challenge);
+        _ -> {ok, H#h{dpop = Dpop#{rs_nonce => Nonce}}}
+    end;
+challenge(H, Challenge) ->
+    challenge_grant(H, Challenge).
+
+challenge_grant(#h{mode = client_credentials} = H, Challenge) ->
+    with_token_endpoint(H, Challenge, fun acquire_via_client_credentials/1);
+challenge_grant(#h{mode = enterprise_managed} = H, Challenge) ->
+    with_token_endpoint(H, Challenge, fun acquire_via_ema/1);
+challenge_grant(#h{mode = jwt_bearer} = H, Challenge) ->
+    with_token_endpoint(H, Challenge, fun acquire_via_jwt_bearer/1);
+challenge_grant(#h{phase = token} = H, Challenge) ->
     refresh(H, maps:get(www_authenticate, Challenge, undefined));
-challenge(#h{phase = flow} = H, #{status := 403} = Challenge) ->
+challenge_grant(#h{phase = flow} = H, #{status := 403} = Challenge) ->
     step_up(H, Challenge);
-challenge(#h{phase = flow} = H, #{status := 401, server_url := ServerUrl} = Challenge) ->
+challenge_grant(#h{phase = flow} = H, #{status := 401, server_url := ServerUrl} = Challenge) ->
     H1 = H#h{server_url = ServerUrl},
     case auth_era(maps:get(protocol_version, Challenge, undefined)) of
         none -> {error, unauthorized};
         legacy -> legacy_flow(H1, Challenge);
         prm -> prm_flow(H1, Challenge)
     end.
+
+%% A non-interactive grant with its token endpoint in hand just
+%% acquires; one without discovers it from the challenge first: the
+%% protected resource, its authorization server, and with them the
+%% resource indicator, the ID-JAG audience and the scope.
+with_token_endpoint(#h{token_endpoint = TE} = H, _Challenge, Acquire) when is_binary(TE) ->
+    Acquire(H);
+with_token_endpoint(H, #{server_url := ServerUrl} = Challenge, Acquire) ->
+    Www = maps:get(www_authenticate, Challenge, undefined),
+    H1 = H#h{server_url = ServerUrl},
+    Opts = opts(H1),
+    case discover_prm(prm_urls(Www, ServerUrl), Opts, undefined) of
+        {ok, #{<<"resource">> := Resource, <<"authorization_servers">> := [Issuer | _]} = Prm} ->
+            case discover_authorization_server(Issuer, Opts) of
+                {ok, AsMd} ->
+                    H2 = H1#h{
+                        prm = Prm,
+                        as_metadata = AsMd,
+                        token_endpoint = maps:get(<<"token_endpoint">>, AsMd),
+                        resource = default_to(H1#h.resource, Resource),
+                        audience = default_to(H1#h.audience, Issuer),
+                        scopes = default_to(H1#h.scopes, select_scope(Www, Prm, AsMd, H1))
+                    },
+                    Acquire(H2);
+                {error, _} = Err ->
+                    Err
+            end;
+        {ok, Prm} ->
+            {error, {invalid_prm, Prm}};
+        {error, _} = Err ->
+            Err
+    end.
+
+default_to(undefined, Value) -> Value;
+default_to(Given, _Value) -> Given.
+
+acquire_via_jwt_bearer(#h{token_endpoint = TE, client_id = CI, assertion = A} = H) ->
+    Params = drop_undefined(#{
+        client_id => CI,
+        assertion => A,
+        resource => H#h.resource,
+        scopes => H#h.scopes,
+        allow_insecure_oauth => H#h.insecure,
+        dpop => dpop_opt(H)
+    }),
+    case jwt_bearer(TE, Params) of
+        {ok, R} -> {ok, apply_token_response(H, R)};
+        {error, _} = Err -> Err
+    end.
+
+%% RFC 7523 2.2 / RFC 7521: a private_key_jwt assertion, minted fresh
+%% for each request. Its audience is the authorization server itself
+%% (the issuer) when discovery told us, else the token endpoint.
+client_assertion(#h{client_assertion = Given}) when is_binary(Given) ->
+    Given;
+client_assertion(#h{private_key = {Key, Alg}, client_id = CI, token_endpoint = TE} = H) ->
+    Now = erlang:system_time(second),
+    Aud =
+        case H#h.as_metadata of
+            #{<<"issuer">> := Issuer} when is_binary(Issuer) -> Issuer;
+            _ -> TE
+        end,
+    barrel_mcp_jwt:sign(
+        #{
+            <<"iss">> => CI,
+            <<"sub">> => CI,
+            <<"aud">> => Aud,
+            <<"jti">> => barrel_mcp_jwt:b64url(crypto:strong_rand_bytes(16)),
+            <<"iat">> => Now,
+            <<"exp">> => Now + 300
+        },
+        Key,
+        Alg
+    );
+client_assertion(_H) ->
+    undefined.
+
+dpop_opt(#h{dpop = #{key := Key, as_nonce := Nonce}}) -> {Key, Nonce};
+dpop_opt(_H) -> undefined.
+
+%% RFC 9449 4.2: the proof JWT. `htu' is the URL without query or
+%% fragment; `ath' binds the proof to the access token it accompanies.
+dpop_proof(Key, Method, Url, Nonce, AccessToken) ->
+    Parsed = uri_string:parse(Url),
+    Htu = uri_string:recompose(maps:without([query, fragment], Parsed)),
+    Claims0 = #{
+        <<"jti">> => barrel_mcp_jwt:b64url(crypto:strong_rand_bytes(16)),
+        <<"htm">> => Method,
+        <<"htu">> => Htu,
+        <<"iat">> => erlang:system_time(second)
+    },
+    Claims1 =
+        case Nonce of
+            undefined -> Claims0;
+            _ -> Claims0#{<<"nonce">> => Nonce}
+        end,
+    Claims =
+        case AccessToken of
+            undefined -> Claims1;
+            _ -> Claims1#{<<"ath">> => barrel_mcp_jwt:b64url(crypto:hash(sha256, AccessToken))}
+        end,
+    barrel_mcp_jwt:sign(
+        #{<<"typ">> => <<"dpop+jwt">>, <<"jwk">> => barrel_mcp_jwt:jwk(Key)},
+        Claims,
+        Key,
+        <<"ES256">>
+    ).
 
 %% @doc The transport reports an accepted request. Nothing to reset:
 %% the retry budget lives with the request, not here.
@@ -1579,7 +1839,8 @@ exchange(#h{client = Client} = H, Code, Verifier, WithResource) ->
         client_secret => maps:get(client_secret, Client, undefined),
         redirect_uri => H#h.redirect_uri,
         token_endpoint_auth_method => tea_method(H),
-        allow_insecure_oauth => H#h.insecure
+        allow_insecure_oauth => H#h.insecure,
+        dpop => dpop_opt(H)
     },
     Params =
         case WithResource of
@@ -1805,23 +2066,24 @@ do_http_get_json(Url) ->
 http_post_form(Url, Form, ClientSecret, ClientId, Opts) ->
     case secure_url(Url, Opts) of
         ok ->
+            Dpop = maps:get(dpop, Opts, undefined),
             case maps:get(token_endpoint_auth_method, Opts, undefined) of
                 client_secret_post ->
-                    http_post_form(Url, Form, undefined, ClientId);
+                    do_post_form(Url, Form, undefined, ClientId, Dpop);
                 none ->
-                    http_post_form(
-                        Url, maps:remove(<<"client_secret">>, Form), undefined, ClientId
+                    do_post_form(
+                        Url, maps:remove(<<"client_secret">>, Form), undefined, ClientId, Dpop
                     );
                 _ ->
-                    http_post_form(
-                        Url, maps:remove(<<"client_secret">>, Form), ClientSecret, ClientId
+                    do_post_form(
+                        Url, maps:remove(<<"client_secret">>, Form), ClientSecret, ClientId, Dpop
                     )
             end;
         {error, _} = Err ->
             Err
     end.
 
-http_post_form(Url, Form, ClientSecret, ClientId) when
+do_post_form(Url, Form, ClientSecret, ClientId, Dpop) when
     is_binary(ClientId),
     ClientId =/= <<>>,
     is_binary(ClientSecret),
@@ -1836,27 +2098,59 @@ http_post_form(Url, Form, ClientSecret, ClientId) when
         {<<"content-type">>, <<"application/x-www-form-urlencoded">>},
         {<<"accept">>, <<"application/json">>}
     ],
-    do_post_form(Url, Headers, Form1);
-http_post_form(Url, Form, _, _) ->
+    post_form(Url, Headers, Form1, Dpop, first);
+do_post_form(Url, Form, _, _, Dpop) ->
     Headers = [
         {<<"content-type">>, <<"application/x-www-form-urlencoded">>},
         {<<"accept">>, <<"application/json">>}
     ],
-    do_post_form(Url, Headers, Form).
+    post_form(Url, Headers, Form, Dpop, first).
 
-do_post_form(Url, Headers, Form) ->
+%% With a DPoP key the request carries a proof; a `use_dpop_nonce'
+%% answer (RFC 9449 8) is retried once with the nonce the server named,
+%% and that nonce rides back on the token response as `dpop_nonce' for
+%% the handle to keep.
+post_form(Url, Headers, Form, Dpop, Attempt) ->
+    Hs =
+        case Dpop of
+            undefined ->
+                Headers;
+            {Key, Nonce} ->
+                [{<<"dpop">>, dpop_proof(Key, <<"POST">>, Url, Nonce, undefined)} | Headers]
+        end,
     Body = urlencode(Form),
-    case hackney:request(post, Url, Headers, Body, [with_body]) of
+    case hackney:request(post, Url, Hs, Body, [with_body]) of
         {ok, 200, _Hdrs, RB} ->
-            try
-                {ok, json:decode(RB)}
+            try json:decode(RB) of
+                Map when is_map(Map) ->
+                    case Dpop of
+                        {_, N} when is_binary(N) -> {ok, Map#{<<"dpop_nonce">> => N}};
+                        _ -> {ok, Map}
+                    end;
+                Other ->
+                    {ok, Other}
             catch
                 _:_ -> {error, {invalid_json, RB}}
+            end;
+        {ok, 400, Hdrs, RB} when Dpop =/= undefined, Attempt =:= first ->
+            case dpop_nonce_challenge(RB, Hdrs) of
+                {ok, NewNonce} ->
+                    {Key1, _} = Dpop,
+                    post_form(Url, Headers, Form, {Key1, NewNonce}, second);
+                error ->
+                    {error, {http_error, 400, RB}}
             end;
         {ok, Status, _Hdrs, RB} ->
             {error, {http_error, Status, RB}};
         {error, _} = Err ->
             Err
+    end.
+
+dpop_nonce_challenge(Body, Headers) ->
+    Nonce = [V || {K, V} <- Headers, string:lowercase(K) =:= <<"dpop-nonce">>],
+    case {binary:match(Body, <<"use_dpop_nonce">>), Nonce} of
+        {{_, _}, [N | _]} -> {ok, N};
+        _ -> error
     end.
 
 %%====================================================================
