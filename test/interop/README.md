@@ -44,6 +44,36 @@ handshake era, v2 speaks `2026-07-28` and replaced `FastMCP` with
 The corresponding CT cases skip when their interpreter is not
 configured, so the default `rebar3 ct` keeps working without Python.
 
+## Conformance runner
+
+`make conformance` runs the official `@modelcontextprotocol/conformance`
+runner (pinned in `test/conformance/package.json`) against our server
+in `test/barrel_mcp_conformance_SUITE.erl`, one CT case per run:
+
+| case | runner selection |
+|---|---|
+| `conformance_2026_07_28` | `--spec-version 2026-07-28 --suite all` |
+| `conformance_2025_11_25` | `--spec-version 2025-11-25 --suite all` |
+| `conformance_2025_06_18` | `--spec-version 2025-06-18 --suite all` |
+| `conformance_2025_03_26` | `--spec-version 2025-03-26 --suite all` |
+| `requirements_2026_07_28` | `--requirements 2026-07-28` |
+| `requirements_2025_11_25` | `--requirements 2025-11-25` |
+
+`--suite all` is every scenario the runner knows for a revision,
+drafts included; `--requirements` is the frozen set a revision
+required at release, which the runner ships for those two revisions
+only. Any FAILURE in a scored scenario fails the case. There is no
+expected-failures file: a failing check is a defect to fix, not a
+baseline.
+
+A `--requirements` run also executes the scenarios its YAML lists as
+`not_scored` (extensions, and scenarios pending against the runner's
+own reference fixture); the runner reports them and exits 0
+regardless. The case reads that list from the runner's YAML and
+prints those failures apart. At 2026-07-28 that is the nine
+`server-tasks-*` scenarios (SEP-2663 tasks as a core feature), which
+this server does not implement yet.
+
 ## Run locally
 
 ```sh

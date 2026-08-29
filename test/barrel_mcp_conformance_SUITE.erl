@@ -26,6 +26,10 @@
 -export([
     conformance_2026_07_28/1,
     conformance_2025_11_25/1,
+    conformance_2025_06_18/1,
+    conformance_2025_03_26/1,
+    requirements_2026_07_28/1,
+    requirements_2025_11_25/1,
     erlang_client_against_server_everything/1
 ]).
 %% Tools
@@ -78,6 +82,10 @@ all() ->
     [
         conformance_2026_07_28,
         conformance_2025_11_25,
+        conformance_2025_06_18,
+        conformance_2025_03_26,
+        requirements_2026_07_28,
+        requirements_2025_11_25,
         erlang_client_against_server_everything
     ].
 
@@ -122,11 +130,26 @@ end_per_testcase(_TC, _Config) ->
 %% Cases
 %%====================================================================
 
+%% Every scenario the runner knows for a revision, drafts included.
 conformance_2026_07_28(Config) ->
-    run_conformance(Config, "2026-07-28").
+    run_conformance(Config, "2026-07-28", ["--spec-version", "2026-07-28", "--suite", "all"]).
 
 conformance_2025_11_25(Config) ->
-    run_conformance(Config, "2025-11-25").
+    run_conformance(Config, "2025-11-25", ["--spec-version", "2025-11-25", "--suite", "all"]).
+
+conformance_2025_06_18(Config) ->
+    run_conformance(Config, "2025-06-18", ["--spec-version", "2025-06-18", "--suite", "all"]).
+
+conformance_2025_03_26(Config) ->
+    run_conformance(Config, "2025-03-26", ["--spec-version", "2025-03-26", "--suite", "all"]).
+
+%% Exactly what a revision required at its release, frozen. The runner
+%% ships requirement sets for these two only.
+requirements_2026_07_28(Config) ->
+    run_conformance(Config, "requirements-2026-07-28", ["--requirements", "2026-07-28"]).
+
+requirements_2025_11_25(Config) ->
+    run_conformance(Config, "requirements-2025-11-25", ["--requirements", "2025-11-25"]).
 
 %% The reference server as a foreign peer for our client, over stdio.
 erlang_client_against_server_everything(Config) ->
@@ -159,38 +182,60 @@ erlang_client_against_server_everything(Config) ->
 %% Running the runner
 %%====================================================================
 
-run_conformance(Config, Version) ->
+run_conformance(Config, Label, Selection) ->
     Runner = ?config(runner, Config),
     Url = binary_to_list(barrel_mcp_test_helpers:url(?config(port, Config))),
-    OutDir = filename:join(priv_dir(Config), "conformance-" ++ Version),
-    Args = [
-        Runner,
-        "server",
-        "--url",
-        Url,
-        "--spec-version",
-        Version,
-        "--suite",
-        "all",
-        "-o",
-        OutDir
-    ],
+    OutDir = filename:join(priv_dir(Config), "conformance-" ++ Label),
+    Args = [Runner, "server", "--url", Url | Selection] ++ ["-o", OutDir],
     {Status, Output} = run("node", Args, root_dir()),
-    {Pass, Fails} = summarise(OutDir),
-    ct:pal("conformance ~s: ~B passed, ~B failed~n~s", [Version, Pass, length(Fails), Fails]),
+    NotScored = not_scored(Runner, Selection),
+    {Pass, Fails, Unscored} = summarise(OutDir, NotScored),
+    ct:pal(
+        "conformance ~s: ~B passed, ~B failed, ~B not scored~n~s~s",
+        [Label, Pass, length(Fails), length(Unscored), Fails, unscored_report(Unscored)]
+    ),
     case {Status, Fails} of
         {0, []} ->
             ok;
         _ ->
-            ct:fail({conformance_failed, Version, Status, Fails, Output})
+            ct:fail({conformance_failed, Label, Status, Fails, Output})
     end.
+
+unscored_report([]) ->
+    "";
+unscored_report(Unscored) ->
+    ["  not scored by the runner's requirement set (run for visibility):\n" | Unscored].
+
+%% A `--requirements' run also executes the scenarios its YAML lists as
+%% `not_scored' (extensions and scenarios pending against the runner's
+%% own reference fixture). The runner reports them and exits 0
+%% regardless; so does this case, listing them apart. There is no
+%% expected-failures file of ours anywhere in this.
+not_scored(Runner, ["--requirements", Revision]) ->
+    Yaml = filename:join([
+        filename:dirname(filename:dirname(Runner)), "requirements", Revision ++ ".yaml"
+    ]),
+    {ok, Bin} = file:read_file(Yaml),
+    Tail =
+        case binary:split(Bin, <<"\nnot_scored:">>) of
+            [_, Rest] -> Rest;
+            _ -> <<>>
+        end,
+    Entries = binary:split(Tail, <<"- scenario: ">>, [global]),
+    [
+        hd(binary:split(Entry, <<"\n">>))
+     || Entry <- tl(Entries), binary:match(Entry, <<"leg: server">>) =/= nomatch
+    ];
+not_scored(_Runner, _Selection) ->
+    [].
 
 %% The runner writes one JSON per scenario; its per-check messages are
 %% the diagnostics, so they are what a failure reports.
-summarise(OutDir) ->
+summarise(OutDir, NotScored) ->
     Files = filelib:wildcard(filename:join([OutDir, "*", "*.json"])),
     lists:foldl(
-        fun(File, {Pass, Fails}) ->
+        fun(File, {Pass, Fails, Unscored}) ->
+            Scored = not lists:member(scenario_of(File), NotScored),
             {ok, Bin} = file:read_file(File),
             Checks =
                 case json:decode(Bin) of
@@ -201,22 +246,41 @@ summarise(OutDir) ->
                 end,
             lists:foldl(
                 fun
-                    (#{<<"status">> := <<"SUCCESS">>}, {P, F}) ->
-                        {P + 1, F};
-                    (#{<<"status">> := <<"FAILURE">>} = C, {P, F}) ->
+                    (#{<<"status">> := <<"SUCCESS">>}, {P, F, U}) ->
+                        {P + 1, F, U};
+                    (#{<<"status">> := <<"FAILURE">>} = C, {P, F, U}) ->
                         Id = maps:get(<<"id">>, C, maps:get(<<"name">>, C, <<"?">>)),
                         Msg = maps:get(<<"errorMessage">>, C, <<>>),
-                        {P, [io_lib:format("  ~s :: ~s~n", [Id, Msg]) | F]};
+                        Line = io_lib:format("  ~s :: ~s~n", [Id, Msg]),
+                        case Scored of
+                            true -> {P, [Line | F], U};
+                            false -> {P, F, [Line | U]}
+                        end;
                     (_, Acc) ->
                         Acc
                 end,
-                {Pass, Fails},
+                {Pass, Fails, Unscored},
                 Checks
             )
         end,
-        {0, []},
+        {0, [], []},
         Files
     ).
+
+%% `<outdir>/server-tasks-lifecycle-2026-08-29T11-29-55-283Z/x.json':
+%% the scenario name is the directory minus the role prefix and the
+%% timestamp the runner appends.
+scenario_of(File) ->
+    Dir = list_to_binary(filename:basename(filename:dirname(File))),
+    Name =
+        case Dir of
+            <<"server-", Rest/binary>> -> Rest;
+            _ -> Dir
+        end,
+    case re:run(Name, <<"^(.*)-\\d{4}-\\d{2}-\\d{2}T">>, [{capture, all_but_first, binary}]) of
+        {match, [Bare]} -> Bare;
+        nomatch -> Name
+    end.
 
 %%====================================================================
 %% Fixture: what the scenarios say a server must expose
