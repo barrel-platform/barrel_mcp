@@ -61,7 +61,7 @@ barrel_mcp_sup                   one_for_one, 5 restarts / 10 s
 Listener names are `barrel_mcp_http_stream_listener` and
 `barrel_mcp_http_simple_listener`. When `barrel_mcp_listener_sup` is
 not running (the library embedded without its application), the
-listener is started unsupervised by `barrel_mcp_listener_sup:supervised_start/3`'s
+listener is started unsupervised by `barrel_mcp_listener_sup:supervised_start`'s
 fallback.
 
 `barrel_mcp_stdio` is not under the tree: `start/0` runs it
@@ -101,7 +101,7 @@ it spawns during a `tools/call`:
 | tool worker | `barrel_mcp_registry:run_tool/3` | `spawn` (no link) | `reply_to` in its Ctx: `{tool_result, ...}`, `{tool_error, ...}`, `{tool_failed, ...}`, `{tool_input_required, ...}` | after one message; killed on disconnect (`settle_disconnect/2`) or when a task cannot be created |
 | task relay | `barrel_mcp_task_relay:start/0` | `spawn_link` from the request process | its `target`: the request process, then the collector | `stop`, or the worker's `DOWN` once forwarded; unlinked before escalation |
 | task collector | `barrel_mcp_protocol:spawn_task_collector/3` | `spawn` | `barrel_mcp_tasks` (`finish`, `fail`, `cancel`) | first terminal message; monitors the worker; `?WORKER_HANDOFF_MS` without a worker fails the task |
-| legacy-SSE driver | `barrel_mcp_http_engine:legacy_answer/3` | `spawn` | `push_legacy/2` onto the session's stream | when `drive_async_plan/4` returns |
+| legacy-SSE driver | `barrel_mcp_http_engine:legacy_answer` | `spawn` | `push_legacy/2` onto the session's stream | when `drive_async_plan/4` returns |
 | stream watcher | `answer_on_stream/3` | `spawn_link` | kills the worker if the SSE stream dies | `done` |
 
 Under stdio the coordinator runs each request in a `spawn_monitor`
@@ -230,10 +230,10 @@ whether the client declared the tasks extension, and on the era:
 
 The rule is written twice, on purpose in two shapes:
 
-- HTTP, `barrel_mcp_http_engine:handle_async_tool_call/7`: the
+- HTTP, `barrel_mcp_http_engine:handle_async_tool_call`: the
   five-clause `case {Support, Enabled}` with the `when Modern` guard,
   because the engine writes the answer itself.
-- Every other transport, `barrel_mcp_protocol:task_plan/2` consumed
+- Every other transport, `barrel_mcp_protocol:task_plan` consumed
   by `drive_async_plan/4`, which picks `drive_inline_then_task/5`
   (modern) or `drive_as_task/4` (legacy).
 
@@ -275,9 +275,9 @@ on `initialize` (Streamable), `legacy_sse_open/3` (2024-11-05 pair),
 | --- | --- |
 | `id`, `created_at`, `client_info` | `create/1` |
 | `last_activity` | `handle_dispatch/6` on every legacy request |
-| `client_capabilities` | `barrel_mcp_protocol:initialize/3` |
+| `client_capabilities` | `barrel_mcp_protocol:initialize` |
 | `protocol_version` | `initialize/3`; `remember_version/2` and `maybe_capture_initialize_version/3` in the engine |
-| `sse_pid` | `stream_get_sse_session/5`, `sse_cleanup/2`, `legacy_sse_open/3`, `barrel_mcp_stdio:bind_session/2` (legacy era only) |
+| `sse_pid` | `stream_get_sse_session/5`, `sse_cleanup/2`, `legacy_sse_open/3`, `barrel_mcp_stdio:bind_session` (legacy era only) |
 | `sse_buffer`, `sse_buffer_max` | `record_sse_event` from the engine's SSE helpers; the max from `lookup_session/5` (`sse_buffer_size`, default 256) |
 | `log_level` | `logging/setLevel` handler |
 | `principal` | `lookup_session/5`, `legacy_sse_open/3` |

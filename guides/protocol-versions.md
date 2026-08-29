@@ -189,12 +189,12 @@ re-derives it.
 
 The fork per transport:
 
-- Streamable HTTP: `barrel_mcp_http_engine:stream_post_request/6`,
+- Streamable HTTP: `barrel_mcp_http_engine:stream_post_request`,
   after decode and before any session lookup, so a modern request
   never touches the session machinery.
 - The 2024-11-05 pair: always legacy
   (`legacy_transport_version/2`).
-- stdio: `barrel_mcp_stdio:bind_session/2` attaches the SSE channel
+- stdio: `barrel_mcp_stdio:bind_session` attaches the SSE channel
   to the session for the legacy era only.
 - Client: `barrel_mcp_client` chooses between `server/discover` and
   `initialize` from the requested version.

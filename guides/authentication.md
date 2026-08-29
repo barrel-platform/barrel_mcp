@@ -882,7 +882,7 @@ change anything that is owned per client: sessions, tasks,
 elicitations.
 
 Derivation: after a provider's `authenticate/2` succeeds,
-`barrel_mcp_auth:with_principal/3` asks the provider for the identity
+`barrel_mcp_auth:with_principal` asks the provider for the identity
 through its optional `principal/2` callback, and falls back to
 `barrel_mcp_auth:principal/2`, which derives it from the auth info
 map. The result is stored as `principal` in the auth info every
@@ -892,7 +892,7 @@ handler sees under `_auth`. `barrel_mcp_auth_none` yields
 Where it is enforced:
 
 - **Sessions**: a Streamable HTTP session is bound to the principal
-  that initialized it (`barrel_mcp_http_engine:lookup_session/5`),
+  that initialized it (`barrel_mcp_http_engine:lookup_session`),
   and every later POST, GET, DELETE and replay checks it
   (`owned_session/2`). The 2024-11-05 pair binds its endpoint the
   same way (`legacy_sse_open/3`, `legacy_session_of/2`). Another
