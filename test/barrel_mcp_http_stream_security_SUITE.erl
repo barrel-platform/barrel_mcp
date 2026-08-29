@@ -44,7 +44,11 @@
     prm_endpoint_serves_metadata/1,
     bearer_challenge_includes_resource_metadata/1,
     get_sse_requires_auth/1,
-    delete_requires_auth/1
+    delete_requires_auth/1,
+    session_post_other_principal_404/1,
+    session_get_other_principal_404/1,
+    session_delete_other_principal_404/1,
+    response_other_principal_not_delivered/1
 ]).
 
 -define(BASE_PORT, 21100).
@@ -73,7 +77,11 @@ all() ->
         prm_endpoint_serves_metadata,
         bearer_challenge_includes_resource_metadata,
         get_sse_requires_auth,
-        delete_requires_auth
+        delete_requires_auth,
+        session_post_other_principal_404,
+        session_get_other_principal_404,
+        session_delete_other_principal_404,
+        response_other_principal_not_delivered
     ].
 
 init_per_suite(Config) ->
@@ -675,6 +683,160 @@ delete_requires_auth(Config) ->
         [with_body]
     ),
     ok.
+
+%%====================================================================
+%% Session ownership
+%%====================================================================
+
+%% Two API keys, two principals. A session id in another principal's
+%% hands answers exactly as an unknown one would.
+
+two_principal_server(Port) ->
+    {ok, _} = barrel_mcp:start_http_stream(#{
+        port => Port,
+        session_enabled => true,
+        auth => #{
+            provider => barrel_mcp_auth_apikey,
+            provider_opts => #{
+                keys => #{
+                    <<"key-alice">> => #{subject => <<"alice">>},
+                    <<"key-bob">> => #{subject => <<"bob">>}
+                }
+            }
+        }
+    }),
+    ok.
+
+session_of(Port, Key) ->
+    {200, H, _} = post_init(Port, [{<<"x-api-key">>, Key}]),
+    Sid = proplists:get_value(<<"mcp-session-id">>, H),
+    true = is_binary(Sid),
+    Sid.
+
+session_post_other_principal_404(Config) ->
+    Port = ?config(port, Config),
+    ok = two_principal_server(Port),
+    Sid = session_of(Port, <<"key-alice">>),
+    {ok, 404, _, _} = post_ping(Port, Sid, <<"key-bob">>),
+    {ok, 200, _, _} = post_ping(Port, Sid, <<"key-alice">>),
+    ok.
+
+session_get_other_principal_404(Config) ->
+    Port = ?config(port, Config),
+    ok = two_principal_server(Port),
+    Sid = session_of(Port, <<"key-alice">>),
+    {ok, 404, _, _} = hackney:request(
+        get,
+        url(Port),
+        [
+            {<<"accept">>, <<"text/event-stream">>},
+            {<<"mcp-session-id">>, Sid},
+            {<<"x-api-key">>, <<"key-bob">>}
+        ],
+        <<>>,
+        [with_body]
+    ),
+    %% The owner's stream opens. Async and off the shared pool, since
+    %% the stream never ends.
+    {ok, Ref} = hackney:request(
+        get,
+        url(Port),
+        [
+            {<<"accept">>, <<"text/event-stream">>},
+            {<<"mcp-session-id">>, Sid},
+            {<<"x-api-key">>, <<"key-alice">>}
+        ],
+        <<>>,
+        [async, {pool, false}]
+    ),
+    receive
+        {hackney_response, Ref, {status, 200, _}} -> ok
+    after 2000 -> ct:fail(owner_stream_not_opened)
+    end,
+    hackney:close(Ref),
+    ok.
+
+session_delete_other_principal_404(Config) ->
+    Port = ?config(port, Config),
+    ok = two_principal_server(Port),
+    Sid = session_of(Port, <<"key-alice">>),
+    {ok, 404, _, _} = delete_session(Port, Sid, <<"key-bob">>),
+    {ok, 200, _, _} = post_ping(Port, Sid, <<"key-alice">>),
+    {ok, 204, _, _} = delete_session(Port, Sid, <<"key-alice">>),
+    {ok, 404, _, _} = post_ping(Port, Sid, <<"key-alice">>),
+    ok.
+
+%% A response to a server-initiated request is only delivered when it
+%% arrives on the session that asked, from that session's principal.
+%% The other principal gets the same 202, and the caller keeps waiting.
+response_other_principal_not_delivered(Config) ->
+    Port = ?config(port, Config),
+    ok = two_principal_server(Port),
+    Alice = session_of(Port, <<"key-alice">>),
+    Bob = session_of(Port, <<"key-bob">>),
+    ok = barrel_mcp_session:set_client_capabilities(Alice, #{<<"elicitation">> => #{}}),
+    Test = self(),
+    Channel = spawn_link(fun() ->
+        receive
+            {sse_send_message, #{<<"id">> := Id}} -> Test ! {asked, Id}
+        end
+    end),
+    ok = barrel_mcp_session:set_sse_pid(Alice, Channel),
+    Caller = spawn_link(fun() ->
+        Test !
+            {answered,
+                barrel_mcp_session:elicit_create(
+                    Alice, #{<<"message">> => <<"?">>}, #{timeout_ms => 5000}
+                )}
+    end),
+    Id =
+        receive
+            {asked, I} -> I
+        after 2000 -> ct:fail(no_elicitation)
+        end,
+    Answer = json:encode(#{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => Id,
+        <<"result">> => #{<<"action">> => <<"accept">>, <<"content">> => #{}}
+    }),
+    {ok, 202, _, _} = post_raw(Port, Bob, <<"key-bob">>, Answer),
+    receive
+        {answered, Early} -> ct:fail({delivered_across_sessions, Early})
+    after 300 -> ok
+    end,
+    true = is_process_alive(Caller),
+    {ok, 202, _, _} = post_raw(Port, Alice, <<"key-alice">>, Answer),
+    receive
+        {answered, {ok, #{<<"action">> := <<"accept">>}}} -> ok
+    after 2000 -> ct:fail(not_delivered_to_owner)
+    end,
+    ok.
+
+post_ping(Port, Sid, Key) ->
+    post_raw(Port, Sid, Key, ping_body()).
+
+post_raw(Port, Sid, Key, Body) ->
+    hackney:request(
+        post,
+        url(Port),
+        [
+            {<<"content-type">>, <<"application/json">>},
+            {<<"accept">>, <<"application/json, text/event-stream">>},
+            {<<"mcp-session-id">>, Sid},
+            {<<"x-api-key">>, Key}
+        ],
+        Body,
+        [with_body]
+    ).
+
+delete_session(Port, Sid, Key) ->
+    hackney:request(
+        delete,
+        url(Port),
+        [{<<"mcp-session-id">>, Sid}, {<<"x-api-key">>, Key}],
+        <<>>,
+        [with_body]
+    ).
 
 post_init(Port, ExtraHeaders) ->
     Headers = [

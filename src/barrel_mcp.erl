@@ -554,9 +554,11 @@ start_http(Opts) ->
 stop_http() ->
     barrel_mcp_http:stop().
 
-%% @doc Start the Streamable HTTP server for MCP (Protocol 2025-03-26).
+%% @doc Start the Streamable HTTP server for MCP.
 %%
-%% Starts a Cowboy HTTP server implementing the MCP Streamable HTTP transport.
+%% Starts an HTTP/1.1 and HTTP/2 listener (the `h1' and `h2' libraries)
+%% implementing the MCP Streamable HTTP transport, serving every
+%% revision from 2025-03-26 to 2026-07-28.
 %% This transport supports:
 %% - POST for client requests with JSON or SSE streaming responses
 %% - GET for server-to-client notification streams (SSE)

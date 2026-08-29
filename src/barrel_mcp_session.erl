@@ -51,7 +51,7 @@
     sampling_create_message/3,
     elicit_create/3,
     roots_list/2,
-    deliver_response/2,
+    deliver_response/3,
     %% Server -> client notifications.
     broadcast_list_changed/1,
     notify_progress/4,
@@ -122,7 +122,7 @@
 
 -record(pending, {
     id :: binary(),
-    session_id :: binary(),
+    session_id :: binary() | undefined,
     caller :: pid(),
     caller_ref :: reference(),
     expires_at :: integer(),
@@ -472,9 +472,12 @@ channel(SessionId, Opts) ->
 %% @doc Deliver a JSON-RPC response from the client back to the waiting
 %% caller. Called by the HTTP handler when an inbound POST contains a
 %% `result' or `error' for a server-initiated id.
--spec deliver_response(binary() | integer(), map()) -> ok | {error, unknown_id}.
-deliver_response(Id, Response) ->
-    gen_server:call(?MODULE, {deliver_response, id_to_binary(Id), Response}).
+%% The pending row is matched on the session as well as the id, so a
+%% response posted on another session cannot answer this caller.
+-spec deliver_response(binary() | undefined, binary() | integer(), map()) ->
+    ok | {error, unknown_id}.
+deliver_response(SessionId, Id, Response) ->
+    gen_server:call(?MODULE, {deliver_response, SessionId, id_to_binary(Id), Response}).
 
 %% @doc Push a `notifications/<kind>/list_changed' envelope to every
 %% session that has an active SSE channel. Tolerates a missing
@@ -805,14 +808,14 @@ handle_call({register_pending, RequestId, Pending}, _From, State) ->
 handle_call({discard_pending, RequestId}, _From, State) ->
     true = ets:delete(?PENDING_TABLE, RequestId),
     {reply, ok, State};
-handle_call({deliver_response, Key, Response}, _From, State) ->
+handle_call({deliver_response, SessionId, Key, Response}, _From, State) ->
     Reply =
         case ets:lookup(?PENDING_TABLE, Key) of
-            [{_, #pending{caller = Caller, caller_ref = Ref, tag = Tag}}] ->
+            [{_, #pending{session_id = SessionId, caller = Caller, caller_ref = Ref, tag = Tag}}] ->
                 true = ets:delete(?PENDING_TABLE, Key),
                 Caller ! {Tag, Ref, Response},
                 ok;
-            [] ->
+            _ ->
                 {error, unknown_id}
         end,
     {reply, Reply, State};

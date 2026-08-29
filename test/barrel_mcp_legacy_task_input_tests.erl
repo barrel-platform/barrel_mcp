@@ -54,28 +54,28 @@ asking_tool(_Args, Ctx) ->
 
 %% Stands in for the client's SSE stream: captures what the server
 %% sends and answers it the way a client would.
-fake_client(Test, Answer) ->
-    spawn(fun() -> fake_client_loop(Test, Answer) end).
+fake_client(SessionId, Test, Answer) ->
+    spawn(fun() -> fake_client_loop(SessionId, Test, Answer) end).
 
-fake_client_loop(Test, Answer) ->
+fake_client_loop(SessionId, Test, Answer) ->
     receive
         {sse_send_message, #{<<"id">> := Id, <<"method">> := Method} = Request} ->
             Test ! {sent, Request},
-            _ = barrel_mcp_session:deliver_response(Id, #{
+            _ = barrel_mcp_session:deliver_response(SessionId, Id, #{
                 <<"jsonrpc">> => <<"2.0">>,
                 <<"id">> => Id,
                 <<"result">> => Answer
             }),
             _ = Method,
-            fake_client_loop(Test, Answer);
+            fake_client_loop(SessionId, Test, Answer);
         _Other ->
-            fake_client_loop(Test, Answer)
+            fake_client_loop(SessionId, Test, Answer)
     end.
 
 start_session(Answer) ->
     {ok, SessionId} = barrel_mcp_session:create(#{}),
     ok = barrel_mcp_session:set_client_capabilities(SessionId, #{<<"elicitation">> => #{}}),
-    Pid = fake_client(self(), Answer),
+    Pid = fake_client(SessionId, self(), Answer),
     ok = barrel_mcp_session:set_sse_pid(SessionId, Pid),
     SessionId.
 

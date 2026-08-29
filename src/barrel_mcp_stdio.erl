@@ -337,8 +337,8 @@ reject_malformed(Message, State) ->
 %% The answer to a `sampling/createMessage', `elicitation/create' or
 %% `roots/list' we sent. An id nobody is waiting on is dropped rather
 %% than answered: JSON-RPC forbids replying to a response.
-deliver_response(Id, Message, State) ->
-    case barrel_mcp_session:deliver_response(Id, Message) of
+deliver_response(Id, Message, #state{session = SessionId} = State) ->
+    case barrel_mcp_session:deliver_response(SessionId, Id, Message) of
         ok -> State;
         {error, _} -> note_drop(State)
     end.

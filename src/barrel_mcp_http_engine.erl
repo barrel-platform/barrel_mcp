@@ -310,7 +310,7 @@ stream_post_authed(Headers, Body, Responder, Config, AuthInfo) ->
 %% protocol core decides.
 stream_post_batch(Headers, Responder, Config, SessionEnabled, Batch, AuthInfo) ->
     SessionId =
-        case lookup_session(Headers, Config, SessionEnabled, undefined) of
+        case lookup_session(Headers, Config, SessionEnabled, undefined, AuthInfo) of
             {ok, Sid} -> Sid;
             {error, _} -> undefined
         end,
@@ -350,7 +350,9 @@ stream_post_request(Headers, Responder, Config, SessionEnabled, Request, AuthInf
         true ->
             %% Only legacy clients send responses: modern servers never
             %% issue requests, so there is nothing to answer.
-            handle_inbound_response(Headers, Responder, Config, Request);
+            handle_inbound_response(
+                Headers, Responder, Config, SessionEnabled, Request, AuthInfo
+            );
         false ->
             %% The era is decided from the body's `_meta' and from the
             %% version the transport declares, so the second decision
@@ -679,13 +681,22 @@ is_jsonrpc_response(R) ->
         (is_map_key(<<"result">>, R) orelse is_map_key(<<"error">>, R)) andalso
         not is_map_key(<<"method">>, R).
 
-handle_inbound_response(Headers, Responder, Config, #{<<"id">> := RespId} = Request) ->
-    _ = barrel_mcp_session:deliver_response(RespId, Request),
+%% Delivered against the session the header names, once that session
+%% is the caller's own; anything else is dropped behind the same 202,
+%% so a guessed id learns nothing.
+handle_inbound_response(
+    Headers, Responder, Config, SessionEnabled, #{<<"id">> := RespId} = Request, AuthInfo
+) ->
+    _ =
+        case lookup_session(Headers, Config, SessionEnabled, undefined, AuthInfo) of
+            {ok, SessionId} -> barrel_mcp_session:deliver_response(SessionId, RespId, Request);
+            {error, _} -> ok
+        end,
     reply(Responder, 202, cors_headers(Headers, Config, #{}), <<>>).
 
 handle_inbound_request(Headers, Responder, Config, SessionEnabled, Request, AuthInfo) ->
     Method = maps:get(<<"method">>, Request, undefined),
-    case lookup_session(Headers, Config, SessionEnabled, Method) of
+    case lookup_session(Headers, Config, SessionEnabled, Method, AuthInfo) of
         {ok, SessionId} ->
             handle_dispatch(Headers, Responder, Config, SessionId, Request, AuthInfo);
         {error, missing_session_id} ->
@@ -1481,32 +1492,39 @@ reply_jsonrpc_error(Headers, Responder, Config, SessionId, Status, Id, Code, Mes
 %% Session resolution / protocol version
 %%====================================================================
 
-lookup_session(_Headers, _Config, false, _Method) ->
+lookup_session(_Headers, _Config, false, _Method, _AuthInfo) ->
     {ok, undefined};
 %% Discovery must be reachable before anything else, so it neither
 %% requires a session nor mints one. That is what lets a dual-era
 %% client probe with `server/discover' the way the stdio binding
 %% describes, over HTTP too.
-lookup_session(_Headers, _Config, true, <<"server/discover">>) ->
+lookup_session(_Headers, _Config, true, <<"server/discover">>, _AuthInfo) ->
     {ok, undefined};
-lookup_session(Headers, Config, true, Method) ->
+lookup_session(Headers, Config, true, Method, AuthInfo) ->
     case {Method, session_header(Headers)} of
         {<<"initialize">>, undefined} ->
             {ok, SessionId} = barrel_mcp_session:create(#{}),
+            _ = barrel_mcp_session:set_principal(SessionId, principal_of(AuthInfo)),
             BufMax = maps:get(sse_buffer_size, Config, 256),
             _ = barrel_mcp_session:set_sse_buffer_max(SessionId, BufMax),
             {ok, SessionId};
-        {<<"initialize">>, SessionId} ->
-            case barrel_mcp_session:get(SessionId) of
-                {ok, _} -> {ok, SessionId};
-                {error, not_found} -> {error, unknown_session}
-            end;
         {_, undefined} ->
             {error, missing_session_id};
         {_, SessionId} ->
-            case barrel_mcp_session:get(SessionId) of
-                {ok, _} -> {ok, SessionId};
-                {error, not_found} -> {error, unknown_session}
+            owned_session(SessionId, AuthInfo)
+    end.
+
+%% A session belongs to the principal that initialized it. Another
+%% principal holding its id gets the unknown-session answer, so the id
+%% is neither an oracle nor a capability on its own.
+owned_session(SessionId, AuthInfo) ->
+    case barrel_mcp_session:get_principal(SessionId) of
+        {error, not_found} ->
+            {error, unknown_session};
+        {ok, Principal} ->
+            case Principal =:= principal_of(AuthInfo) of
+                true -> {ok, SessionId};
+                false -> {error, unknown_session}
             end
     end.
 
@@ -1575,15 +1593,15 @@ maybe_capture_initialize_version(_, _, _) ->
 %%====================================================================
 
 stream_get_sse(Headers, Responder, Config) ->
-    with_authenticated(
+    with_auth_info(
         Headers,
         Responder,
         Config,
-        fun() -> stream_get_sse_authed(Headers, Responder, Config) end
+        fun(AuthInfo) -> stream_get_sse_authed(Headers, Responder, Config, AuthInfo) end
     ).
 
 %% Only reached with sessions on: `dispatch/6' answers 405 otherwise.
-stream_get_sse_authed(Headers, Responder, Config) ->
+stream_get_sse_authed(Headers, Responder, Config, AuthInfo) ->
     case session_header(Headers) of
         undefined ->
             reply(
@@ -1593,12 +1611,12 @@ stream_get_sse_authed(Headers, Responder, Config) ->
                 json_encode(#{<<"error">> => <<"Mcp-Session-Id header required">>})
             );
         SessionId ->
-            stream_get_sse_session(Headers, Responder, Config, SessionId)
+            stream_get_sse_session(Headers, Responder, Config, SessionId, AuthInfo)
     end.
 
-stream_get_sse_session(Headers, Responder, Config, SessionId) ->
-    case barrel_mcp_session:get(SessionId) of
-        {ok, _Session} ->
+stream_get_sse_session(Headers, Responder, Config, SessionId, AuthInfo) ->
+    case owned_session(SessionId, AuthInfo) of
+        {ok, _} ->
             Hdrs = add_session_header(
                 cors_headers(
                     Headers,
@@ -1619,7 +1637,7 @@ stream_get_sse_session(Headers, Responder, Config, SessionId) ->
             ),
             _ = barrel_mcp_session:set_sse_pid(SessionId, self()),
             sse_loop(Responder, SessionId);
-        {error, not_found} ->
+        {error, unknown_session} ->
             reply(
                 Responder,
                 404,
@@ -1671,14 +1689,14 @@ sse_cleanup(Responder, SessionId) ->
     ok.
 
 stream_delete(Headers, Responder, Config) ->
-    with_authenticated(
+    with_auth_info(
         Headers,
         Responder,
         Config,
-        fun() -> stream_delete_authed(Headers, Responder, Config) end
+        fun(AuthInfo) -> stream_delete_authed(Headers, Responder, Config, AuthInfo) end
     ).
 
-stream_delete_authed(Headers, Responder, Config) ->
+stream_delete_authed(Headers, Responder, Config, AuthInfo) ->
     case session_header(Headers) of
         undefined ->
             reply(
@@ -1688,11 +1706,11 @@ stream_delete_authed(Headers, Responder, Config) ->
                 json_encode(#{<<"error">> => <<"Mcp-Session-Id header required">>})
             );
         SessionId ->
-            case barrel_mcp_session:get(SessionId) of
+            case owned_session(SessionId, AuthInfo) of
                 {ok, _} ->
                     barrel_mcp_session:delete(SessionId),
                     reply(Responder, 204, cors_headers(Headers, Config, #{}), <<>>);
-                {error, not_found} ->
+                {error, unknown_session} ->
                     reply(
                         Responder,
                         404,
@@ -2115,32 +2133,16 @@ authenticate(#{provider := barrel_mcp_auth_none}, _Request) ->
 authenticate(AuthConfig, Request) ->
     barrel_mcp_auth:authenticate(AuthConfig, Request, AuthConfig).
 
-%% Run `Fun' only if the request passes the configured auth provider.
-%% Used by the GET (SSE) and DELETE verbs so they enforce the same
-%% credential as POST instead of trusting the session id alone. With
-%% `barrel_mcp_auth_none' this admits every request unchanged.
-%% As `with_authenticated/4', but hands the caller what it authenticated
-%% as: the 2024-11-05 transport binds its endpoint to that identity.
+%% Run `Fun' with what the request authenticated as. Every verb goes
+%% through here, so GET and DELETE enforce the same credential as POST
+%% and every session path can check ownership. With
+%% `barrel_mcp_auth_none' this admits every request as `anonymous'.
 with_auth_info(Headers, Responder, Config, Fun) ->
     AuthConfig = maps:get(auth_config, Config, #{provider => barrel_mcp_auth_none}),
     AuthRequest = #{headers => extract_headers(Headers, AuthConfig)},
     case authenticate(AuthConfig, AuthRequest) of
         {ok, AuthInfo} -> Fun(AuthInfo);
         {error, Reason} -> auth_error(Headers, Responder, AuthConfig, Reason)
-    end.
-
-with_authenticated(Headers, Responder, Config, Fun) ->
-    AuthConfig = maps:get(
-        auth_config,
-        Config,
-        #{provider => barrel_mcp_auth_none}
-    ),
-    AuthRequest = #{headers => extract_headers(Headers, AuthConfig)},
-    case authenticate(AuthConfig, AuthRequest) of
-        {ok, _AuthInfo} ->
-            Fun();
-        {error, Reason} ->
-            auth_error(Headers, Responder, AuthConfig, Reason)
     end.
 
 auth_error(Headers, Responder, AuthConfig, Reason) ->

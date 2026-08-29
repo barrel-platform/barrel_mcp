@@ -111,6 +111,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Streamable HTTP session belongs to the principal that initialized
+  it. A POST, GET, DELETE or replay naming another principal's session
+  id gets the unknown-session 404, and a response to a server-initiated
+  request is delivered only from the session that carried it
+  (`barrel_mcp_session:deliver_response/3` takes the session id; the
+  arity-2 form is gone). The 2024-11-05 pair already did this; the
+  Streamable transport did not.
+- `barrel_mcp_auth_custom` fails a `authenticate/2` result of any shape
+  the contract does not name instead of admitting it as subject
+  `unknown`, and no longer pretends to keep the returned state.
 - An HTTP acceptor that dies is replaced; the listener used to run one
   short for the rest of its life. `barrel_mcp_http_listener:acceptors/1`
   lists the live pool.
