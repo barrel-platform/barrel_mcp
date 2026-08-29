@@ -1,7 +1,47 @@
 %%%-------------------------------------------------------------------
-%%% @doc MCP protocol implementation over JSON-RPC 2.0.
+%%% @doc The MCP protocol core: JSON-RPC envelopes in, envelopes out.
 %%%
-%%% Handles encoding/decoding and routing of MCP methods.
+%%% This module owns what every transport shares: decoding a request,
+%%% deciding which era it belongs to and whether that era has the
+%%% method, validating `_meta', running the method handler, and
+%%% rendering the answer for that era. It owns nothing about the
+%%% wire: no sockets, no headers, no sessions on the wire, no SSE. A
+%%% transport (`barrel_mcp_http_engine', `barrel_mcp_stdio') calls
+%%% {@link handle/2} with a protocol state map and writes whatever
+%%% comes back.
+%%%
+%%% == What handle/2 returns ==
+%%%
+%%% A response map to encode, `no_response' for a notification,
+%%% `{async, Plan}' for a `tools/call' (the transport drives the plan,
+%%% see {@link drive_async_plan/4}, because only it knows how to
+%%% stream the answer), `{subscribe, Sub}' for `subscriptions/listen',
+%%% or a list for a batch.
+%%%
+%%% == Sections, in file order ==
+%%%
+%%% <ul>
+%%%   <li>API: `handle/1,2', `decode/1', the response constructors.</li>
+%%%   <li>Batches: the legacy batch envelope and its per-era refusal.</li>
+%%%   <li>Era dispatch: `dispatch/4' → `dispatch_versioned/4' →
+%%%       `dispatch_valid/4'; `serves/2' says which methods an era
+%%%       has; `finalize/2' decorates a result for its era.</li>
+%%%   <li>Tasks: the task collector, `task_plan/2' (the mode rule for
+%%%       every transport but Streamable HTTP), `create_task_result/3'.</li>
+%%%   <li>Multi round-trip requests: `input_required' rounds and the
+%%%       sealed `request_state'.</li>
+%%%   <li>Request handlers: one `handle_request/4' clause per method.</li>
+%%%   <li>Notification handlers.</li>
+%%%   <li>Internal functions, cursor pagination, envelope helpers.</li>
+%%% </ul>
+%%%
+%%% == Processes ==
+%%%
+%%% Everything here runs in the caller's process (a request process
+%%% under HTTP, a worker under stdio) except the task collector,
+%%% which `spawn_task_collector/3' starts to outlive the request. See
+%%% the Server Internals guide for the process model and the hop
+%%% list of a request.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_protocol).
@@ -723,7 +763,7 @@ tool_call_plan(Params, Id, Ctx, Mrtr) ->
 %% Both Python SDK generations turn every exception in the tool-call
 %% handler into a CallToolResult with isError, never a protocol error
 %% (v2 mcp/server/mcpserver/server.py:424, v1 lowlevel/server.py:472),
-%% and an unknown tool raises ToolError("Unknown tool: <name>") into
+%% and an unknown tool raises ToolError("Unknown tool: ...") into
 %% that same branch (tools/tool_manager.py:72). That is what clients on
 %% the wire expect and what the official conformance runner asserts.
 %%

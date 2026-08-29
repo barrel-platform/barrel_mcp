@@ -266,25 +266,34 @@ Notes:
 
 ### Long-running tools (tasks)
 
-Set `long_running => true` on `reg_tool/4` and the tool returns
-immediately to the client with a `taskId`. The handler keeps
-running in the background and the runtime stores its eventual
-outcome on the task. Clients track progress via `tasks/get`,
-`tasks/list`, or `notifications/tasks/status`.
-
-This now applies over stdio too. Before 3.0 only the HTTP transport
-honoured `long_running`; stdio drove every tool synchronously and
-blocked up to 60 seconds.
+Set `task_support` on `reg_tool/4` to say whether a call may become a
+task: `forbidden` (the default), `optional`, or `required`.
+`long_running => true` is the older spelling of `optional`.
 
 ```erlang
 barrel_mcp:reg_tool(<<"render_video">>, my_tools, render_video, #{
-    long_running => true,
+    task_support => optional,
     description => <<"Render a video on the GPU farm">>
 }).
 ```
 
-The same handler shape (arity 1 or arity 2) applies. Long-running
-handlers may emit progress just like any other tool.
+What the client then sees depends on its era and on whether it
+declared the tasks extension:
+
+- A legacy client that negotiated tasks gets a `taskId` at once; the
+  handler keeps running and the runtime stores its outcome on the
+  task. It tracks progress with `tasks/get`, `tasks/list` or
+  `notifications/tasks/status`.
+- A modern client that declared the extension gets the result in
+  place when the handler answers within `task_inline_ms` (application
+  environment, default 100 ms), and a task handle otherwise.
+- A client that did not declare the extension gets the tool run
+  synchronously for `optional`, and error `-32021` for `required`.
+
+The full mode table, and where each transport decides it, is in
+[Server Internals](server-internals.md#5-tool-call-modes). The same
+handler shape (arity 1 or arity 2) applies, over stdio too, and
+task-backed handlers may emit progress like any other tool.
 
 ### Schema validation
 

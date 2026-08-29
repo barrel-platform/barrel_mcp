@@ -1,12 +1,17 @@
 %%%-------------------------------------------------------------------
 %%% @doc Long-running operation registry (MCP tasks).
 %%%
-%%% Tools registered with `long_running => true' return immediately
-%%% with a `taskId' instead of synchronously producing a result. The
-%%% worker continues in the background; clients poll via
-%%% `tasks/get', enumerate via `tasks/list', and abort via
-%%% `tasks/cancel'. State transitions emit
-%%% `notifications/tasks/status' on the session's SSE channel.
+%%% Tools registered with `task_support => optional | required'
+%%% (`long_running => true' is the old spelling of `optional') can
+%%% answer with a `taskId' instead of a result: at once for a legacy
+%%% client, after the inline window for a modern one. The worker
+%%% continues in the background; clients poll via `tasks/get',
+%%% enumerate via `tasks/list' (legacy), and abort via `tasks/cancel'.
+%%% State transitions emit `notifications/tasks/status' on the
+%%% session's SSE channel. The mode rule lives in the transports
+%%% (`barrel_mcp_http_engine:handle_async_tool_call/7',
+%%% `barrel_mcp_protocol:task_plan/2'), not here: this module is the
+%%% table and the lifecycle.
 %%%
 %%% Tasks live in a `protected' ETS table keyed by `TaskId', which is
 %%% crypto-random and so unique on its own. Who owns a task is a field
@@ -21,6 +26,17 @@
 %%%
 %%% A periodic sweep evicts terminal tasks (success / error /
 %%% cancelled) older than `?TASK_TTL'.
+%%%
+%%% == Sections, in file order ==
+%%%
+%%% <ul>
+%%%   <li>Public API: create, get, list, finish, fail, cancel,
+%%%       `set_worker/3', `await_input/5' for `input_required'.</li>
+%%%   <li>gen_server: every transition, the sweep, generation fencing
+%%%       so a late worker cannot revive an expired task.</li>
+%%%   <li>Internal: rendering per era (`ttl' versus `ttlMs'), the
+%%%       error object, expiry.</li>
+%%% </ul>
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_tasks).
@@ -132,6 +148,7 @@
 %% Public API
 %%====================================================================
 
+%% @doc Start the task table owner, registered as `barrel_mcp_tasks'.
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
@@ -169,6 +186,8 @@ lookup(Owner, TaskId) ->
         _ -> {error, not_found}
     end.
 
+%% @doc Every task an owner holds, rendered for the legacy era
+%% (`tasks/list' exists only there).
 -spec list(SessionId :: binary() | undefined, map()) -> {ok, [map()]}.
 list(SessionId, _Opts) ->
     Tasks = ets:foldl(
@@ -190,8 +209,9 @@ list(SessionId, _Opts) ->
 cancel(SessionId, TaskId) ->
     gen_server:call(?MODULE, {cancel, SessionId, TaskId}).
 
-%% @doc Record the worker pid (and optional originating request id)
-%% on a running task so a later `tasks/cancel' can stop it.
+%% @doc Attach the worker to a task created before it, so cancel and
+%% expiry can reach the process; carries the request id for MRTR
+%% resumption.
 -spec set_worker(
     binary() | undefined,
     binary(),

@@ -874,6 +874,44 @@ This stays a standalone exchanger, the library doesn't persist
 the issued credentials. That's a host concern (file, DB, secret
 manager).
 
+## Principals
+
+A principal is who a request is from, as the auth provider states
+it. You need this section when you write a provider, or when you
+change anything that is owned per client: sessions, tasks,
+elicitations.
+
+Derivation: after a provider's `authenticate/2` succeeds,
+`barrel_mcp_auth:with_principal/3` asks the provider for the identity
+through its optional `principal/2` callback, and falls back to
+`barrel_mcp_auth:principal/2`, which derives it from the auth info
+map. The result is stored as `principal` in the auth info every
+handler sees under `_auth`. `barrel_mcp_auth_none` yields
+`anonymous`; every anonymous request is the same principal.
+
+Where it is enforced:
+
+- **Sessions**: a Streamable HTTP session is bound to the principal
+  that initialized it (`barrel_mcp_http_engine:lookup_session/5`),
+  and every later POST, GET, DELETE and replay checks it
+  (`owned_session/2`). The 2024-11-05 pair binds its endpoint the
+  same way (`legacy_sse_open/3`, `legacy_session_of/2`). Another
+  principal holding the id gets the unknown-session 404, so the id
+  is neither an oracle nor a capability on its own.
+- **Server-to-client responses**: a response to `sampling/createMessage`,
+  `elicitation/create` or `roots/list` is delivered only from the
+  session that carried the request
+  (`barrel_mcp_session:deliver_response/3`).
+- **Tasks**: a modern task belongs to its principal, a legacy one to
+  its session (`barrel_mcp_protocol:task_owner/1`); `tasks/get`,
+  `tasks/cancel` and `tasks/result` look up by owner.
+- **Elicitations**: URL-mode elicitation records carry the principal
+  and the session (`barrel_mcp_elicitation`).
+
+If your provider can name a stable identity (a subject claim, a key
+id), return it from `principal/2`; the default derivation is only as
+good as the auth info map it reads.
+
 ## Security Best Practices
 
 1. **Always use TLS** in production

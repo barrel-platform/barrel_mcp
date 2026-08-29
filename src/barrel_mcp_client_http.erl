@@ -23,6 +23,35 @@
 %%% Each parsed SSE event's `data:' payload is forwarded to the owning
 %%% client as `{mcp_in, self(), Json}'. The owner sees the same shape
 %%% as it does from the stdio transport.
+%%%
+%%% == Sections, in file order ==
+%%%
+%%% <ul>
+%%%   <li>Transport API and public helpers.</li>
+%%%   <li>gen_server: `init', the info handlers for hackney, the auth
+%%%       worker and resume timers.</li>
+%%%   <li>POST request lifecycle: `start_post/3', response parsing,
+%%%       `finalize_request', the challenge path, SEP-1699
+%%%       resumption.</li>
+%%%   <li>SSE GET stream, SSE parsing, header helpers, DELETE on close.</li>
+%%% </ul>
+%%%
+%%% == State ==
+%%%
+%%% `#state{}': `requests' maps each in-flight POST's hackney ref to a
+%%% `#req{}' (attempts, last event id, resumes); `challenged' holds
+%%% the requests waiting on the single auth flow in `auth_flow';
+%%% `sse_mode' and `legacy_sse' record how the server delivers
+%%% unsolicited traffic (a GET, a `subscriptions/listen' POST, or the
+%%% 2024-11-05 endpoint); `resumes' keeps resumption timers so a
+%%% cancel can drop one; `tool_headers' caches the `x-mcp-header'
+%%% bindings from `tools/list'. Each field carries its reason inline.
+%%%
+%%% == Processes ==
+%%%
+%%% One gen_server per connection, owned by the client. hackney
+%%% delivers asynchronously; the auth flow runs in a `spawn_monitor'
+%%% worker so a person's consent step never blocks the transport.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_client_http).

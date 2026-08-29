@@ -43,6 +43,26 @@
 %%%
 %%% If not configured, the registry becomes ready immediately after init.
 %%%
+%%% == Running a tool ==
+%%%
+%%% {@link run_tool/3} spawns the handler in a fresh process (no link,
+%%% no monitor) with `reply_to' in its context, and that process sends
+%%% exactly one outcome message: `{tool_result, ...}',
+%%% `{tool_error, ...}', `{tool_failed, ...}',
+%%% `{tool_validation_failed, ...}' or `{tool_input_required, ...}'.
+%%% Who receives it (the request process, a relay, a collector) is
+%%% the transport's decision; see the Server Internals guide.
+%%% {@link task_support/1} is what that decision reads.
+%%%
+%%% == Sections, in file order ==
+%%%
+%%% <ul>
+%%%   <li>API: readiness, `reg/4,5', `unreg/2', `run/3,4',
+%%%       `run_tool/3', `find/2', `all/0,1', `task_support/1'.</li>
+%%%   <li>gen_statem callbacks: the two states.</li>
+%%%   <li>Internal functions: the ETS table, the persistent_term
+%%%       snapshot, option parsing, handler invocation.</li>
+%%% </ul>
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_registry).

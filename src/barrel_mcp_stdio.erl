@@ -45,6 +45,27 @@
 %%% (macOS), `%APPDATA%\Claude\claude_desktop_config.json' (Windows) or
 %%% `~/.config/claude/claude_desktop_config.json' (Linux).
 %%%
+%%% == Sections, in file order ==
+%%%
+%%% <ul>
+%%%   <li>API and the coordinator's gen_server callbacks.</li>
+%%%   <li>Classification: what kind of frame arrived and whether it
+%%%       runs now, queues, or is answered in place.</li>
+%%%   <li>Requests: the worker pool, `run_request/5',
+%%%       `settle_result/2' (drives an `{async, Plan}' in the worker).</li>
+%%%   <li>Subscriptions, cancellation, notifications with bounded
+%%%       buffering, the reader, the writer, helpers.</li>
+%%% </ul>
+%%%
+%%% == State ==
+%%%
+%%% `#state{}': `requests' indexed by id, with `by_mref' and `by_tag'
+%%% as secondary indexes on the worker monitor and its result tag;
+%%% `pending' and the `queued' / `running' counters implement the
+%%% worker cap; `notifications', `notifying', `outbound' and
+%%% `dropped' bound the outbound notification buffer so a flood of
+%%% progress cannot exhaust memory.
+%%%
 %%% @see barrel_mcp
 %%% @see barrel_mcp_protocol
 %%% @end

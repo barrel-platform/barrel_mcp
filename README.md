@@ -65,6 +65,11 @@ Track `main` instead of pinning a tag for the latest fixes:
 
 ## Architecture
 
+The process tree, the request lifecycle per transport and the
+tool-call modes are in [Server Internals](guides/server-internals.md);
+the client side is in [Client Internals](guides/internals.md), and
+the vocabulary both use is in the [Glossary](guides/glossary.md).
+
 barrel_mcp uses a supervised gen_statem process to manage the handler registry:
 
 - **Writes** (reg/unreg) go through the gen_statem for atomic operations

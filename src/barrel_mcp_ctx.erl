@@ -166,12 +166,6 @@ capabilities_of(legacy, _Meta, Extra) ->
 %% Validation
 %%====================================================================
 
-%% @doc Check that a modern request carries the `_meta' fields the spec
-%% marks required, and that the optional ones it does carry are usable.
-%% A failure is malformed params and the caller must reject it with
-%% `?JSONRPC_INVALID_PARAMS' (HTTP 400).
-%%
-%% Legacy requests carry no such requirement and always pass.
 %% @doc Check the stated revision on its own, before anything is judged
 %% against it. A peer naming a revision we do not speak may legitimately
 %% carry a `_meta' shape we would misjudge, so the version error has to
@@ -189,6 +183,12 @@ validate_version(#{era := modern, meta := Meta}) ->
         {ok, _} -> {error, {invalid_meta, ?MCP_META_PROTOCOL_VERSION}}
     end.
 
+%% @doc Check that a modern request carries the `_meta' fields the spec
+%% marks required, and that the optional ones it does carry are usable.
+%% A failure is malformed params and the caller must reject it with
+%% `?JSONRPC_INVALID_PARAMS' (HTTP 400).
+%%
+%% Legacy requests carry no such requirement and always pass.
 -spec validate(ctx()) ->
     ok | {error, {missing_meta, binary()}} | {error, {invalid_meta, binary()}}.
 validate(#{era := legacy}) ->

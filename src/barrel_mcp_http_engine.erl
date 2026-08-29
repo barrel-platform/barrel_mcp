@@ -39,6 +39,38 @@
 %%% long-lived GET SSE stream it blocks in a receive loop until the
 %%% session is terminated or the binding signals a client disconnect
 %%% by sending the calling process the message `mcp_disconnect'.
+%%%
+%%% == Sections, in file order ==
+%%%
+%%% <ul>
+%%%   <li>Entry point and method dispatch: `handle/6', `route/7',
+%%%       `dispatch/6' keyed on the engine mode and the verb.</li>
+%%%   <li>Simple transport: POST only, no sessions.</li>
+%%%   <li>Streamable POST: `stream_post/4', the era fork in
+%%%       `stream_post_request/6', batches, inbound responses.</li>
+%%%   <li>Modern requests: header and body agreement, stateless
+%%%       dispatch, SSE response streams, `subscriptions/listen'.</li>
+%%%   <li>Async tool calls: `handle_async_tool_call/7' decides the
+%%%       tool-call mode for HTTP (inline, task, escalate, refuse) and
+%%%       waits for the worker; the legacy immediate-task path is
+%%%       `handle_long_running_call/10'.</li>
+%%%   <li>Session resolution: `lookup_session/5', `owned_session/2',
+%%%       version negotiation.</li>
+%%%   <li>GET and DELETE: the standalone stream with replay, and
+%%%       session termination.</li>
+%%%   <li>The 2024-11-05 HTTP+SSE pair.</li>
+%%%   <li>SSE, validation, authentication, CORS, Origin and bind
+%%%       helpers, the session manager bootstrap, plumbing.</li>
+%%% </ul>
+%%%
+%%% == Processes ==
+%%%
+%%% `handle/6' runs in the request process the listener spawned. A
+%%% tool worker is spawned by the registry with this process (or a
+%%% relay) as `reply_to'; a task collector, a relay and, on the
+%%% legacy pair, a driver and a stream watcher are the other
+%%% processes this module starts. The Server Internals guide lists
+%%% them with who links or monitors whom.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_http_engine).
@@ -85,6 +117,9 @@
 %% Entry point
 %%====================================================================
 
+%% @doc Serve one HTTP request. Runs in the caller's process and, for
+%% an SSE response, blocks in it until the stream ends. Every binding
+%% (the built-in listener, an embedder's adapter) enters here.
 -spec handle(
     binary(),
     binary(),
@@ -2177,7 +2212,8 @@ extract_headers(Headers, AuthConfig) ->
         Names
     ).
 
-%% The user-facing `resource_metadata' option processing.
+%% @doc Normalise the `resource_metadata' option into the document the
+%% engine serves and the URL it advertises. Shared by both listeners.
 -spec normalize_resource_metadata(map() | undefined) -> map() | undefined.
 normalize_resource_metadata(undefined) ->
     undefined;
@@ -2209,6 +2245,8 @@ derive_prm_url(Resource) when is_binary(Resource) ->
             <<Resource/binary, "/.well-known/oauth-protected-resource">>
     end.
 
+%% @doc Put the PRM URL into the auth config so the bearer challenge
+%% can name it (RFC 9728 `resource_metadata').
 -spec inject_resource_metadata_url(map(), map() | undefined) -> map().
 inject_resource_metadata_url(AuthConfig, undefined) ->
     AuthConfig;
@@ -2267,6 +2305,8 @@ cors_headers(Headers, Config, Extra) ->
 %% Origin validation + bind helpers
 %%====================================================================
 
+%% @doc Decide the `Origin' allow-list from the bind address: a
+%% loopback bind may default, a public one must list its origins.
 -spec resolve_allowed_origins(boolean(), any | undefined | [binary()]) ->
     {ok, any | [term()]} | {error, allowed_origins_required}.
 resolve_allowed_origins(_Loopback, any) ->
@@ -2299,6 +2339,8 @@ parse_origin(Bin) when is_binary(Bin) ->
             #{scheme => undefined, host => Bin, port => any}
     end.
 
+%% @doc Whether a bind address is loopback, in any of the shapes the
+%% listener options accept.
 -spec is_loopback(inet:ip_address() | string() | binary()) -> boolean().
 is_loopback({127, _, _, _}) -> true;
 is_loopback({0, 0, 0, 0, 0, 0, 0, 1}) -> true;
@@ -2343,6 +2385,8 @@ origin_matches(_, _) ->
 %% Session manager bootstrap
 %%====================================================================
 
+%% @doc Start `barrel_mcp_session' when the library is embedded
+%% without its application, so sessions work under a host supervisor.
 -spec ensure_session_manager() -> ok | {ok, pid()} | {error, term()}.
 ensure_session_manager() ->
     case whereis(barrel_mcp_session) of
