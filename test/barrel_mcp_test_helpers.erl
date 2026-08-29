@@ -17,7 +17,7 @@
 -export([url/1, url/2, post/3, header/2]).
 -export([request/3, legacy_request/3, modern_request/3, modern_meta/0, modern_meta/1]).
 -export([init_params/0, init_params/1, init_params/2, init_body/0, init_body/1, init_body/2]).
--export([erl_executable/0, child_args/1]).
+-export([erl_executable/0, child_args/1, child_args/2]).
 
 %%====================================================================
 %% Waiting
@@ -177,6 +177,13 @@ erl_executable() ->
 %% wire. The paths are reversed because each `-pa' prepends.
 -spec child_args(module()) -> [string()].
 child_args(Module) ->
+    child_args(Module, start).
+
+%% @doc Arguments that boot `Module:Function()' the same way, ending in
+%% `-extra' so whatever a caller appends reaches the node as plain
+%% arguments (`init:get_plain_arguments/0').
+-spec child_args(module(), atom()) -> [string()].
+child_args(Module, Function) ->
     Dirs = lists:reverse([D || D <- code:get_path(), filelib:is_dir(D)]),
     Paths = lists:append([["-pa", D] || D <- Dirs]),
     [
@@ -187,4 +194,4 @@ child_args(Module) ->
         "logger",
         "[{handler,default,logger_std_h,#{config=>#{type=>standard_error}}}]"
     ] ++ Paths ++
-        ["-eval", atom_to_list(Module) ++ ":start()"].
+        ["-eval", atom_to_list(Module) ++ ":" ++ atom_to_list(Function) ++ "()", "-extra"].

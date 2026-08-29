@@ -30,6 +30,10 @@
     conformance_2025_03_26/1,
     requirements_2026_07_28/1,
     requirements_2025_11_25/1,
+    client_requirements_2026_07_28/1,
+    client_requirements_2025_11_25/1,
+    client_conformance_2025_06_18/1,
+    client_conformance_2025_03_26/1,
     erlang_client_against_server_everything/1
 ]).
 %% Tools
@@ -86,6 +90,10 @@ all() ->
         conformance_2025_03_26,
         requirements_2026_07_28,
         requirements_2025_11_25,
+        client_requirements_2026_07_28,
+        client_requirements_2025_11_25,
+        client_conformance_2025_06_18,
+        client_conformance_2025_03_26,
         erlang_client_against_server_everything
     ].
 
@@ -108,6 +116,14 @@ end_per_suite(_Config) ->
 
 init_per_testcase(erlang_client_against_server_everything, Config) ->
     Config;
+init_per_testcase(TC, Config) when
+    TC =:= client_requirements_2026_07_28;
+    TC =:= client_requirements_2025_11_25;
+    TC =:= client_conformance_2025_06_18;
+    TC =:= client_conformance_2025_03_26
+->
+    %% The runner brings its own servers; no fixture, no listener.
+    Config;
 init_per_testcase(TC, Config) ->
     ok = fixture(),
     Port = ?PORT + case_index(TC),
@@ -115,6 +131,13 @@ init_per_testcase(TC, Config) ->
     [{port, Port} | Config].
 
 end_per_testcase(erlang_client_against_server_everything, _Config) ->
+    ok;
+end_per_testcase(TC, _Config) when
+    TC =:= client_requirements_2026_07_28;
+    TC =:= client_requirements_2025_11_25;
+    TC =:= client_conformance_2025_06_18;
+    TC =:= client_conformance_2025_03_26
+->
     ok;
 end_per_testcase(_TC, _Config) ->
     try
@@ -150,6 +173,55 @@ requirements_2026_07_28(Config) ->
 
 requirements_2025_11_25(Config) ->
     run_conformance(Config, "requirements-2025-11-25", ["--requirements", "2025-11-25"]).
+
+%% Our client under the runner: it starts a server per scenario and
+%% runs `barrel_mcp_conformance_client' against it.
+client_requirements_2026_07_28(Config) ->
+    run_client_conformance(Config, "requirements-2026-07-28", ["--requirements", "2026-07-28"]).
+
+client_requirements_2025_11_25(Config) ->
+    run_client_conformance(Config, "requirements-2025-11-25", ["--requirements", "2025-11-25"]).
+
+client_conformance_2025_06_18(Config) ->
+    run_client_conformance(Config, "2025-06-18", [
+        "--spec-version", "2025-06-18", "--suite", "all"
+    ]).
+
+client_conformance_2025_03_26(Config) ->
+    run_client_conformance(Config, "2025-03-26", [
+        "--spec-version", "2025-03-26", "--suite", "all"
+    ]).
+
+run_client_conformance(Config, Label, Selection) ->
+    Runner = ?config(runner, Config),
+    OutDir = filename:join(priv_dir(Config), "client-conformance-" ++ Label),
+    Command = lists:join(" ", [
+        barrel_mcp_test_helpers:erl_executable()
+        | [
+            shell_quote(A)
+         || A <- barrel_mcp_test_helpers:child_args(barrel_mcp_conformance_client, main)
+        ]
+    ]),
+    Args =
+        [Runner, "client", "--command", lists:flatten(Command), "--timeout", "60000" | Selection] ++
+            ["-o", OutDir],
+    {Status, Output} = run("node", Args, root_dir()),
+    NotScored = not_scored(Runner, Selection, "client"),
+    {Pass, Fails, Unscored} = summarise(OutDir, NotScored),
+    ct:pal(
+        "client conformance ~s: ~B passed, ~B failed, ~B not scored~n~s~s",
+        [Label, Pass, length(Fails), length(Unscored), Fails, unscored_report(Unscored)]
+    ),
+    case {Status, Fails} of
+        {0, []} ->
+            ok;
+        _ ->
+            ct:fail({client_conformance_failed, Label, Status, Fails, Output})
+    end.
+
+%% The runner passes `--command' to a shell.
+shell_quote(Arg) ->
+    ["'", string:replace(Arg, "'", "'\\''", all), "'"].
 
 %% The reference server as a foreign peer for our client, over stdio.
 erlang_client_against_server_everything(Config) ->
@@ -211,7 +283,10 @@ unscored_report(Unscored) ->
 %% own reference fixture). The runner reports them and exits 0
 %% regardless; so does this case, listing them apart. There is no
 %% expected-failures file of ours anywhere in this.
-not_scored(Runner, ["--requirements", Revision]) ->
+not_scored(Runner, Selection) ->
+    not_scored(Runner, Selection, "server").
+
+not_scored(Runner, ["--requirements", Revision], Leg) ->
     Yaml = filename:join([
         filename:dirname(filename:dirname(Runner)), "requirements", Revision ++ ".yaml"
     ]),
@@ -222,17 +297,20 @@ not_scored(Runner, ["--requirements", Revision]) ->
             _ -> <<>>
         end,
     Entries = binary:split(Tail, <<"- scenario: ">>, [global]),
+    LegLine = list_to_binary("leg: " ++ Leg),
     [
         hd(binary:split(Entry, <<"\n">>))
-     || Entry <- tl(Entries), binary:match(Entry, <<"leg: server">>) =/= nomatch
+     || Entry <- tl(Entries), binary:match(Entry, LegLine) =/= nomatch
     ];
-not_scored(_Runner, _Selection) ->
+not_scored(_Runner, _Selection, _Leg) ->
     [].
 
 %% The runner writes one JSON per scenario; its per-check messages are
 %% the diagnostics, so they are what a failure reports.
 summarise(OutDir, NotScored) ->
-    Files = filelib:wildcard(filename:join([OutDir, "*", "*.json"])),
+    Files =
+        filelib:wildcard(filename:join([OutDir, "*", "*.json"])) ++
+            filelib:wildcard(filename:join([OutDir, "*", "*", "*.json"])),
     lists:foldl(
         fun(File, {Pass, Fails, Unscored}) ->
             Scored = not lists:member(scenario_of(File), NotScored),
@@ -271,10 +349,18 @@ summarise(OutDir, NotScored) ->
 %% the scenario name is the directory minus the role prefix and the
 %% timestamp the runner appends.
 scenario_of(File) ->
-    Dir = list_to_binary(filename:basename(filename:dirname(File))),
+    Parent = filename:dirname(File),
+    Dir0 = list_to_binary(filename:basename(Parent)),
+    %% Auth scenarios are written under an `auth/' directory.
+    Dir =
+        case filename:basename(filename:dirname(Parent)) of
+            "auth" -> <<"auth/", Dir0/binary>>;
+            _ -> Dir0
+        end,
     Name =
         case Dir of
             <<"server-", Rest/binary>> -> Rest;
+            <<"client-", Rest/binary>> -> Rest;
             _ -> Dir
         end,
     case re:run(Name, <<"^(.*)-\\d{4}-\\d{2}-\\d{2}T">>, [{capture, all_but_first, binary}]) of

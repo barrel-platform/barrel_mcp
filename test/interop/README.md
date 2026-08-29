@@ -59,6 +59,22 @@ in `test/barrel_mcp_conformance_SUITE.erl`, one CT case per run:
 | `requirements_2026_07_28` | `--requirements 2026-07-28` |
 | `requirements_2025_11_25` | `--requirements 2025-11-25` |
 
+And the runner's client mode against our client, four more cases. The
+runner starts a server per scenario and runs
+`test/barrel_mcp_conformance_client.erl` against it: an `erl` node the
+suite assembles from `barrel_mcp_test_helpers:child_args/2`, reading
+the URL from its plain arguments and the scenario, context and
+protocol version from the environment. The `auth/*` scenarios drive
+the OAuth handle's authorization-code flow headlessly (the redirect
+step fetches the authorization URL and returns its `Location`).
+
+| case | runner selection |
+|---|---|
+| `client_requirements_2026_07_28` | `client --requirements 2026-07-28` |
+| `client_requirements_2025_11_25` | `client --requirements 2025-11-25` |
+| `client_conformance_2025_06_18` | `client --spec-version 2025-06-18 --suite all` |
+| `client_conformance_2025_03_26` | `client --spec-version 2025-03-26 --suite all` |
+
 `--suite all` is every scenario the runner knows for a revision,
 drafts included; `--requirements` is the frozen set a revision
 required at release, which the runner ships for those two revisions
