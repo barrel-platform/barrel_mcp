@@ -34,7 +34,9 @@ barrel_mcp:start_http(#{
             %% Optional: Validate issuer claim
             issuer => <<"https://auth.example.com">>,
 
-            %% Optional: Validate audience claim
+            %% Required: the resource this server is. Tokens issued for
+            %% another audience are rejected. `any` opts out (noncompliant)
+            %% for a verifier that checks the recipient itself.
             audience => <<"https://api.example.com">>,
 
             %% Optional: Clock skew tolerance in seconds (default: 60)
@@ -71,7 +73,7 @@ barrel_mcp:start_http(#{
     port => 9090,
     auth => #{
         provider => barrel_mcp_auth_bearer,
-        provider_opts => #{verifier => Verifier}
+        provider_opts => #{verifier => Verifier, audience => any}
     }
 }).
 ```
@@ -104,7 +106,7 @@ barrel_mcp:start_http(#{
     port => 9090,
     auth => #{
         provider => barrel_mcp_auth_bearer,
-        provider_opts => #{verifier => Verifier}
+        provider_opts => #{verifier => Verifier, audience => any}
     }
 }).
 ```
@@ -215,7 +217,7 @@ barrel_mcp:start_http(#{
     port => 9090,
     auth => #{
         provider => barrel_mcp_auth_apikey,
-        provider_opts => #{verifier => Verifier}
+        provider_opts => #{verifier => Verifier, audience => any}
     }
 }).
 ```
@@ -742,7 +744,8 @@ option on `barrel_mcp:start_http_stream/1` (and
 {ok, _} = barrel_mcp:start_http_stream(#{
     port => 8080,
     auth => #{provider => barrel_mcp_auth_bearer,
-              provider_opts => #{secret => Secret}},
+              provider_opts => #{secret => Secret,
+                                 audience => <<"http://localhost:8080/mcp">>}},
     resource_metadata => #{
         resource              => <<"http://localhost:8080/mcp">>,
         authorization_servers => [<<"https://idp.example.com">>]

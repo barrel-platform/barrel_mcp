@@ -360,7 +360,7 @@ end,
     port => 9090,
     auth => #{
         provider => barrel_mcp_auth_bearer,
-        provider_opts => #{verifier => Verifier}
+        provider_opts => #{verifier => Verifier, audience => any}
     }
 }).
 ```

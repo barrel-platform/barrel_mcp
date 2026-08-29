@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- `barrel_mcp_auth_bearer` requires `audience`; `init/1` returns
+  `{error, {missing_option, audience}}` without it. A server must only
+  accept tokens issued for itself. `audience => any` opts out for a
+  `verifier` that checks the recipient itself and logs a warning. A
+  present `exp` or `nbf` that is not an integer now fails verification.
+- `barrel_mcp_http_engine:init_auth/1` returns `{ok, AuthConfig}` or
+  `{error, {auth_provider, Module, Reason}}`; a provider that refuses
+  its options fails `start_http_stream/1` and `start_http/1` at start,
+  with no listener bound, instead of surfacing per request. An embedder
+  matches on `{ok, _}`.
 - Every OAuth authorization-server URL the client uses, configured or
   discovered, must be `https`; anything else is refused with
   `{error, {insecure_url, Url}}` before a request is sent. The

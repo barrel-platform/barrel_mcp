@@ -82,7 +82,6 @@
         max_connections => pos_integer()
     }.
 start(Opts) ->
-    Port = maps:get(port, Opts, 9090),
     Ip = maps:get(ip, Opts, {127, 0, 0, 1}),
     SessionEnabled = maps:get(session_enabled, Opts, true),
     Loopback = barrel_mcp_http_engine:is_loopback(Ip),
@@ -94,44 +93,49 @@ start(Opts) ->
         {error, _} = Err ->
             Err;
         {ok, AllowedOrigins} ->
-            AllowMissing = maps:get(allow_missing_origin, Opts, Loopback),
-            _ =
-                case SessionEnabled of
-                    true -> barrel_mcp_http_engine:ensure_session_manager();
-                    false -> ok
-                end,
-            ResourceMetadata = barrel_mcp_http_engine:normalize_resource_metadata(
-                maps:get(resource_metadata, Opts, undefined)
-            ),
-            AuthConfig0 = barrel_mcp_http_engine:init_auth(
-                maps:get(auth, Opts, #{})
-            ),
-            AuthConfig = barrel_mcp_http_engine:inject_resource_metadata_url(
-                AuthConfig0, ResourceMetadata
-            ),
-            EngineConfig0 = #{
-                mode => stream,
-                auth_config => AuthConfig,
-                session_enabled => SessionEnabled,
-                allowed_origins => AllowedOrigins,
-                allow_missing_origin => AllowMissing,
-                sse_buffer_size => maps:get(sse_buffer_size, Opts, 256),
-                resource_metadata => ResourceMetadata,
-                subscription_keepalive_ms => maps:get(
-                    subscription_keepalive_ms,
-                    Opts,
-                    application:get_env(barrel_mcp, subscription_keepalive_ms, 15000)
-                )
-            },
-            EngineConfig = maps:merge(EngineConfig0, legacy_sse_routes(Opts)),
-            ListenOpts = maps:merge(
-                #{port => Port, ip => Ip, ssl => normalize_ssl(Opts)},
-                maps:with([max_connections, acceptors], Opts)
-            ),
-            barrel_mcp_listener_sup:start_listener(
-                ?STREAM_LISTENER, ListenOpts, EngineConfig
-            )
+            case barrel_mcp_http_engine:init_auth(maps:get(auth, Opts, #{})) of
+                {ok, AuthConfig0} ->
+                    start_listener(Opts, Loopback, AllowedOrigins, AuthConfig0, SessionEnabled);
+                {error, _} = Err ->
+                    Err
+            end
     end.
+
+start_listener(Opts, Loopback, AllowedOrigins, AuthConfig0, SessionEnabled) ->
+    Port = maps:get(port, Opts, 9090),
+    Ip = maps:get(ip, Opts, {127, 0, 0, 1}),
+    AllowMissing = maps:get(allow_missing_origin, Opts, Loopback),
+    _ =
+        case SessionEnabled of
+            true -> barrel_mcp_http_engine:ensure_session_manager();
+            false -> ok
+        end,
+    ResourceMetadata = barrel_mcp_http_engine:normalize_resource_metadata(
+        maps:get(resource_metadata, Opts, undefined)
+    ),
+    AuthConfig = barrel_mcp_http_engine:inject_resource_metadata_url(
+        AuthConfig0, ResourceMetadata
+    ),
+    EngineConfig0 = #{
+        mode => stream,
+        auth_config => AuthConfig,
+        session_enabled => SessionEnabled,
+        allowed_origins => AllowedOrigins,
+        allow_missing_origin => AllowMissing,
+        sse_buffer_size => maps:get(sse_buffer_size, Opts, 256),
+        resource_metadata => ResourceMetadata,
+        subscription_keepalive_ms => maps:get(
+            subscription_keepalive_ms,
+            Opts,
+            application:get_env(barrel_mcp, subscription_keepalive_ms, 15000)
+        )
+    },
+    EngineConfig = maps:merge(EngineConfig0, legacy_sse_routes(Opts)),
+    ListenOpts = maps:merge(
+        #{port => Port, ip => Ip, ssl => normalize_ssl(Opts)},
+        maps:with([max_connections, acceptors], Opts)
+    ),
+    barrel_mcp_listener_sup:start_listener(?STREAM_LISTENER, ListenOpts, EngineConfig).
 
 %% Both routes or neither: half of the pair cannot serve the transport,
 %% and a lone GET route would shadow nothing useful.

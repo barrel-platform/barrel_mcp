@@ -164,7 +164,8 @@ barrel_mcp:start_http_stream(#{
     auth => #{
         provider => barrel_mcp_auth_bearer,
         provider_opts => #{
-            secret => <<"your-jwt-secret">>
+            secret => <<"your-jwt-secret">>,
+            audience => <<"https://mcp.example.com">>
         }
     }
 }).

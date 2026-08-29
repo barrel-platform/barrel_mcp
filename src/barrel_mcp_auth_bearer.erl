@@ -48,19 +48,36 @@
 %%====================================================================
 
 %% @doc Initialize the Bearer token provider.
--spec init(map()) -> {ok, map()}.
+%%
+%% `audience' is required: an MCP server must only accept tokens
+%% issued for itself (authorization security considerations, "Token
+%% Audience Binding"). The literal `any' opts out for a `verifier'
+%% that checks the intended recipient itself; it is logged as
+%% noncompliant.
+-spec init(map()) -> {ok, map()} | {error, {missing_option, audience}}.
 init(Opts) ->
-    State = #{
-        verifier => maps:get(verifier, Opts, undefined),
-        secret => maps:get(secret, Opts, undefined),
-        issuer => maps:get(issuer, Opts, undefined),
-        audience => maps:get(audience, Opts, undefined),
-        clock_skew => maps:get(clock_skew, Opts, ?DEFAULT_CLOCK_SKEW),
-        scope_claim => maps:get(scope_claim, Opts, ?DEFAULT_SCOPE_CLAIM),
-        realm => maps:get(realm, Opts, <<"mcp">>),
-        resource => maps:get(resource, Opts, undefined)
-    },
-    {ok, State}.
+    case maps:get(audience, Opts, undefined) of
+        undefined ->
+            {error, {missing_option, audience}};
+        Audience ->
+            Audience =:= any andalso
+                logger:warning(
+                    "barrel_mcp_auth_bearer: audience => any accepts tokens "
+                    "issued for other resources; noncompliant outside a "
+                    "verifier that checks the recipient"
+                ),
+            State = #{
+                verifier => maps:get(verifier, Opts, undefined),
+                secret => maps:get(secret, Opts, undefined),
+                issuer => maps:get(issuer, Opts, undefined),
+                audience => Audience,
+                clock_skew => maps:get(clock_skew, Opts, ?DEFAULT_CLOCK_SKEW),
+                scope_claim => maps:get(scope_claim, Opts, ?DEFAULT_SCOPE_CLAIM),
+                realm => maps:get(realm, Opts, <<"mcp">>),
+                resource => maps:get(resource, Opts, undefined)
+            },
+            {ok, State}
+    end.
 
 %% @doc Authenticate a request using Bearer token.
 -spec authenticate(map(), map()) ->
@@ -212,14 +229,18 @@ run_checks([Check | Rest]) ->
         {error, _} = Error -> Error
     end.
 
+%% A present claim that is not a number is a malformed token, not an
+%% absent check.
 check_expiration(Claims, Now, ClockSkew) ->
     case maps:get(<<"exp">>, Claims, undefined) of
         undefined ->
             ok;
         Exp when is_integer(Exp), Exp + ClockSkew < Now ->
             {error, expired_token};
+        Exp when is_integer(Exp) ->
+            ok;
         _ ->
-            ok
+            {error, invalid_token}
     end.
 
 check_not_before(Claims, Now, ClockSkew) ->
@@ -228,8 +249,10 @@ check_not_before(Claims, Now, ClockSkew) ->
             ok;
         Nbf when is_integer(Nbf), Nbf - ClockSkew > Now ->
             {error, invalid_token};
+        Nbf when is_integer(Nbf) ->
+            ok;
         _ ->
-            ok
+            {error, invalid_token}
     end.
 
 check_issuer(Claims, State) ->
@@ -244,8 +267,8 @@ check_issuer(Claims, State) ->
     end.
 
 check_audience_claim(Claims, State) ->
-    case maps:get(audience, State, undefined) of
-        undefined -> ok;
+    case maps:get(audience, State) of
+        any -> ok;
         ExpectedAud -> check_audience(ExpectedAud, maps:get(<<"aud">>, Claims, undefined))
     end.
 

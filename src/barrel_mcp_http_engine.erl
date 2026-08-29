@@ -2021,21 +2021,22 @@ match_pos(Bin, Needle) ->
 %% Authentication
 %%====================================================================
 
--spec init_auth(map()) -> map().
+%% A provider that refuses its options fails the listener here, at
+%% start, rather than every request later.
+-spec init_auth(map()) -> {ok, map()} | {error, {auth_provider, module(), term()}}.
 init_auth(#{provider := Provider} = AuthOpts) ->
     _ = code:ensure_loaded(Provider),
     ProviderOpts = maps:get(provider_opts, AuthOpts, #{}),
-    ProviderState =
-        case erlang:function_exported(Provider, init, 1) of
-            true ->
-                case Provider:init(ProviderOpts) of
-                    {ok, S} -> S;
-                    _ -> undefined
-                end;
-            false ->
-                undefined
-        end,
-    AuthOpts#{provider_state => ProviderState};
+    case erlang:function_exported(Provider, init, 1) of
+        true ->
+            case Provider:init(ProviderOpts) of
+                {ok, S} -> {ok, AuthOpts#{provider_state => S}};
+                {error, Reason} -> {error, {auth_provider, Provider, Reason}};
+                Other -> {error, {auth_provider, Provider, {bad_return, Other}}}
+            end;
+        false ->
+            {ok, AuthOpts#{provider_state => undefined}}
+    end;
 init_auth(AuthOpts) ->
     init_auth(AuthOpts#{provider => barrel_mcp_auth_none}).
 

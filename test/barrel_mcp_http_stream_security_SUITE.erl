@@ -598,7 +598,7 @@ bearer_challenge_includes_resource_metadata(Config) ->
         session_enabled => true,
         auth => #{
             provider => barrel_mcp_auth_bearer,
-            provider_opts => #{secret => <<"top-secret">>}
+            provider_opts => #{secret => <<"top-secret">>, audience => any}
         },
         resource_metadata => #{
             resource => ResourceUrl,
@@ -640,7 +640,7 @@ get_sse_requires_auth(Config) ->
         session_enabled => true,
         auth => #{
             provider => barrel_mcp_auth_bearer,
-            provider_opts => #{secret => <<"top-secret">>}
+            provider_opts => #{secret => <<"top-secret">>, audience => any}
         }
     }),
     {ok, 401, _, _} = hackney:request(
@@ -664,7 +664,7 @@ delete_requires_auth(Config) ->
         session_enabled => true,
         auth => #{
             provider => barrel_mcp_auth_bearer,
-            provider_opts => #{secret => <<"top-secret">>}
+            provider_opts => #{secret => <<"top-secret">>, audience => any}
         }
     }),
     {ok, 401, _, _} = hackney:request(

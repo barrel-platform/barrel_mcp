@@ -78,7 +78,7 @@ init_per_suite(Config) ->
         session_enabled => true,
         auth => #{
             provider => barrel_mcp_auth_bearer,
-            provider_opts => #{verifier => Verifier}
+            provider_opts => #{verifier => Verifier, audience => any}
         }
     }),
     Config.

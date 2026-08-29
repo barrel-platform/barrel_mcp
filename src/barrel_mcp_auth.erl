@@ -50,7 +50,8 @@
 %%%     port => 9090,
 %%%     auth => #{
 %%%         provider => barrel_mcp_auth_bearer,
-%%%         provider_opts => #{secret => <<"my-secret">>},
+%%%         provider_opts => #{secret => <<"my-secret">>,
+%%%                            audience => <<"https://mcp.example.com">>},
 %%%         required_scopes => [<<"read">>]
 %%%     }
 %%% }).
