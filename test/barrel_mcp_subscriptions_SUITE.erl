@@ -69,7 +69,7 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_testcase(TC, Config) ->
-    Port = ?BASE_PORT + case_index(TC),
+    Port = barrel_mcp_test_helpers:case_port(?BASE_PORT, TC, all()),
     %% Only the keep-alive case wants a chatty stream; elsewhere the
     %% comments are noise the other assertions have to see past.
     Keepalive =
@@ -391,13 +391,3 @@ take(Buf, data) ->
 subscription_id(Envelope) ->
     Params = maps:get(<<"params">>, Envelope),
     maps:get(?MCP_META_SUBSCRIPTION_ID, maps:get(<<"_meta">>, Params)).
-
-%% A port per case, by position rather than by hash: two case names
-%% hashing to the same slot means the second one gets eaddrinuse while
-%% the first listener is still releasing its socket.
-case_index(TC) ->
-    case_index(TC, all(), 0).
-
-case_index(TC, [TC | _], N) -> N;
-case_index(TC, [_ | Rest], N) -> case_index(TC, Rest, N + 1);
-case_index(_TC, [], N) -> N.

@@ -126,7 +126,7 @@ init_per_testcase(TC, Config) when
     Config;
 init_per_testcase(TC, Config) ->
     ok = fixture(),
-    Port = ?PORT + case_index(TC),
+    Port = barrel_mcp_test_helpers:case_port(?PORT + 1, TC, all()),
     {ok, _} = barrel_mcp:start_http_stream(#{port => Port, session_enabled => true}),
     [{port, Port} | Config].
 
@@ -1119,8 +1119,3 @@ find_root(Dir) ->
                 Parent -> find_root(Parent)
             end
     end.
-
-case_index(TC) -> case_index(TC, all(), 1).
-case_index(TC, [TC | _], N) -> N;
-case_index(TC, [_ | Rest], N) -> case_index(TC, Rest, N + 1);
-case_index(_TC, [], N) -> N.

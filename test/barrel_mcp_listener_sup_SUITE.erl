@@ -52,7 +52,7 @@ end_per_suite(_Config) ->
 init_per_testcase(TC, Config) ->
     {ok, _} = application:ensure_all_started(barrel_mcp),
     ok = barrel_mcp_registry:wait_for_ready(),
-    [{port, ?BASE_PORT + case_index(TC)} | Config].
+    [{port, barrel_mcp_test_helpers:case_port(?BASE_PORT, TC, all())} | Config].
 
 end_per_testcase(_TC, _Config) ->
     try
@@ -175,16 +175,6 @@ rebind(Port) ->
         {error, Reason} ->
             Reason
     end.
-
-%% A port per case, by position rather than by hash: two case names
-%% hashing to the same slot means the second one gets eaddrinuse while
-%% the first listener is still releasing its socket.
-case_index(TC) ->
-    case_index(TC, all(), 0).
-
-case_index(TC, [TC | _], N) -> N;
-case_index(TC, [_ | Rest], N) -> case_index(TC, Rest, N + 1);
-case_index(_TC, [], N) -> N.
 
 %% An acceptor that dies used to leave the pool one short for the life
 %% of the listener.

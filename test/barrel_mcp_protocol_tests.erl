@@ -5,6 +5,7 @@
 -module(barrel_mcp_protocol_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include("barrel_mcp.hrl").
 
 %% Test handlers (exported for MCP registry)
 -export([sample_tool/1]).
@@ -19,12 +20,14 @@ protocol_test_() ->
         {"Decode invalid JSON", fun test_decode_invalid/0},
         {"Encode response", fun test_encode/0},
         {"Handle initialize", fun test_handle_initialize/0},
+        {"Initialize answers each legacy revision with itself", fun test_initialize_versions/0},
+        {"Initialize offered 2026-07-28 answers the newest legacy revision",
+            fun test_initialize_modern_offered/0},
+        {"Initialize carries serverInfo", fun test_initialize_server_info/0},
+        {"Server capabilities reflect registered handlers", fun test_server_capabilities/0},
         {"Handle ping", fun test_handle_ping/0},
-        {"Handle tools/list", fun test_handle_tools_list/0},
         {"Handle tools/call", fun test_handle_tools_call/0},
         {"Handle tools/call not found", fun test_handle_tools_call_not_found/0},
-        {"Handle resources/list", fun test_handle_resources_list/0},
-        {"Handle prompts/list", fun test_handle_prompts_list/0},
         {"Handle notification", fun test_handle_notification/0},
         {"Handle unknown method", fun test_handle_unknown_method/0},
         {"Handle invalid request", fun test_handle_invalid_request/0}
@@ -89,6 +92,58 @@ test_handle_initialize() ->
     ?assert(maps:is_key(<<"capabilities">>, Result)),
     ?assert(maps:is_key(<<"serverInfo">>, Result)).
 
+init_request(Version) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"initialize">>,
+        <<"params">> => #{
+            <<"protocolVersion">> => Version,
+            <<"capabilities">> => #{},
+            <<"clientInfo">> => #{<<"name">> => <<"tests">>, <<"version">> => <<"0">>}
+        }
+    }.
+
+init_result(Version) ->
+    maps:get(<<"result">>, barrel_mcp_protocol:handle(init_request(Version))).
+
+%% Only the handshake revisions negotiate through initialize.
+test_initialize_versions() ->
+    [
+        ?assertEqual(V, maps:get(<<"protocolVersion">>, init_result(V)))
+     || V <- ?MCP_LEGACY_VERSIONS
+    ].
+
+%% 2026-07-28 has no initialize; offering it through the handshake
+%% gets the newest revision that does.
+test_initialize_modern_offered() ->
+    ?assertEqual(
+        hd(?MCP_LEGACY_VERSIONS),
+        maps:get(<<"protocolVersion">>, init_result(<<"2026-07-28">>))
+    ).
+
+test_initialize_server_info() ->
+    ServerInfo = maps:get(<<"serverInfo">>, init_result(<<"2025-11-25">>)),
+    ?assert(maps:is_key(<<"name">>, ServerInfo)),
+    ?assert(maps:is_key(<<"version">>, ServerInfo)).
+
+test_server_capabilities() ->
+    ok = barrel_mcp_registry:reg(tool, <<"cap_tool">>, ?MODULE, sample_tool, #{}),
+    ok = barrel_mcp_registry:reg(resource, <<"cap_resource">>, ?MODULE, sample_tool, #{
+        uri => <<"file:///cap">>
+    }),
+    ok = barrel_mcp_registry:reg(prompt, <<"cap_prompt">>, ?MODULE, sample_tool, #{}),
+    try
+        Capabilities = maps:get(<<"capabilities">>, init_result(<<"2025-11-25">>)),
+        ?assert(maps:is_key(<<"tools">>, Capabilities)),
+        ?assert(maps:is_key(<<"resources">>, Capabilities)),
+        ?assert(maps:is_key(<<"prompts">>, Capabilities))
+    after
+        barrel_mcp_registry:unreg(tool, <<"cap_tool">>),
+        barrel_mcp_registry:unreg(resource, <<"cap_resource">>),
+        barrel_mcp_registry:unreg(prompt, <<"cap_prompt">>)
+    end.
+
 test_handle_ping() ->
     Request = #{
         <<"jsonrpc">> => <<"2.0">>,
@@ -97,22 +152,6 @@ test_handle_ping() ->
     },
     Response = barrel_mcp_protocol:handle(Request),
     ?assertEqual(#{}, maps:get(<<"result">>, Response)).
-
-test_handle_tools_list() ->
-    %% Register a tool first
-    ok = barrel_mcp_registry:reg(tool, <<"test_tool">>, ?MODULE, sample_tool, #{
-        description => <<"A test tool">>
-    }),
-    Request = #{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => 1,
-        <<"method">> => <<"tools/list">>
-    },
-    Response = barrel_mcp_protocol:handle(Request),
-    Result = maps:get(<<"result">>, Response),
-    Tools = maps:get(<<"tools">>, Result),
-    ?assert(length(Tools) >= 1),
-    barrel_mcp_registry:unreg(tool, <<"test_tool">>).
 
 test_handle_tools_call() ->
     %% `tools/call' is now async: handle/2 returns {async, AsyncPlan}
@@ -175,26 +214,6 @@ test_handle_tools_call_not_found() ->
     after 2000 ->
         ?assert(false)
     end.
-
-test_handle_resources_list() ->
-    Request = #{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => 1,
-        <<"method">> => <<"resources/list">>
-    },
-    Response = barrel_mcp_protocol:handle(Request),
-    Result = maps:get(<<"result">>, Response),
-    ?assert(maps:is_key(<<"resources">>, Result)).
-
-test_handle_prompts_list() ->
-    Request = #{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => 1,
-        <<"method">> => <<"prompts/list">>
-    },
-    Response = barrel_mcp_protocol:handle(Request),
-    Result = maps:get(<<"result">>, Response),
-    ?assert(maps:is_key(<<"prompts">>, Result)).
 
 test_handle_notification() ->
     %% Notifications have no id

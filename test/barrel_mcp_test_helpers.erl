@@ -18,6 +18,7 @@
 -export([request/3, legacy_request/3, modern_request/3, modern_meta/0, modern_meta/1]).
 -export([init_params/0, init_params/1, init_params/2, init_body/0, init_body/1, init_body/2]).
 -export([erl_executable/0, child_args/1, child_args/2]).
+-export([case_port/3]).
 
 %%====================================================================
 %% Waiting
@@ -195,3 +196,13 @@ child_args(Module, Function) ->
         "[{handler,default,logger_std_h,#{config=>#{type=>standard_error}}}]"
     ] ++ Paths ++
         ["-eval", atom_to_list(Module) ++ ":" ++ atom_to_list(Function) ++ "()", "-extra"].
+
+%% @doc A port of its own per case: `Base' plus the case's position in
+%% `All', so cases never share a listener whatever order they run in.
+-spec case_port(pos_integer(), atom(), [atom()]) -> pos_integer().
+case_port(Base, TC, All) ->
+    case_port(Base, TC, All, 0).
+
+case_port(Base, TC, [TC | _], N) -> Base + N;
+case_port(Base, TC, [_ | Rest], N) -> case_port(Base, TC, Rest, N + 1);
+case_port(Base, _TC, [], N) -> Base + N.

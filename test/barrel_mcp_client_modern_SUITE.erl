@@ -176,7 +176,7 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_testcase(TC, Config) ->
-    Port = ?BASE_PORT + case_index(TC),
+    Port = barrel_mcp_test_helpers:case_port(?BASE_PORT, TC, all()),
     {ok, _} = barrel_mcp:start_http_stream(#{
         port => Port,
         session_enabled => true,
@@ -1428,16 +1428,6 @@ catch_close(Pid) ->
         _:_ -> ok
     end,
     ok.
-
-%% A port per case, by position rather than by hash: two case names
-%% hashing to the same slot means the second one gets eaddrinuse while
-%% the first listener is still releasing its socket.
-case_index(TC) ->
-    case_index(TC, all(), 0).
-
-case_index(TC, [TC | _], N) -> N;
-case_index(TC, [_ | Rest], N) -> case_index(TC, Rest, N + 1);
-case_index(_TC, [], N) -> N.
 
 %% The extension has the client set Mcp-Name to the task id so an
 %% intermediary can route a follow-up to the instance holding that
