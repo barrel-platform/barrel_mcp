@@ -38,6 +38,7 @@
 -export([set_session_id/2, set_protocol_version/2, open_event_stream/1]).
 -export([open_subscription/2, close_subscription/1]).
 -export([set_tool_headers/2]).
+-export([same_origin_endpoint/2]).
 
 %% gen_server callbacks
 -export([
@@ -465,29 +466,45 @@ fall_back_to_legacy_sse(Body, State) ->
         queued = [Body]
     }).
 
-post_url(#state{legacy_sse = true, endpoint = Endpoint, url = Url}) when
-    Endpoint =/= undefined
-->
-    resolve(Url, Endpoint);
+post_url(#state{legacy_sse = true, endpoint = Endpoint}) when Endpoint =/= undefined ->
+    Endpoint;
 post_url(#state{url = Url}) ->
     Url.
 
-%% The endpoint is a URI reference against the stream's URL, and is
-%% usually just a path.
-resolve(Base, <<"http://", _/binary>> = Absolute) ->
-    _ = Base,
-    Absolute;
-resolve(Base, <<"https://", _/binary>> = Absolute) ->
-    _ = Base,
-    Absolute;
-resolve(Base, Reference) ->
-    #{scheme := Scheme, host := Host} = Parsed = uri_string:parse(Base),
-    Port =
-        case maps:get(port, Parsed, undefined) of
-            undefined -> <<>>;
-            P -> <<":", (integer_to_binary(P))/binary>>
+%% @doc Resolve the `endpoint' event's URI reference against the
+%% stream's URL and require the same origin. The POST carries the
+%% session's `Authorization' header, so an endpoint on another origin
+%% would hand the credential to whoever the stream named; the reference
+%% client refuses it the same way (mcp/client/sse.py, "Endpoint origin
+%% does not match connection origin").
+-spec same_origin_endpoint(binary(), binary()) ->
+    {ok, binary()} | {error, {cross_origin, binary()} | {bad_endpoint, binary()}}.
+same_origin_endpoint(StreamUrl, Ref) ->
+    case {uri_string:parse(StreamUrl), uri_string:resolve(Ref, StreamUrl)} of
+        {#{scheme := _} = Base, Resolved} when is_binary(Resolved) ->
+            case uri_string:parse(Resolved) of
+                #{scheme := _} = Target ->
+                    case origin(Base) =:= origin(Target) of
+                        true -> {ok, Resolved};
+                        false -> {error, {cross_origin, Resolved}}
+                    end;
+                _ ->
+                    {error, {bad_endpoint, Ref}}
+            end;
+        _ ->
+            {error, {bad_endpoint, Ref}}
+    end.
+
+origin(#{scheme := Scheme0, host := Host} = Parsed) ->
+    Scheme = string:lowercase(Scheme0),
+    Default =
+        case Scheme of
+            <<"https">> -> 443;
+            _ -> 80
         end,
-    <<Scheme/binary, "://", Host/binary, Port/binary, Reference/binary>>.
+    {Scheme, string:lowercase(Host), maps:get(port, Parsed, Default)};
+origin(_) ->
+    undefined.
 
 is_jsonrpc(<<>>) ->
     false;
@@ -637,7 +654,30 @@ forward_sse_events([], State) ->
 %% (2024-11-05/basic/transports.mdx:67). It is addressed to us, not to
 %% the owner.
 forward_sse_events([{_Id, <<"endpoint">>, Data} | Rest], #state{legacy_sse = true} = State) ->
-    forward_sse_events(Rest, flush_queued(State#state{endpoint = string:trim(Data)}));
+    StreamUrl =
+        case State#state.legacy_sse_url of
+            undefined -> State#state.url;
+            Url -> Url
+        end,
+    case same_origin_endpoint(StreamUrl, string:trim(Data)) of
+        {ok, Endpoint} ->
+            forward_sse_events(Rest, flush_queued(State#state{endpoint = Endpoint}));
+        {error, Reason} ->
+            %% The queued bodies are dropped unsent: nothing may go there.
+            State#state.owner ! {mcp_closed, self(), Reason},
+            _ =
+                case State#state.sse_ref of
+                    Ref when is_pid(Ref) -> hackney:close(Ref);
+                    _ -> ok
+                end,
+            State#state{
+                sse_ref = undefined,
+                sse_enabled = false,
+                sse_buffer = <<>>,
+                queued = [],
+                endpoint = undefined
+            }
+    end;
 forward_sse_events([{Id, _Ev, Data} | Rest], #state{owner = Owner} = State) ->
     case Data of
         <<>> ->

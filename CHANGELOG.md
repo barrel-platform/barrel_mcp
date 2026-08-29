@@ -53,6 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The legacy HTTP+SSE client resolves the `endpoint` event against
+  the stream's URL and refuses one on another origin (scheme, host or
+  port) with `{mcp_closed, _, {cross_origin, Url}}`, sending nothing
+  there. The POST carries the session's `Authorization` header, so an
+  absolute endpoint from the server used to hand that credential to
+  whatever origin the stream named. The reference client refuses it
+  the same way.
 - Deleting a session now drops the rows it owns in the subscription,
   in-flight and pending tables. They were keyed by the session id and
   nothing else expired them, so a session that subscribed to a resource
