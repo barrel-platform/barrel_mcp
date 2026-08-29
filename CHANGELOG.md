@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Depends on `h1` 0.9, `h2` 0.12 and `hackney` 4.7.4. Both wire
+  libraries gained `serve_socket/2` for an embedder that accepts and
+  negotiates ALPN itself; the listener still dispatches through
+  `h1_connection` and `h2_connection` directly.
+- The docs reference private functions without an arity so
+  `rebar3 ex_doc` builds without warnings.
+
 ## [3.0.0] - 2026-08-29
 
 MCP `2026-07-28` support. That revision is a stateless rewrite: no
