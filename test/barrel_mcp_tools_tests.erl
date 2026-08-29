@@ -291,8 +291,11 @@ test_tool_result_meta() ->
     Resp = barrel_mcp_protocol:drive_async_plan(Plan, 2000),
     %% drive_async_plan threads `_meta' through Ctx, so the
     %% echoed response should carry both the inbound key and the
-    %% one the handler added.
-    Meta = maps:get(<<"_meta">>, Resp),
+    %% one the handler added. `_meta' is a field of the result
+    %% object, not a sibling of it.
+    Result = maps:get(<<"result">>, Resp),
+    ?assertNot(maps:is_key(<<"_meta">>, Resp)),
+    Meta = maps:get(<<"_meta">>, Result),
     ?assertEqual(<<"abc-123">>, maps:get(<<"requestId">>, Meta)),
     ?assertEqual(<<"barrel_mcp">>, maps:get(<<"echoedBy">>, Meta)),
     barrel_mcp_registry:unreg(tool, <<"meta_echo">>).

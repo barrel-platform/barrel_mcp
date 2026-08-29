@@ -3,21 +3,65 @@
 Tracks notable capabilities and the spec-conformance status of the
 Erlang MCP library. See `CHANGELOG.md` for release-by-release detail.
 
+## Protocol eras
+
+MCP `2026-07-28` is stateless: no handshake, no session, per-request
+`_meta`. `2025-11-25` and earlier negotiate with an `initialize`
+handshake. barrel_mcp serves both, decided per request rather than per
+deployment, and connects to both. See the
+[Protocol Versions guide](protocol-versions.md).
+
+- Every revision from `2024-11-05` to `2026-07-28`.
+- Era per request: modern when `params._meta` carries
+  `io.modelcontextprotocol/protocolVersion`.
+- No configuration gates it; a 2.3.0 deployment upgrades unchanged.
+- `advertise_versions` env decides what `-32022` offers a client to
+  retry with (`modern` by default, or `all`).
+
 ## Server
 
 ### Transports
 
 - HTTP transport (`barrel_mcp_http`) — JSON-RPC over POST. Legacy.
-- Streamable HTTP transport (`barrel_mcp_http_stream`) — MCP
-  `2025-11-25` with downward negotiation to `2025-06-18`,
-  `2025-03-26`, `2024-11-05`. POST (JSON or SSE), GET (SSE),
-  DELETE, OPTIONS. Default bind `127.0.0.1`; public binds require
+- Streamable HTTP transport (`barrel_mcp_http_stream`): every
+  revision from `2026-07-28` down to `2024-11-05`. POST (JSON or
+  SSE), GET (SSE, legacy), DELETE (legacy), OPTIONS. Default bind
+  `127.0.0.1`; public binds require
   `allowed_origins`. `Origin` is validated structurally on every
   method (POST/GET/DELETE/OPTIONS); literal `Origin: null` is
   rejected unless explicitly allowed. CORS echoes the validated
   origin (no wildcard); `Access-Control-Allow-Headers` is derived
-  from the configured auth provider.
-- stdio transport (`barrel_mcp_stdio`).
+  from the configured auth provider plus the `Mcp-Param-*` headers
+  registered tools ask for.
+- stdio transport (`barrel_mcp_stdio`): both eras.
+- Listeners are supervised (`barrel_mcp_listener_sup`), so a crashed
+  acceptor pool is restarted and stopping the application releases
+  the port.
+
+### Modern-era surface (2026-07-28)
+
+- `server/discover`, answered in both eras so it doubles as the
+  stdio probe target.
+- `subscriptions/listen`: long-lived POST stream replacing the GET
+  SSE stream and `resources/subscribe`. Opt-in notification types,
+  acknowledged first, per-subscription ids, keep-alive comments.
+  `barrel_mcp:notify_*` fan out to both eras unchanged.
+- Multi round-trip requests: a tool returns
+  `{input_required, Requests, State}` instead of blocking on a
+  server-to-client call. `State` is sealed with HMAC-SHA256 and bound
+  to the principal, method and salient params
+  (`barrel_mcp_request_state`).
+- Request metadata headers: `Mcp-Method`, `Mcp-Name`,
+  `Mcp-Param-{Name}`, with `=?base64?…?=` for unsafe values.
+  Mismatch with the body is `-32020`. Tools opt arguments in with
+  `x-mcp-header`, validated at registration.
+- Tasks extension (`io.modelcontextprotocol/tasks`): `resultType:
+  "task"`, `tasks/get` polling, `tasks/update`. A client that did not
+  declare it gets a synchronous run.
+- Freshness hints (`ttlMs`, `cacheScope`) on cacheable results.
+- Error codes `-32020` HeaderMismatch, `-32021`
+  MissingRequiredClientCapability, `-32022`
+  UnsupportedProtocolVersion.
 
 ### Wire-level conformance
 
@@ -29,8 +73,10 @@ Erlang MCP library. See `CHANGELOG.md` for release-by-release detail.
 - `MCP-Protocol-Version` validated server-side: missing falls back
   to the session-stored negotiated version; unsupported → 400.
 - JSON-RPC `id` must be string or integer; `null` and other shapes
-  rejected with -32600. Top-level JSON arrays (batches) explicitly
-  rejected — MCP removed batching.
+  rejected with -32600.
+- Top-level JSON arrays (batches) are served on `2024-11-05` and
+  `2025-03-26`, and rejected from `2025-06-18`, where the spec removed
+  them.
 - `notifications/cancelled` aborts the in-flight tool call; the
   cancelled HTTP request closes with 200 and an empty body (no
   JSON-RPC envelope, per spec).
@@ -145,14 +191,27 @@ by the spec.
 
 ### Protocol coverage (Phase A — shipped)
 
-- Targets `2025-11-25`; negotiates downward through `2025-06-18`,
-  `2025-03-26`, `2024-11-05`.
+- Speaks every revision from `2026-07-28` down to `2024-11-05`.
+  `protocol_version => auto` (the default) probes with
+  `server/discover` and falls back to the handshake; a `-32022` is
+  retried once with a revision the server advertised, since a
+  modern-only server has no handshake to fall back to. Pin a binary to
+  skip the probe.
+- Modern mode: per-request `_meta`, no session, no ping cadence.
+  Multi round-trip requests are driven from the same
+  `barrel_mcp_client_handler`, bounded by `max_input_rounds` (5) and
+  sharing the original call's deadline. `subscribe/2` and
+  `unsubscribe/2` keep their signatures over `subscriptions/listen`.
+  Removed methods answer `{error, {unsupported, Method}}` locally.
+  Tool arguments annotated `x-mcp-header` are mirrored into request
+  headers.
 - `initialize` with spec-shaped capability objects; `notifications/initialized` (the spec name).
 - `tools/list`, `tools/call`, `resources/list`, `resources/read`,
   `resources/templates/list`, `resources/subscribe`,
   `resources/unsubscribe`, `prompts/list`, `prompts/get`,
   `completion/complete`, `logging/setLevel`, `ping`,
-  `tasks/list`, `tasks/get`, `tasks/cancel`, `tasks/result`.
+  `tasks/list`, `tasks/get`, `tasks/cancel`, `tasks/result`,
+  `server/discover`, `subscriptions/listen`, `tasks/update`.
 - Task statuses on the wire: `working`, `completed`, `failed`,
   `cancelled`. Task timestamps (`createdAt`, `lastUpdatedAt`) are
   RFC 3339 strings.
@@ -207,11 +266,24 @@ by the spec.
     `client_credentials/2`, `token_exchange/2`, `jwt_bearer/2`.
     All attach the RFC 8707 `resource` parameter; confidential
     clients use HTTP Basic.
-  - Dynamic Client Registration (RFC 7591):
-    `register_client/2` posts client metadata to the AS's
-    `registration_endpoint` and returns the AS's response
-    (`client_id`, optional `client_secret`, ...). Hosts then feed
-    the credentials into one of the connect-spec auth entries.
+  - Authorization response validation: `validate_callback/2` checks
+    `state` and, per RFC 9207, the `iss` the AS returned, keyed on
+    `authorization_response_iss_parameter_supported`. Comparison is
+    exact, with no RFC 3986 normalisation.
+  - Client registration: `registration_strategy/2` picks between a
+    pre-registered `client_id`, a Client ID Metadata Document and
+    dynamic registration in the specification's priority order.
+    `client_id_metadata_document/1` builds the document a client
+    serves at its own `client_id` URL.
+    `check_issuer_binding/2` refuses credentials obtained from a
+    different authorization server.
+  - Dynamic Client Registration (RFC 7591, deprecated in favour of
+    CIMD but kept for servers without it): `register_client/2` posts
+    client metadata to the AS's `registration_endpoint` and returns
+    the AS's response (`client_id`, optional `client_secret`, ...).
+    `application_type` is always sent, inferred from the redirect
+    URIs unless set. Hosts then feed the credentials into one of the
+    connect-spec auth entries.
   - Client Credentials grant (MCP `ext-auth` extension) for
     unattended agent hosts: pass
     `auth => {oauth_client_credentials, Config}` on the connect

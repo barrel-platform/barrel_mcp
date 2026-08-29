@@ -66,10 +66,20 @@
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_client_handler).
 
--export_type([state/0, async_tag/0]).
+-export_type([state/0, async_tag/0, url_elicitation/0]).
 
 -type state() :: term().
 -type async_tag() :: term().
+
+%% `url' is the full URL, which MUST be shown to the user before
+%% consent; `host' is it reduced to its domain, for display and logging.
+-type url_elicitation() :: #{
+    url := binary(),
+    host := binary(),
+    message := binary(),
+    %% 2025-11-25 only.
+    elicitation_id => binary()
+}.
 
 -callback init(Args :: term()) -> {ok, state()} | {error, term()}.
 
@@ -88,6 +98,26 @@
     State :: state()
 ) -> {ok, state()}.
 
+%% URL-mode elicitation, which never reaches `handle_request/3': form
+%% mode collects data, this sends the user to a page the client must not
+%% see, and one must not be answered as the other.
+%%
+%% The client "MUST NOT open the URL without explicit consent from the
+%% user", "MUST show the full URL to the user for examination before
+%% consent", and "MUST NOT automatically pre-fetch the URL or any of its
+%% metadata" (2025-11-25/client/elicitation.mdx:726). Returning `accept'
+%% asserts a user agreed; opening the URL is the host's job.
+%%
+%% Not implementing this declines every URL elicitation.
+-callback handle_elicitation_url(
+    Request :: url_elicitation(),
+    State :: state()
+) ->
+    {accept, state()}
+    | {decline, state()}
+    | {cancel, state()}
+    | {async, async_tag(), state()}.
+
 -callback terminate(Reason :: term(), State :: state()) -> any().
 
--optional_callbacks([terminate/2]).
+-optional_callbacks([terminate/2, handle_elicitation_url/2]).

@@ -1,0 +1,9 @@
+{
+  "name": "barrel-mcp-conformance",
+  "private": true,
+  "description": "Pins the official MCP conformance runner for make conformance.",
+  "dependencies": {
+    "@modelcontextprotocol/conformance": "0.2.0-alpha.11",
+    "@modelcontextprotocol/server-everything": "2026.8.18"
+  }
+}

@@ -22,6 +22,8 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
+-import(barrel_mcp_test_helpers, [wait_ready/2]).
+
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([
     ema_chain_unlocks_protected_server/1,
@@ -76,7 +78,7 @@ init_per_suite(Config) ->
         session_enabled => true,
         auth => #{
             provider => barrel_mcp_auth_bearer,
-            provider_opts => #{verifier => Verifier}
+            provider_opts => #{verifier => Verifier, audience => any}
         }
     }),
     Config.
@@ -124,6 +126,7 @@ ema_chain_unlocks_protected_server(_Config) ->
         transport => {http, McpUrl},
         auth =>
             {oauth_enterprise, #{
+                allow_insecure_oauth => true,
                 idp_token_endpoint => <<AsBase/binary, "/idp/token">>,
                 as_token_endpoint => <<AsBase/binary, "/as/token">>,
                 client_id => <<"client-1">>,
@@ -172,6 +175,7 @@ expired_subject_token_blocks_init(_Config) ->
         transport => {http, McpUrl},
         auth =>
             {oauth_enterprise, #{
+                allow_insecure_oauth => true,
                 idp_token_endpoint => <<AsBase/binary, "/idp/token">>,
                 as_token_endpoint => <<AsBase/binary, "/as/token">>,
                 client_id => <<"client-1">>,
@@ -243,23 +247,6 @@ json_encode(M) -> iolist_to_binary(json:encode(M)).
 %%====================================================================
 %% Helpers
 %%====================================================================
-
-wait_ready(_Pid, 0) ->
-    {error, not_ready};
-wait_ready(Pid, N) ->
-    case
-        (try
-            barrel_mcp_client:server_capabilities(Pid)
-        catch
-            _:_ -> error
-        end)
-    of
-        {ok, _} ->
-            ok;
-        _ ->
-            timer:sleep(100),
-            wait_ready(Pid, N - 1)
-    end.
 
 %% `barrel_mcp_client:start/1' wraps init failures; pull out the
 %% inner reason for assertion clarity.

@@ -26,7 +26,8 @@ registry_test_() ->
         {"List all handlers", fun test_all/0},
         {"List handlers by type", fun test_all_type/0},
         {"Namespace isolation", fun test_namespace_isolation/0},
-        {"Function validation", fun test_function_validation/0}
+        {"Function validation", fun test_function_validation/0},
+        {"A handler module the registry has to load itself", fun test_unloaded_handler_module/0}
     ]}.
 
 setup() ->
@@ -217,3 +218,25 @@ test_function_validation() ->
     %% checked.
     {error, {function_not_exported, ?MODULE, nonexistent_function, 2}} =
         barrel_mcp_registry:reg(tool, <<"bad">>, ?MODULE, nonexistent_function, #{}).
+
+%% `function_exported/3' answers for loaded modules only. Under
+%% interactive code loading a handler module is loaded on first call,
+%% which is the registry's own arity check, so without an explicit load
+%% a valid registration is refused and an arity-2 handler is invoked as
+%% arity 1.
+test_unloaded_handler_module() ->
+    Mod = barrel_mcp_unloaded_handler,
+    {module, Mod} = code:ensure_loaded(Mod),
+    true = code:delete(Mod),
+    _ = code:purge(Mod),
+    ?assertNot(erlang:module_loaded(Mod)),
+
+    ok = barrel_mcp_registry:reg(tool, <<"unloaded">>, Mod, a_tool, #{}),
+    try
+        ?assertEqual(
+            {ok, <<"unloaded">>},
+            barrel_mcp_registry:run(tool, <<"unloaded">>, #{}, #{})
+        )
+    after
+        barrel_mcp_registry:unreg(tool, <<"unloaded">>)
+    end.

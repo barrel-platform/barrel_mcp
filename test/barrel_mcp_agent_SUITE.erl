@@ -12,6 +12,8 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
+-import(barrel_mcp_test_helpers, [wait_ready/2]).
+
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([aggregates_and_routes/1]).
 
@@ -111,20 +113,3 @@ aggregates_and_routes(_Config) ->
     ok = barrel_mcp:stop_client(<<"alpha">>),
     ok = barrel_mcp:stop_client(<<"beta">>),
     ok.
-
-wait_ready(_Pid, 0) ->
-    {error, not_ready};
-wait_ready(Pid, N) ->
-    case
-        (try
-            barrel_mcp_client:server_capabilities(Pid)
-        catch
-            _:_ -> error
-        end)
-    of
-        {ok, _} ->
-            ok;
-        _ ->
-            timer:sleep(100),
-            wait_ready(Pid, N - 1)
-    end.

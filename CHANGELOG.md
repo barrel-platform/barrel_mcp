@@ -7,6 +7,305 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `barrel_mcp_auth_bearer` requires `audience`; `init/1` returns
+  `{error, {missing_option, audience}}` without it. A server must only
+  accept tokens issued for itself. `audience => any` opts out for a
+  `verifier` that checks the recipient itself and logs a warning. A
+  present `exp` or `nbf` that is not an integer now fails verification.
+- `barrel_mcp_http_engine:init_auth/1` returns `{ok, AuthConfig}` or
+  `{error, {auth_provider, Module, Reason}}`; a provider that refuses
+  its options fails `start_http_stream/1` and `start_http/1` at start,
+  with no listener bound, instead of surfacing per request. An embedder
+  matches on `{ok, _}`.
+- Every OAuth authorization-server URL the client uses, configured or
+  discovered, must be `https`; anything else is refused with
+  `{error, {insecure_url, Url}}` before a request is sent. The
+  `allow_insecure_oauth => true` option on the `{oauth, ...}` configs
+  and on the discovery and grant helpers lifts the check for a
+  plaintext test server. It is noncompliant and documented as such.
+
+### Added
+
+- Tools declare `task_support => forbidden | optional | required`
+  (`long_running => true` still means `optional`), listed as
+  `execution.taskSupport` in the modern era. A `required` tool refuses
+  a client that did not declare `io.modelcontextprotocol/tasks` with
+  `-32021`. In the modern era a task-supporting tool answers
+  synchronously when it finishes, or asks its MRTR question, within
+  `task_inline_ms` (default 100); only past that window is a task
+  created and its `CreateTaskResult` returned, with the worker already
+  running (SEP-2663 "Task Creation"). A task's `error` is the JSON-RPC
+  error object. The legacy era still gets a task at once.
+- The OAuth client handle runs the authorization-code flow itself. An
+  `{oauth, #{redirect_uri, authorize, ...}}` config with no
+  `access_token` answers a 401 by discovering the protected resource
+  and its authorization server, choosing the client identity
+  (pre-registered, CIMD or dynamic registration), calling the host's
+  `authorize` fun with the authorization URL, validating the callback
+  (redirect URI, `state`, RFC 9207 `iss`) and exchanging the code. A
+  403 `insufficient_scope` steps up with the union of scopes
+  (SEP-2350). Scope selection follows the specification (challenge,
+  then PRM `scopes_supported`, then omitted), `offline_access` is
+  added only when the authorization server lists it (SEP-2207), and a
+  change of authorization server drops the stored client and tokens
+  (SEP-2352). 2025-03-26 servers get the origin-based discovery and
+  the `/authorize` `/token` `/register` fallbacks of that revision.
+  An optional `store => {Module, Arg}` (`barrel_mcp_client_auth_store`)
+  persists the client and tokens.
+- The non-interactive grants discover their endpoints from the 401:
+  `{oauth_client_credentials, ...}` and `{oauth_enterprise, ...}` no
+  longer need `token_endpoint`, `as_token_endpoint`, `audience` or
+  `resource` in the config, and `{oauth_jwt_bearer, #{client_id,
+  assertion}}` (RFC 7523, SEP-1933) is new. Client credentials accept
+  `private_key => {Pem, Alg}` for `private_key_jwt` assertions, signed
+  by the new `barrel_mcp_jwt` (ES256, RS256, HS256).
+- `dpop => true` binds tokens with DPoP (RFC 9449, SEP-1932): a P-256
+  proof key per handle, a proof on every token request and every MCP
+  request (`ath`, `htu`, `htm`, `jti`), the `DPoP` authorization
+  scheme once the server issues a bound token, and both nonce
+  challenges (`use_dpop_nonce` from the authorization server and the
+  resource server) answered with a fresh proof.
+- `barrel_mcp_client_auth` has three optional callbacks, `challenge/2`,
+  `settled/1` and `request_headers/3`. The HTTP transport hands a 401, or a 403
+  `insufficient_scope`, to a worker running the handle's `challenge/2`
+  and keeps serving; refused requests wait for that one flow and are
+  reissued when it returns, three rounds at most per request.
+- The HTTP client honours the SSE `retry:` field on reconnect and
+  resumes a response stream the server closed before the response
+  with a GET carrying `Last-Event-ID` (SEP-1699).
+- The official conformance runner's client mode runs against our
+  client: `test/barrel_mcp_conformance_client.erl` under four CT
+  cases (`--requirements` at 2026-07-28 and 2025-11-25, `--suite all`
+  at 2025-06-18 and 2025-03-26).
+
+### Changed
+
+- `barrel_mcp_client_auth_oauth:discover_authorization_server/1,2`
+  follows the 2026-07-28 discovery rules: path-aware well-known URLs
+  in the specification's order, fall-through on a URL that yields no
+  metadata document, and a terminal error on the first document found
+  when its `issuer` differs from the issuer queried, when it does not
+  advertise `S256` PKCE, or when an endpoint is not `https`.
+- `barrel_mcp_clients` is no longer a process. The supervision tree is
+  the registry: one `barrel_mcp_client_shell` supervisor per
+  `ServerId`, holding the client with its own restart budget from the
+  spec's `restart => #{intensity, period}` (5 in 60 s by default). A
+  crashed client keeps its `ServerId` across the restart; while a
+  restart is still failing, `whereis_client/1` answers `undefined`,
+  `start_client/2` answers `{error, {restarting, Id}}` and
+  `stop_client/1` clears it. A client that exhausts its budget, or
+  leaves normally, frees its id and no other client is affected.
+- A legacy (2024-11-05 through 2025-11-25) `tools/call` over Streamable
+  HTTP is answered as an SSE stream whenever the client's `Accept`
+  lists `text/event-stream`, which the transport already requires it
+  to. The result is the stream's final event. This is what the
+  reference server does by default, and every conforming client
+  already parses either shape. A client that sends the required
+  `Accept` but only ever parses a JSON body will need to read the
+  stream. In return, a client that only POSTs can now be asked
+  `elicitation/create`, `sampling/createMessage` and `roots/list`
+  mid-request, and progress and log notifications ride the call's own
+  response instead of needing a standalone GET stream.
+
+### Fixed
+
+- A Streamable HTTP session belongs to the principal that initialized
+  it. A POST, GET, DELETE or replay naming another principal's session
+  id gets the unknown-session 404, and a response to a server-initiated
+  request is delivered only from the session that carried it
+  (`barrel_mcp_session:deliver_response/3` takes the session id; the
+  arity-2 form is gone). The 2024-11-05 pair already did this; the
+  Streamable transport did not.
+- `barrel_mcp_auth_custom` fails a `authenticate/2` result of any shape
+  the contract does not name instead of admitting it as subject
+  `unknown`, and no longer pretends to keep the returned state.
+- An HTTP acceptor that dies is replaced; the listener used to run one
+  short for the rest of its life. `barrel_mcp_http_listener:acceptors/1`
+  lists the live pool.
+- The HTTP client closes the hackney connection when it drops a
+  response for exceeding the size cap, and when the server refuses the
+  standalone event stream, instead of leaving it streaming or pooled.
+- A request handler that loses its connection mid-response (listener
+  shutdown, or the connection statem already gone) is no longer logged
+  as a handler crash.
+- The `registered` list in the application resource names every
+  locally registered process.
+- The legacy HTTP+SSE client resolves the `endpoint` event against
+  the stream's URL and refuses one on another origin (scheme, host or
+  port) with `{mcp_closed, _, {cross_origin, Url}}`, sending nothing
+  there. The POST carries the session's `Authorization` header, so an
+  absolute endpoint from the server used to hand that credential to
+  whatever origin the stream named. The reference client refuses it
+  the same way.
+- Deleting a session now drops the rows it owns in the subscription,
+  in-flight and pending tables. They were keyed by the session id and
+  nothing else expired them, so a session that subscribed to a resource
+  and then dropped left its row behind for the life of the node. The
+  periodic sweep and the explicit delete had also diverged: only the
+  latter forgot the session's elicitations. A caller blocked on a
+  server-to-client request is now failed when its session goes rather
+  than left to sit out its timeout, and pending rows whose caller died
+  before its own timeout are reclaimed by the sweep.
+- stdio bounds what it writes and how many subscriptions it serves. The
+  writer blocks when the peer stops draining its pipe and its mailbox
+  was not a bound, so a subscription firing against a stalled reader
+  grew it without limit; past `stdio_max_outbound_notifications`
+  (default 256) a notification is now dropped, as on the inbound side.
+  A subscription holds no worker slot, so `stdio_max_workers` never
+  bounded them either; `stdio_max_subscriptions` (default 32) does.
+- stdio now serves the legacy server-to-client surface. The transport
+  advertised `resources.subscribe` and `listChanged` but had no session
+  to hang them on, so `resources/subscribe` failed with `-32602` and no
+  `notifications/*/list_changed` ever arrived. The one channel is now
+  one session, attached once a handshake revision is negotiated; a
+  modern connection is unaffected and keeps using
+  `subscriptions/listen`.
+
+## [3.0.0] - 2026-08-15
+
+MCP `2026-07-28` support. That revision is a stateless rewrite: no
+`initialize` handshake, no session id, no server-initiated requests.
+It keeps `2025-11-25` and earlier valid as the "legacy" era, and this
+release serves both on one endpoint, decided per request rather than
+per deployment.
+
+### Upgrading from 2.3.0
+
+Nothing to do. No legacy code path was removed or rewritten, no option
+gates the new era, and the default client behaviour still reaches a
+handshake-era server. Read on only if one of these applies to you:
+
+- **Your server calls back into a client** through
+  `sampling_create_message/3`, `elicit_create/3` or `roots_list/1,2`.
+  Those need a session to send the request down, and a modern
+  connection has none, so `list_sessions_with_*` comes back empty
+  against a client that probed into the modern era. Either pin that
+  client to `<<"2025-11-25">>`, or port the handler to
+  `{input_required, _, _}`, which works in both eras. This is the one
+  change that can bite a host that touched nothing: the client
+  `protocol_version` default is now `auto`.
+- **You pinned `protocol_version` on a client.** Pinning still works and
+  `<<"2025-11-25">>` reproduces 2.3.0 exactly. `auto` probes
+  `server/discover` and falls back to the handshake.
+- **You run more than one node and want multi round-trip requests.**
+  Set `request_state_key`. Without it each node signs with its own
+  ephemeral key, so a retry landing elsewhere is rejected. A warning is
+  logged at start.
+- **You read `application:get_env(barrel_mcp, protocol_version)`.** It
+  was never used by the library and is gone.
+- **You subscribe over stdio.** `barrel_mcp_client:subscribe/2` returns
+  `{error, {unsupported, <<"subscriptions/listen">>}}` on a modern stdio
+  connection, which has no second channel to hold a stream open. Legacy
+  stdio is unaffected.
+
+Embedders driving `barrel_mcp_http_engine:handle/6` from their own HTTP
+stack need no change: `mode => stream` already declares the transport can
+hold a response open, which is what `subscriptions/listen` requires.
+
+### Added
+
+- Serve and speak every revision from `2024-11-05` to `2026-07-28`. A
+  request is modern when its `params._meta` carries
+  `io.modelcontextprotocol/protocolVersion`. New guide:
+  `guides/protocol-versions.md`.
+- `server/discover`, answered in both eras so it doubles as the stdio
+  probe target.
+- `subscriptions/listen`: a long-lived POST stream replacing the GET
+  SSE stream and `resources/subscribe` for modern clients.
+  `barrel_mcp:notify_list_changed/1` and `notify_resource_updated/2`
+  keep their signatures and fan out to both eras.
+- Multi round-trip requests. A tool returns
+  `{input_required, Requests, State}` instead of blocking on a
+  server-to-client call; read the answers with `barrel_mcp:input/2` and
+  `request_state/1`, and check `client_supports/2` before asking.
+  `State` is sealed with HMAC-SHA256 and bound to the principal, method
+  and salient params (`barrel_mcp_request_state`).
+- Request metadata headers `Mcp-Method`, `Mcp-Name` and
+  `Mcp-Param-{Name}`, with `=?base64?...?=` for values that are not
+  header-safe. Tools opt arguments in with `x-mcp-header` in their
+  `inputSchema`, validated at registration.
+- Tasks extension `io.modelcontextprotocol/tasks`: `resultType: "task"`,
+  `tasks/get` polling, `tasks/update`. A modern client that did not
+  declare it gets a synchronous run rather than a task id it could not
+  poll.
+- Freshness hints (`ttlMs`, `cacheScope`) on cacheable results.
+- Resource and prompt handlers may be arity 2. The second argument is
+  the request context, so `prompts/get` and `resources/read` can return
+  `{input_required, _, _}` like a tool.
+- Error codes `-32020` HeaderMismatch, `-32021`
+  MissingRequiredClientCapability, `-32022` UnsupportedProtocolVersion.
+  `advertise_versions` (`modern` by default, or `all`) decides what
+  `-32022` offers a client to retry with.
+- Client: `protocol_version => auto` (the new default) probes and falls
+  back; `probe_timeout` and `max_input_rounds` join the connect spec.
+  `subscribe/2` and `unsubscribe/2` keep their signatures over
+  `subscriptions/listen`.
+- `barrel_mcp_version` for comparing revisions. Nothing else in the
+  library orders version binaries; neither should your code.
+- OAuth: `validate_callback/2` (RFC 9207 `iss` and `state`),
+  `registration_strategy/2`, `client_id_metadata_document/1` and
+  `check_issuer_binding/2`. Dynamic registration now always sends
+  `application_type`.
+- Interop tests against the reference Python SDK v2 in both directions:
+  the discovery probe, result stamping and freshness hints, multi
+  round-trip requests on all three verbs and in both directions,
+  `subscriptions/listen`, `x-mcp-header` mirroring, and the
+  capability and retry-round refusals.
+
+### Fixed
+
+Bugs found while building this, all present in 2.3.0:
+
+- `subscriptions/listen` crashed stdio and the plain HTTP transport.
+  Both were handed a stream handle they cannot serve and passed it to
+  the JSON encoder; on stdio that took the server down, and reaching it
+  needed no authentication.
+- The client abandoned a modern server on `-32022`, falling back to a
+  handshake that server does not have and discarding the revisions it
+  offered. It now retries once with one of them.
+- HTTP listeners were not supervised: a crashed acceptor pool stayed
+  down, and stopping the application left the port held.
+- Orphaned stream handlers. A monitored-but-unlinked handler outlived
+  its owner.
+- `stdio` ignored `long_running`, driving every tool synchronously and
+  blocking up to 60 seconds. The decision moved into the protocol, so
+  both transports honour it.
+- The client treated any 4xx as a dead connection, discarding a
+  JSON-RPC error body it could have surfaced.
+- A long-running tool whose worker died without reporting left its task
+  `working` forever, with the collector blocked on a message that never
+  came. The sweep did not evict it, since a task that legitimately runs
+  for hours looks the same.
+- `-32002` was used for prompt handler crashes. It has meant "resource
+  not found" since `2024-11-05`; crashes are now `-32603`. `resources/read`
+  and `prompts/get` not-found also returned `-32601`.
+- `_meta` was emitted beside `result` on the JSON-RPC envelope. The
+  schema declares it a field of `Result`, where a conforming client
+  looks for it.
+
+### Changed
+
+- `barrel_mcp_tasks` is keyed by task id, with the owner as a field. A
+  legacy task belongs to its session; a modern one has no session, so it
+  belongs to the authenticated principal.
+- The `protocol_version` application env is removed. It was never read.
+
+### Deprecated
+
+Deprecated by the specification, still served for legacy clients, and
+not scheduled for removal:
+
+- Sampling, elicitation and roots as server-to-client requests
+  (`barrel_mcp:sampling_create_message/3`, `elicit_create/3`,
+  `roots_list/1,2`). Modern servers use `{input_required, _, _}`.
+- Logging (`barrel_mcp:notify_log/3,4`, `logging/setLevel`). Modern
+  clients opt in per request through `_meta`.
+- Dynamic Client Registration
+  (`barrel_mcp_client_auth_oauth:register_client/2,3`), in favour of
+  Client ID Metadata Documents.
+
 ## [2.3.0] - 2026-07-17
 
 ### Added

@@ -107,6 +107,9 @@
     sampling_create_message/3,
     list_sessions_with_sampling/0,
     elicit_create/3,
+    elicit_form/2,
+    elicit_url/3,
+    elicit_complete/2,
     list_sessions_with_elicitation/0,
     roots_list/1,
     roots_list/2,
@@ -117,7 +120,12 @@
     notify_progress/4,
     notify_log/3,
     notify_log/4,
-    notify_list_changed/1
+    notify_list_changed/1,
+    input/2,
+    log/3,
+    log/4,
+    request_state/1,
+    client_supports/2
 ]).
 
 %% MCP client API (connecting to remote MCP servers).
@@ -517,7 +525,8 @@ completion_key(Kind, Outer, Arg) ->
 %%     auth => #{
 %%         provider => barrel_mcp_auth_bearer,
 %%         provider_opts => #{
-%%             secret => <<"your-jwt-secret">>
+%%             secret => <<"your-jwt-secret">>,
+%%             audience => <<"https://mcp.example.com">>
 %%         }
 %%     }
 %% }).
@@ -545,9 +554,11 @@ start_http(Opts) ->
 stop_http() ->
     barrel_mcp_http:stop().
 
-%% @doc Start the Streamable HTTP server for MCP (Protocol 2025-03-26).
+%% @doc Start the Streamable HTTP server for MCP.
 %%
-%% Starts a Cowboy HTTP server implementing the MCP Streamable HTTP transport.
+%% Starts an HTTP/1.1 and HTTP/2 listener (the `h1' and `h2' libraries)
+%% implementing the MCP Streamable HTTP transport, serving every
+%% revision from 2025-03-26 to 2026-07-28.
 %% This transport supports:
 %% - POST for client requests with JSON or SSE streaming responses
 %% - GET for server-to-client notification streams (SSE)
@@ -724,12 +735,25 @@ find(Name) ->
 
 %%====================================================================
 %% Server -> Client primitives
+%%
+%% Legacy era only. Every function in this section needs a session and
+%% an open SSE stream to send a request down, and `2026-07-28' has
+%% neither: a server that needs something from the client answers the
+%% call with what it needs and the client retries. See
+%% {@link input/2} and the tools guide.
+%%
+%% They keep working for legacy clients and are not going away. A
+%% handler that must serve both eras should ask
+%% {@link client_supports/2} first and use `{input_required, _, _}'
+%% when there is no session to call into.
 %%====================================================================
 
 %% @doc Send `sampling/createMessage' to the client behind a session.
 %% Requires the client to have declared sampling capability in its
 %% `initialize' request and an active SSE stream. Blocks until the
 %% client responds or `timeout_ms' (default 30s) elapses.
+%%
+%% Legacy era only; see the section note above.
 -spec sampling_create_message(binary(), map(), map()) ->
     {ok, Result :: map(), Usage :: map()}
     | {error, timeout | not_supported | no_sse | not_found | term()}.
@@ -747,11 +771,43 @@ list_sessions_with_sampling() ->
 %% elicitation capability in its `initialize' request and an active SSE
 %% stream. Blocks until the client responds or `timeout_ms' (default
 %% 30s) elapses.
+%%
+%% Legacy era only; see the section note above.
 -spec elicit_create(binary(), map(), map()) ->
     {ok, Result :: map()}
     | {error, timeout | not_supported | no_sse | not_found | term()}.
 elicit_create(SessionId, Params, Opts) ->
     barrel_mcp_session:elicit_create(SessionId, Params, Opts).
+
+%% @doc Build the params for a form-mode `elicitation/create'. Pass the
+%% result as an `{input_required, Requests, State}' entry, or as the
+%% `Params' of {@link elicit_create/3}.
+%%
+%% Never for secrets; use {@link elicit_url/3}.
+-spec elicit_form(binary(), map()) -> map().
+elicit_form(Message, Schema) ->
+    barrel_mcp_elicitation:form(Message, Schema).
+
+%% @doc Build the params for a URL-mode `elicitation/create', the mode
+%% for anything the client must not see. `Ctx' is the tool handler's
+%% context. See {@link barrel_mcp_elicitation:url/4} for what is
+%% checked and what stays yours to honour.
+-spec elicit_url(binary(), binary(), map()) -> {ok, map()} | {error, term()}.
+elicit_url(Message, Url, Ctx) ->
+    case maps:get(mcp_ctx, Ctx, undefined) of
+        undefined -> {error, no_request_context};
+        McpCtx -> barrel_mcp_elicitation:url(Message, Url, McpCtx)
+    end.
+
+%% @doc Mark a URL-mode elicitation complete, notifying the client that
+%% started it. Call it from whatever handles your redirect; completion
+%% is authorised against the owning principal.
+%%
+%% 2025-11-25 only.
+-spec elicit_complete(binary(), map() | term()) ->
+    ok | {error, not_found | already_complete}.
+elicit_complete(ElicitationId, Ctx) ->
+    barrel_mcp_elicitation:complete(ElicitationId, Ctx).
 
 %% @doc Return the ids of currently connected sessions whose client
 %% declared elicitation capability.
@@ -765,6 +821,9 @@ list_sessions_with_elicitation() ->
 %% client to have declared roots capability in its `initialize' request
 %% and an active SSE stream. Blocks until the client responds or
 %% `timeout_ms' (default 30s) elapses.
+%%
+%% Legacy era only, and Roots itself was removed by `2026-07-28'; see
+%% the section note above.
 -spec roots_list(binary()) ->
     {ok, [map()]}
     | {error, timeout | not_supported | no_sse | not_found | term()}.
@@ -792,6 +851,9 @@ notify_resource_updated(Uri) ->
 
 -spec notify_resource_updated(binary(), map()) -> ok.
 notify_resource_updated(Uri, Extra) when is_binary(Uri) ->
+    %% Modern subscribers named this URI in a `subscriptions/listen'
+    %% filter; legacy ones subscribed with `resources/subscribe'.
+    barrel_mcp_subscriptions:resource_updated(Uri, Extra),
     Subscribers = barrel_mcp_session:subscribers_for(Uri),
     Notification = #{
         <<"jsonrpc">> => <<"2.0">>,
@@ -823,7 +885,11 @@ notify_progress(SessionId, Token, Progress, Total) ->
 %% session. The notification is dropped silently when `Level' is below
 %% the session's configured level (`logging/setLevel'). `Logger' is an
 %% optional component name; pass `undefined' to omit it. `Data' is the
-%% structured payload — typically a string or a map.
+%% structured payload, typically a string or a map.
+%%
+%% Legacy era only. `2026-07-28' deprecated logging and removed
+%% `logging/setLevel'; a modern client opts in per request instead, by
+%% naming a level in `_meta'. This keeps serving legacy sessions.
 -spec notify_log(binary(), atom() | binary(), term()) -> ok.
 notify_log(SessionId, Level, Data) ->
     notify_log(SessionId, Level, undefined, Data).
@@ -887,7 +953,94 @@ notify_list_changed(Kind) when
     Kind =:= resource;
     Kind =:= prompt
 ->
-    barrel_mcp_session:broadcast_list_changed(Kind).
+    barrel_mcp_session:broadcast_list_changed(Kind),
+    barrel_mcp_subscriptions:list_changed(Kind).
+
+%%====================================================================
+%% Multi round-trip requests (tool handler side)
+%%====================================================================
+
+%% @doc Read the client's answer to one of the input requests this tool
+%% asked for on a previous attempt.
+%%
+%% The shapes match the blocking calls they replace, so porting a
+%% handler is a matter of moving the call rather than rewriting what it
+%% returns:
+%%
+%% <ul>
+%%   <li>`elicitation/create': `{ok, ElicitResult}', the raw result
+%%       with its `action' and `content', as
+%%       {@link elicit_create/3}.</li>
+%%   <li>`sampling/createMessage': `{ok, Result, Usage}', as
+%%       {@link sampling_create_message/3}.</li>
+%%   <li>`roots/list': `{ok, Roots}', already unwrapped, as
+%%       {@link roots_list/2}.</li>
+%% </ul>
+%%
+%% `none' means the client has not answered this key: either the first
+%% attempt, or it chose not to. Ask again or give up; do not assume.
+-spec input(map(), binary()) ->
+    {ok, term()} | {ok, term(), map()} | none.
+input(Ctx, Key) when is_map(Ctx), is_binary(Key) ->
+    Mrtr = maps:get(mrtr, Ctx, #{}),
+    case maps:get(Key, maps:get(responses, Mrtr, #{}), undefined) of
+        Response when is_map(Response) ->
+            decode_input(maps:get(Key, maps:get(methods, Mrtr, #{}), undefined), Response);
+        _ ->
+            none
+    end.
+
+%% Unwrap exactly as far as the equivalent blocking call does, and no
+%% further: containers come off, leaves stay as they arrived.
+decode_input(<<"sampling/createMessage">>, Response) ->
+    {ok, Response, maps:get(<<"usage">>, Response, #{})};
+decode_input(<<"roots/list">>, Response) ->
+    {ok, maps:get(<<"roots">>, Response, [])};
+decode_input(_Method, Response) ->
+    {ok, Response}.
+
+%% @doc Emit `notifications/message' for the request this tool is
+%% serving. `Logger' is optional; pass `undefined' to omit it.
+%%
+%% Modern: on this request's own response stream, and only if it named
+%% `io.modelcontextprotocol/logLevel' in its `_meta'. Legacy: on the
+%% session's SSE channel, filtered by `logging/setLevel'. Silent when
+%% there is nowhere to deliver.
+-spec log(map(), atom() | binary(), term()) -> ok.
+log(Ctx, Level, Data) ->
+    log(Ctx, Level, undefined, Data).
+
+-spec log(map(), atom() | binary(), binary() | undefined, term()) -> ok.
+log(Ctx, Level, Logger, Data) when is_map(Ctx) ->
+    Emit = maps:get(emit_log, Ctx, fun(_, _, _) -> ok end),
+    _ = Emit(Level, Logger, Data),
+    ok.
+
+%% @doc The term this tool passed as the state of its previous attempt,
+%% verified and deserialised.
+%%
+%% `none' on a first attempt. A state that failed verification never
+%% reaches the handler: the request is rejected before it runs.
+-spec request_state(map()) -> {ok, term()} | none.
+request_state(Ctx) when is_map(Ctx) ->
+    case maps:get(state, maps:get(mrtr, Ctx, #{}), undefined) of
+        undefined -> none;
+        State -> {ok, State}
+    end.
+
+%% @doc Whether the client declared a capability, before asking it for
+%% something that needs one.
+%%
+%% A server must not send an input request for a capability the client
+%% did not declare, so a tool that would returns an error to the client
+%% instead. Checking first lets the tool degrade on its own terms.
+-spec client_supports(map(), elicitation | sampling | roots | binary()) ->
+    boolean().
+client_supports(Ctx, Feature) when is_map(Ctx) ->
+    case maps:get(mcp_ctx, Ctx, undefined) of
+        undefined -> false;
+        McpCtx -> barrel_mcp_ctx:supports(McpCtx, Feature)
+    end.
 
 %%====================================================================
 %% MCP client API

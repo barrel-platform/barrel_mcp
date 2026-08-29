@@ -1,0 +1,776 @@
+%%%-------------------------------------------------------------------
+%%% @doc Task storage invariants.
+%%%
+%%% Tasks are keyed by task id alone, so the isolation that a compound
+%%% `{SessionId, TaskId}' key used to give for free is now explicit
+%%% code. These cases pin it: naming the right task from the wrong
+%%% session must be indistinguishable from naming one that does not
+%%% exist.
+%%% @end
+%%%-------------------------------------------------------------------
+-module(barrel_mcp_tasks_tests).
+
+-include_lib("eunit/include/eunit.hrl").
+
+-export([slow_tool/1, killable_tool/1, asking_tool/2]).
+-export([fast_tool/1, crashing_tool/1, asks_then_works/2]).
+
+tasks_test_() ->
+    {setup, fun setup/0, fun cleanup/1, [
+        {"A task is readable by its owner", fun own_session_reads/0},
+        {"Another session cannot read it", fun other_session_cannot_read/0},
+        {"Another session cannot mutate it", fun other_session_cannot_mutate/0},
+        {"list/2 only returns the session's own", fun list_is_scoped/0},
+        {"Sessionless tasks are isolated too", fun undefined_session/0},
+        {"Ids are unique across sessions", fun ids_unique/0},
+        {"Terminal transitions are idempotent", fun terminal_idempotent/0}
+    ]}.
+
+setup() ->
+    application:ensure_all_started(barrel_mcp),
+    ok = barrel_mcp_registry:wait_for_ready(),
+    ok.
+
+cleanup(_) ->
+    ok.
+
+%%====================================================================
+%% Cases
+%%====================================================================
+
+own_session_reads() ->
+    {ok, TaskId} = barrel_mcp_tasks:create(<<"s1">>, <<"tools/call">>, #{}),
+    {ok, Task} = barrel_mcp_tasks:get(<<"s1">>, TaskId),
+    ?assertEqual(TaskId, maps:get(<<"taskId">>, Task)),
+    ?assertEqual(<<"working">>, maps:get(<<"status">>, Task)),
+    ?assertEqual(<<"s1">>, maps:get(<<"sessionId">>, Task)).
+
+other_session_cannot_read() ->
+    {ok, TaskId} = barrel_mcp_tasks:create(<<"owner">>, <<"tools/call">>, #{}),
+    ?assertEqual({error, not_found}, barrel_mcp_tasks:get(<<"intruder">>, TaskId)),
+    %% Knowing the id is not enough even when it plainly exists.
+    ?assertMatch({ok, _}, barrel_mcp_tasks:get(<<"owner">>, TaskId)).
+
+other_session_cannot_mutate() ->
+    {ok, TaskId} = barrel_mcp_tasks:create(<<"owner2">>, <<"tools/call">>, #{}),
+    ?assertEqual(
+        {error, not_found},
+        barrel_mcp_tasks:cancel(<<"intruder">>, TaskId)
+    ),
+    ?assertEqual(
+        {error, not_found},
+        barrel_mcp_tasks:finish(<<"intruder">>, TaskId, #{<<"content">> => []})
+    ),
+    ?assertEqual(
+        {error, not_found},
+        barrel_mcp_tasks:fail(<<"intruder">>, TaskId, boom)
+    ),
+    ?assertEqual(
+        {error, not_found},
+        barrel_mcp_tasks:set_worker(<<"intruder">>, TaskId, #{worker => self()})
+    ),
+    %% Still untouched for its owner.
+    {ok, Task} = barrel_mcp_tasks:get(<<"owner2">>, TaskId),
+    ?assertEqual(<<"working">>, maps:get(<<"status">>, Task)).
+
+list_is_scoped() ->
+    {ok, A} = barrel_mcp_tasks:create(<<"list-a">>, <<"tools/call">>, #{}),
+    {ok, _B} = barrel_mcp_tasks:create(<<"list-b">>, <<"tools/call">>, #{}),
+    {ok, Own} = barrel_mcp_tasks:list(<<"list-a">>, #{}),
+    Ids = [maps:get(<<"taskId">>, T) || T <- Own],
+    ?assertEqual([A], Ids).
+
+%% stdio has no sessions, so tasks there carry `undefined'. That still
+%% has to be a real scope, not a wildcard.
+undefined_session() ->
+    {ok, TaskId} = barrel_mcp_tasks:create(undefined, <<"tools/call">>, #{}),
+    ?assertMatch({ok, _}, barrel_mcp_tasks:get(undefined, TaskId)),
+    ?assertEqual({error, not_found}, barrel_mcp_tasks:get(<<"s1">>, TaskId)),
+    %% And a session-owned task is not visible to the sessionless scope.
+    {ok, Owned} = barrel_mcp_tasks:create(<<"s-owned">>, <<"tools/call">>, #{}),
+    ?assertEqual({error, not_found}, barrel_mcp_tasks:get(undefined, Owned)).
+
+ids_unique() ->
+    Ids = [
+        begin
+            {ok, Id} = barrel_mcp_tasks:create(<<"uniq">>, <<"tools/call">>, #{}),
+            Id
+        end
+     || _ <- lists:seq(1, 50)
+    ],
+    ?assertEqual(50, length(lists:usort(Ids))).
+
+terminal_idempotent() ->
+    {ok, TaskId} = barrel_mcp_tasks:create(<<"term">>, <<"tools/call">>, #{}),
+    ok = barrel_mcp_tasks:finish(<<"term">>, TaskId, #{<<"content">> => []}),
+    %% A second transition is accepted but does not change the outcome.
+    ok = barrel_mcp_tasks:fail(<<"term">>, TaskId, boom),
+    {ok, Task} = barrel_mcp_tasks:get(<<"term">>, TaskId),
+    ?assertEqual(<<"completed">>, maps:get(<<"status">>, Task)),
+    ?assertNot(maps:is_key(<<"error">>, Task)).
+
+%%====================================================================
+%% Long-running tools away from the streamable HTTP transport
+%%
+%% stdio and the simple HTTP transport both drive a tool call through
+%% barrel_mcp_protocol:drive_async_plan/2,3. Until the long-running
+%% decision moved into the protocol core they ignored `long_running'
+%% entirely and blocked for up to 60 seconds instead.
+%%====================================================================
+
+%% Past the inline window, so the call becomes a task.
+slow_tool(_Args) ->
+    timer:sleep(300),
+    timer:sleep(50),
+    <<"finished">>.
+
+%% Publishes itself so the test can kill it mid-flight, standing in for
+%% a worker that dies without reporting: an exit signal from a
+%% supervisor, an OOM kill, a node-local brutal shutdown.
+killable_tool(_Args) ->
+    persistent_term:put({?MODULE, killable}, self()),
+    timer:sleep(60000),
+    <<"never">>.
+
+drive_async_plan_test_() ->
+    {setup, fun setup_slow/0, fun cleanup_slow/1, [
+        {"A modern caller gets a task", fun drive_returns_task/0},
+        {"Without the extension it runs inline", fun drive_runs_inline/0},
+        {"A legacy caller gets the wrapped shape", fun drive_legacy_shape/0},
+        {"A killed worker fails its task", fun killed_worker_fails_task/0},
+        {"Modern create carries every required field", fun modern_create_shape/0},
+        {"Legacy create keeps the wrapped shape", fun legacy_create_shape/0},
+        {"The granted ttl is reported, not the request", fun granted_ttl_reported/0},
+        {"Task methods need the extension declared", fun task_methods_need_extension/0},
+        {"Legacy task methods are ungated", fun legacy_task_methods_ungated/0},
+        {"A tool error completes the task", fun tool_error_completes_task/0},
+        {"Admission refuses past the per-principal cap", fun per_principal_cap/0},
+        {"An unexpired task is never evicted to make room", fun no_eviction_of_live_tasks/0},
+        {"A task parks on the input it asked for", fun task_parks_on_input/0},
+        {"An answered task resumes and completes", fun task_resumes_after_update/0},
+        {"A reused key is refused", fun reused_key_refused/0},
+        {"A fast task-supporting tool answers synchronously", fun fast_tool_answers_inline/0},
+        {"A required tool refuses a client without the extension",
+            fun required_tool_refuses_undeclared/0},
+        {"A crash fails the task with an error and no result", fun crash_fails_task/0},
+        {"An MRTR round before the work is synchronous, the work is a task", fun mrtr_then_task/0},
+        {"tools/list shows taskSupport in the modern era", fun tools_list_shows_task_support/0}
+    ]}.
+
+%% Asks once, then finishes with whatever came back.
+%% Asks after the inline window, so the question parks a task.
+asking_tool(_Args, Ctx) ->
+    timer:sleep(300),
+    case barrel_mcp:input(Ctx, <<"who">>) of
+        {ok, #{<<"content">> := #{<<"name">> := Name}}} ->
+            <<"hello ", Name/binary>>;
+        _ ->
+            {input_required,
+                #{
+                    <<"who">> => #{
+                        method => <<"elicitation/create">>,
+                        params => #{<<"message">> => <<"Your name?">>}
+                    }
+                },
+                seed}
+    end.
+
+setup_slow() ->
+    application:ensure_all_started(barrel_mcp),
+    ok = barrel_mcp_registry:wait_for_ready(),
+    ok = barrel_mcp_registry:reg(tool, <<"slow_stdio">>, ?MODULE, slow_tool, #{
+        long_running => true
+    }),
+    ok = barrel_mcp_registry:reg(tool, <<"killable">>, ?MODULE, killable_tool, #{
+        long_running => true
+    }),
+    ok = barrel_mcp_registry:reg(tool, <<"asking">>, ?MODULE, asking_tool, #{
+        long_running => true
+    }),
+    ok = barrel_mcp_registry:reg(tool, <<"fast">>, ?MODULE, fast_tool, #{task_support => optional}),
+    ok = barrel_mcp_registry:reg(tool, <<"crashing">>, ?MODULE, crashing_tool, #{
+        task_support => optional
+    }),
+    ok = barrel_mcp_registry:reg(tool, <<"asks_then_works">>, ?MODULE, asks_then_works, #{
+        task_support => required
+    }),
+    ok.
+
+cleanup_slow(_) ->
+    barrel_mcp_registry:unreg(tool, <<"fast">>),
+    barrel_mcp_registry:unreg(tool, <<"crashing">>),
+    barrel_mcp_registry:unreg(tool, <<"asks_then_works">>),
+    barrel_mcp_registry:unreg(tool, <<"slow_stdio">>),
+    barrel_mcp_registry:unreg(tool, <<"killable">>),
+    barrel_mcp_registry:unreg(tool, <<"asking">>),
+    ok.
+
+call_request(Meta) ->
+    call_request(<<"slow_stdio">>, Meta).
+
+call_request(Tool, Meta) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 1,
+        <<"method">> => <<"tools/call">>,
+        <<"params">> => #{
+            <<"name">> => Tool,
+            <<"arguments">> => #{},
+            <<"_meta">> => Meta
+        }
+    }.
+
+modern_meta(Capabilities) ->
+    #{
+        <<"io.modelcontextprotocol/protocolVersion">> => <<"2026-07-28">>,
+        <<"io.modelcontextprotocol/clientCapabilities">> => Capabilities
+    }.
+
+drive(Request) ->
+    {async, Plan} = barrel_mcp_protocol:handle(Request),
+    barrel_mcp_protocol:drive_async_plan(Plan, 5000).
+
+drive_returns_task() ->
+    Caps = #{
+        <<"extensions">> => #{<<"io.modelcontextprotocol/tasks">> => #{}}
+    },
+    Resp = drive(call_request(modern_meta(Caps))),
+    Result = maps:get(<<"result">>, Resp),
+    ?assertEqual(<<"task">>, maps:get(<<"resultType">>, Result)),
+    TaskId = maps:get(<<"taskId">>, Result),
+    ?assertEqual(<<"working">>, maps:get(<<"status">>, Result)),
+    %% The worker reports into the task rather than back to the caller.
+    %% No credential on the request, so the owner is the anonymous
+    %% principal rather than the raw auth_info that used to be used.
+    Owner = {principal, anonymous},
+    wait_for_status(Owner, TaskId, <<"completed">>, 40),
+    {ok, Task} = barrel_mcp_tasks:get(Owner, TaskId),
+    [Block] = maps:get(<<"content">>, maps:get(<<"result">>, Task)),
+    ?assertEqual(<<"finished">>, maps:get(<<"text">>, Block)).
+
+drive_runs_inline() ->
+    Resp = drive(call_request(modern_meta(#{}))),
+    Result = maps:get(<<"result">>, Resp),
+    ?assertEqual(<<"complete">>, maps:get(<<"resultType">>, Result)),
+    [Block] = maps:get(<<"content">>, Result),
+    ?assertEqual(<<"finished">>, maps:get(<<"text">>, Block)).
+
+%% No _meta at all is a legacy call, which negotiated the core task
+%% methods and expects the wrapped handle.
+%% A worker killed without reporting used to leave the task `working'
+%% forever: nothing was watching it, the collector blocked on a message
+%% that never came, and the sweep skips working tasks by design.
+killed_worker_fails_task() ->
+    Caps = #{
+        <<"extensions">> => #{<<"io.modelcontextprotocol/tasks">> => #{}}
+    },
+    Resp = drive(call_request(<<"killable">>, modern_meta(Caps))),
+    Result = maps:get(<<"result">>, Resp),
+    TaskId = maps:get(<<"taskId">>, Result),
+    %% No credential on the request, so the owner is the anonymous
+    %% principal rather than the raw auth_info that used to be used.
+    Owner = {principal, anonymous},
+    Worker = wait_for_worker(40),
+    true = exit(Worker, kill),
+    wait_for_status(Owner, TaskId, <<"failed">>, 40),
+    {ok, Task} = barrel_mcp_tasks:get(Owner, TaskId),
+    ?assertMatch(#{<<"error">> := _}, Task).
+
+wait_for_worker(0) ->
+    error(worker_never_started);
+wait_for_worker(N) ->
+    case persistent_term:get({?MODULE, killable}, undefined) of
+        Pid when is_pid(Pid) ->
+            _ = persistent_term:erase({?MODULE, killable}),
+            Pid;
+        undefined ->
+            timer:sleep(25),
+            wait_for_worker(N - 1)
+    end.
+
+drive_legacy_shape() ->
+    Resp = drive(call_request(#{})),
+    Result = maps:get(<<"result">>, Resp),
+    ?assert(maps:is_key(<<"task">>, Result)),
+    ?assertNot(maps:is_key(<<"resultType">>, Result)).
+
+wait_for_status(_Owner, _TaskId, _Status, 0) ->
+    error(task_never_settled);
+wait_for_status(Owner, TaskId, Status, N) ->
+    {ok, Task} = barrel_mcp_tasks:get(Owner, TaskId),
+    case maps:get(<<"status">>, Task) of
+        Status ->
+            ok;
+        _ ->
+            timer:sleep(25),
+            wait_for_status(Owner, TaskId, Status, N - 1)
+    end.
+
+%%====================================================================
+%% Wire shapes, which differ by era
+%%
+%% `CreateTaskResult = Result & Task' in the extension: the fields are
+%% spread, and taskId, status, createdAt, lastUpdatedAt and ttlMs are
+%% all required. Through 2025-11-25 the handle is wrapped instead and
+%% the retention field is `ttl'.
+%%====================================================================
+
+modern_create_shape() ->
+    Caps = #{<<"extensions">> => #{<<"io.modelcontextprotocol/tasks">> => #{}}},
+    Resp = drive(call_request(modern_meta(Caps))),
+    Result = maps:get(<<"result">>, Resp),
+    ?assertEqual(<<"task">>, maps:get(<<"resultType">>, Result)),
+    lists:foreach(
+        fun(Key) ->
+            ?assert(maps:is_key(Key, Result), {missing, Key})
+        end,
+        [<<"taskId">>, <<"status">>, <<"createdAt">>, <<"lastUpdatedAt">>, <<"ttlMs">>]
+    ),
+    %% Flat, not nested under a task key.
+    ?assertNot(maps:is_key(<<"task">>, Result)),
+    %% And the legacy spelling is gone.
+    ?assertNot(maps:is_key(<<"ttl">>, Result)).
+
+legacy_create_shape() ->
+    Resp = drive(call_request(#{})),
+    Result = maps:get(<<"result">>, Resp),
+    Task = maps:get(<<"task">>, Result),
+    ?assert(maps:is_key(<<"ttl">>, Task)),
+    ?assertNot(maps:is_key(<<"ttlMs">>, Task)),
+    ?assertNot(maps:is_key(<<"resultType">>, Result)).
+
+%% A requested ttl may be clamped, and the answer must say what was
+%% granted rather than repeat the request.
+granted_ttl_reported() ->
+    Max = application:get_env(barrel_mcp, task_max_ttl_ms, 3600000),
+    {ok, TaskId} = barrel_mcp_tasks:create(<<"ttl-sess">>, <<"tools/call">>, #{
+        ttl => Max * 10
+    }),
+    {ok, Task} = barrel_mcp_tasks:get(<<"ttl-sess">>, TaskId),
+    ?assertEqual(Max, maps:get(<<"ttl">>, Task)),
+    {ok, Modern} = barrel_mcp_tasks:get(<<"ttl-sess">>, TaskId, modern),
+    ?assertEqual(Max, maps:get(<<"ttlMs">>, Modern)).
+
+%%====================================================================
+%% Capability gating and error semantics
+%%====================================================================
+
+modern_task_request(Method, Caps) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 7,
+        <<"method">> => Method,
+        <<"params">> => #{
+            <<"taskId">> => <<"whatever">>,
+            <<"_meta">> => modern_meta(Caps)
+        }
+    }.
+
+%% The extension makes this a MUST: a client that never declared it
+%% would be told to poll a method it does not know it can call.
+task_methods_need_extension() ->
+    lists:foreach(
+        fun(Method) ->
+            Resp = barrel_mcp_protocol:handle(modern_task_request(Method, #{})),
+            Error = maps:get(<<"error">>, Resp),
+            ?assertEqual(-32021, maps:get(<<"code">>, Error)),
+            ?assertEqual(
+                #{<<"extensions">> => #{<<"io.modelcontextprotocol/tasks">> => #{}}},
+                maps:get(<<"requiredCapabilities">>, maps:get(<<"data">>, Error))
+            )
+        end,
+        [<<"tasks/get">>, <<"tasks/update">>, <<"tasks/cancel">>]
+    ).
+
+%% Legacy clients negotiated tasks in the handshake, so the extension
+%% capability is not theirs to declare.
+legacy_task_methods_ungated() ->
+    Resp = barrel_mcp_protocol:handle(#{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 8,
+        <<"method">> => <<"tasks/get">>,
+        <<"params">> => #{<<"taskId">> => <<"absent">>}
+    }),
+    %% Not found rather than refused for want of a capability.
+    ?assertEqual(-32602, maps:get(<<"code">>, maps:get(<<"error">>, Resp))).
+
+%% `failed' is for protocol errors. A tool reporting a domain failure
+%% has completed, and its result carries isError.
+tool_error_completes_task() ->
+    Owner = <<"err-sess">>,
+    {ok, TaskId} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+    ok = barrel_mcp_tasks:finish(Owner, TaskId, #{
+        <<"content">> => [#{<<"type">> => <<"text">>, <<"text">> => <<"nope">>}],
+        <<"isError">> => true
+    }),
+    {ok, Task} = barrel_mcp_tasks:get(Owner, TaskId),
+    ?assertEqual(<<"completed">>, maps:get(<<"status">>, Task)),
+    ?assertEqual(true, maps:get(<<"isError">>, maps:get(<<"result">>, Task))).
+
+%%====================================================================
+%% Admission limits
+%%
+%% A ttl bounds how long a task is kept, not how many a peer may open,
+%% so a caller could exhaust memory well inside the retention window.
+%%====================================================================
+
+with_task_cap(N, Fun) ->
+    Old = application:get_env(barrel_mcp, max_tasks_per_principal),
+    application:set_env(barrel_mcp, max_tasks_per_principal, N),
+    try
+        Fun()
+    after
+        case Old of
+            {ok, V} -> application:set_env(barrel_mcp, max_tasks_per_principal, V);
+            undefined -> application:unset_env(barrel_mcp, max_tasks_per_principal)
+        end
+    end.
+
+per_principal_cap() ->
+    with_task_cap(3, fun() ->
+        Owner = <<"cap-sess">>,
+        Ids = [
+            begin
+                {ok, Id} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+                Id
+            end
+         || _ <- lists:seq(1, 3)
+        ],
+        ?assertEqual(3, length(Ids)),
+        ?assertEqual(
+            {error, too_many_tasks},
+            barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{})
+        ),
+        %% Another principal is unaffected: the cap is per identity.
+        ?assertMatch({ok, _}, barrel_mcp_tasks:create(<<"other-sess">>, <<"tools/call">>, #{}))
+    end).
+
+%% Evicting a live record to make room would break the retention the
+%% ttl promised, so admission is refused instead.
+no_eviction_of_live_tasks() ->
+    with_task_cap(2, fun() ->
+        Owner = <<"evict-sess">>,
+        {ok, First} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+        {ok, _Second} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+        ?assertEqual(
+            {error, too_many_tasks},
+            barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{})
+        ),
+        %% The first is still there, and still readable.
+        ?assertMatch({ok, _}, barrel_mcp_tasks:get(Owner, First))
+    end).
+
+%%====================================================================
+%% Task multi round-trip
+%%
+%% The worker that asks has already returned, so nothing is resumed in
+%% the literal sense: the handler runs again from the top and reads the
+%% answers, exactly as the stateless path does.
+%%====================================================================
+
+tasks_caps() ->
+    #{<<"extensions">> => #{<<"io.modelcontextprotocol/tasks">> => #{}}}.
+
+start_asking_task() ->
+    Resp = drive(call_request(<<"asking">>, modern_meta(tasks_caps()))),
+    maps:get(<<"taskId">>, maps:get(<<"result">>, Resp)).
+
+task_parks_on_input() ->
+    Owner = {principal, anonymous},
+    TaskId = start_asking_task(),
+    wait_for_status(Owner, TaskId, <<"input_required">>, 40),
+    {ok, Task} = barrel_mcp_tasks:get(Owner, TaskId, modern),
+    Requests = maps:get(<<"inputRequests">>, Task),
+    ?assert(maps:is_key(<<"who">>, Requests)),
+    ?assertEqual(
+        <<"elicitation/create">>,
+        maps:get(<<"method">>, maps:get(<<"who">>, Requests))
+    ).
+
+task_resumes_after_update() ->
+    Owner = {principal, anonymous},
+    TaskId = start_asking_task(),
+    wait_for_status(Owner, TaskId, <<"input_required">>, 40),
+    %% Through the protocol handler, since that is what spawns the
+    %% replacement worker.
+    Ack = barrel_mcp_protocol:handle(#{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 99,
+        <<"method">> => <<"tasks/update">>,
+        <<"params">> => #{
+            <<"taskId">> => TaskId,
+            <<"inputResponses">> => #{
+                <<"who">> => #{
+                    <<"action">> => <<"accept">>,
+                    <<"content">> => #{<<"name">> => <<"ada">>}
+                }
+            },
+            <<"_meta">> => modern_meta(tasks_caps())
+        }
+    }),
+    ?assertEqual(
+        <<"complete">>,
+        maps:get(<<"resultType">>, maps:get(<<"result">>, Ack))
+    ),
+    %% The handler ran again and finished with the answer it was given.
+    wait_for_status(Owner, TaskId, <<"completed">>, 40),
+    {ok, Task} = barrel_mcp_tasks:get(Owner, TaskId, modern),
+    [Block] = maps:get(<<"content">>, maps:get(<<"result">>, Task)),
+    ?assertEqual(<<"hello ada">>, maps:get(<<"text">>, Block)).
+
+%% A handler reusing a key after its answer was consumed would read a
+%% stale response as a fresh one, so the round is refused.
+reused_key_refused() ->
+    Owner = <<"reuse-sess">>,
+    {ok, TaskId} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+    Requests = #{<<"k">> => #{method => <<"elicitation/create">>, params => #{}}},
+    ok = barrel_mcp_tasks:await_input(Owner, TaskId, Requests, seed, #{}),
+    ?assertEqual(
+        {error, {reused_input_key, <<"k">>}},
+        barrel_mcp_tasks:await_input(Owner, TaskId, Requests, seed, #{})
+    ),
+    %% And a round that asks nothing at all is refused too.
+    ?assertEqual(
+        {error, empty_input_round},
+        barrel_mcp_tasks:await_input(Owner, TaskId, #{}, seed, #{})
+    ).
+
+%%====================================================================
+%% Task notifications and subscription binding
+%%
+%% The eras deliver differently, and a task id is not a capability: a
+%% caller that learns someone else's id must not be able to subscribe
+%% to it.
+%%====================================================================
+
+owned_narrows_to_the_holder_test() ->
+    {ok, Mine} = barrel_mcp_tasks:create(<<"owner-a">>, <<"tools/call">>, #{}),
+    {ok, Theirs} = barrel_mcp_tasks:create(<<"owner-b">>, <<"tools/call">>, #{}),
+    %% Their id and an id naming nothing give the same answer, so the
+    %% difference cannot be used to detect a task's existence.
+    ?assertEqual([Mine], barrel_mcp_tasks:owned(<<"owner-a">>, [Mine, Theirs])),
+    ?assertEqual([], barrel_mcp_tasks:owned(<<"owner-a">>, [Theirs])),
+    ?assertEqual([], barrel_mcp_tasks:owned(<<"owner-a">>, [<<"task_nothing">>])).
+
+task_ids_filter_parsed_test() ->
+    Filter = barrel_mcp_subscriptions:normalize_filter(#{
+        <<"notifications">> => #{<<"taskIds">> => [<<"a">>, <<"b">>, 42]}
+    }),
+    %% Non-binaries are dropped rather than failing the request.
+    ?assertEqual([<<"a">>, <<"b">>], maps:get(task_ids, Filter)).
+
+%% Asking for task notifications is asking for part of the extension.
+task_ids_need_the_extension_test() ->
+    Request = fun(Caps) ->
+        barrel_mcp_protocol:handle(
+            #{
+                <<"jsonrpc">> => <<"2.0">>,
+                <<"id">> => 5,
+                <<"method">> => <<"subscriptions/listen">>,
+                <<"params">> => #{
+                    <<"notifications">> => #{<<"taskIds">> => [<<"x">>]},
+                    <<"_meta">> => modern_meta(Caps)
+                }
+            },
+            #{streaming => true}
+        )
+    end,
+    Refused = Request(#{}),
+    ?assertEqual(
+        -32021,
+        maps:get(<<"code">>, maps:get(<<"error">>, Refused))
+    ),
+    %% Declared, so it opens; the unknown id is simply not honoured.
+    ?assertMatch({subscribe, #{filter := #{task_ids := []}}}, Request(tasks_caps())).
+
+%%====================================================================
+%% Blocking tasks/result
+%%
+%% The spec makes this block until terminal. The wait cannot live in the
+%% tasks server, which is the process that must accept the transition
+%% that ends it.
+%%====================================================================
+
+await_in_background(Owner, TaskId, Timeout) ->
+    Self = self(),
+    spawn(fun() ->
+        Self ! {awaited, barrel_mcp_tasks:await_result(Owner, TaskId, Timeout)}
+    end),
+    ok.
+
+collect_awaited(Timeout) ->
+    receive
+        {awaited, R} -> R
+    after Timeout -> no_reply
+    end.
+
+%% A task already terminal answers at once, without parking anything.
+await_returns_terminal_immediately_test() ->
+    Owner = <<"await-a">>,
+    {ok, TaskId} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+    ok = barrel_mcp_tasks:finish(Owner, TaskId, #{<<"content">> => []}),
+    ?assertMatch(
+        {ok, #{<<"status">> := <<"completed">>}},
+        barrel_mcp_tasks:await_result(Owner, TaskId, 1000)
+    ).
+
+%% The point of the method: it does not return while the task runs.
+await_blocks_until_finished_test() ->
+    Owner = <<"await-b">>,
+    {ok, TaskId} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+    ok = await_in_background(Owner, TaskId, 5000),
+    %% Still working, so nothing has been answered.
+    ?assertEqual(no_reply, collect_awaited(200)),
+    ok = barrel_mcp_tasks:finish(Owner, TaskId, #{<<"content">> => []}),
+    ?assertMatch({ok, #{<<"status">> := <<"completed">>}}, collect_awaited(2000)).
+
+%% Every terminal route has to wake a waiter, not just success.
+await_woken_by_failure_test() ->
+    Owner = <<"await-c">>,
+    {ok, TaskId} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+    ok = await_in_background(Owner, TaskId, 5000),
+    ?assertEqual(no_reply, collect_awaited(100)),
+    ok = barrel_mcp_tasks:fail(Owner, TaskId, boom),
+    ?assertMatch({ok, #{<<"status">> := <<"failed">>}}, collect_awaited(2000)).
+
+await_woken_by_cancel_test() ->
+    Owner = <<"await-d">>,
+    {ok, TaskId} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+    ok = await_in_background(Owner, TaskId, 5000),
+    ?assertEqual(no_reply, collect_awaited(100)),
+    ok = barrel_mcp_tasks:cancel(Owner, TaskId),
+    ?assertMatch({ok, #{<<"status">> := <<"cancelled">>}}, collect_awaited(2000)).
+
+await_unknown_task_test() ->
+    ?assertEqual(
+        {error, not_found},
+        barrel_mcp_tasks:await_result(<<"await-e">>, <<"task_nope">>, 100)
+    ).
+
+%% A waiter that gives up leaves nothing behind, and the tasks server
+%% keeps serving.
+await_timeout_cleans_up_test() ->
+    Owner = <<"await-f">>,
+    {ok, TaskId} = barrel_mcp_tasks:create(Owner, <<"tools/call">>, #{}),
+    ?assertEqual({error, timeout}, barrel_mcp_tasks:await_result(Owner, TaskId, 100)),
+    ok = barrel_mcp_tasks:finish(Owner, TaskId, #{<<"content">> => []}),
+    ?assertMatch({ok, _}, barrel_mcp_tasks:get(Owner, TaskId)).
+
+%%====================================================================
+%% Synchronous first, a task when it takes long
+%%====================================================================
+
+fast_tool(_Args) ->
+    <<"quick">>.
+
+crashing_tool(_Args) ->
+    error(boom).
+
+%% Round one asks; round two has the answer and works past the window.
+asks_then_works(_Args, Ctx) ->
+    case barrel_mcp:input(Ctx, <<"user_name">>) of
+        none ->
+            {input_required,
+                #{
+                    <<"user_name">> => #{
+                        method => <<"elicitation/create">>,
+                        params => #{<<"message">> => <<"Your name?">>}
+                    }
+                },
+                round1};
+        {ok, Answer} ->
+            timer:sleep(400),
+            <<"hello ", (answered_name(Answer))/binary>>
+    end.
+
+answered_name(#{<<"content">> := #{<<"user_name">> := Name}}) -> Name;
+answered_name(#{<<"result">> := Result}) -> answered_name(Result);
+answered_name(_) -> <<"stranger">>.
+
+fast_tool_answers_inline() ->
+    Resp = drive(call_request(<<"fast">>, modern_meta(tasks_caps()))),
+    Result = maps:get(<<"result">>, Resp),
+    ?assertEqual(<<"complete">>, maps:get(<<"resultType">>, Result)),
+    ?assertNot(maps:is_key(<<"taskId">>, Result)),
+    [Block] = maps:get(<<"content">>, Result),
+    ?assertEqual(<<"quick">>, maps:get(<<"text">>, Block)).
+
+required_tool_refuses_undeclared() ->
+    Resp = drive(call_request(<<"asks_then_works">>, modern_meta(#{}))),
+    Error = maps:get(<<"error">>, Resp),
+    ?assertEqual(-32021, maps:get(<<"code">>, Error)),
+    ?assertMatch(
+        #{<<"requiredCapabilities">> := #{<<"extensions">> := _}},
+        maps:get(<<"data">>, Error)
+    ).
+
+crash_fails_task() ->
+    %% The crash lands after the inline window, so it fails a task.
+    application:set_env(barrel_mcp, task_inline_ms, 0),
+    try
+        Resp = drive(call_request(<<"crashing">>, modern_meta(tasks_caps()))),
+        Result = maps:get(<<"result">>, Resp),
+        ?assertEqual(<<"task">>, maps:get(<<"resultType">>, Result)),
+        TaskId = maps:get(<<"taskId">>, Result),
+        Owner = {principal, anonymous},
+        wait_for_status(Owner, TaskId, <<"failed">>, 40),
+        {ok, Task} = barrel_mcp_tasks:get(Owner, TaskId, modern),
+        ?assertMatch(#{<<"error">> := #{<<"code">> := _, <<"message">> := _}}, Task),
+        ?assertNot(maps:is_key(<<"result">>, Task))
+    after
+        application:unset_env(barrel_mcp, task_inline_ms)
+    end.
+
+mrtr_then_task() ->
+    Caps = (tasks_caps())#{<<"elicitation">> => #{}},
+    Round1 = drive(call_request(<<"asks_then_works">>, modern_meta(Caps))),
+    R1 = maps:get(<<"result">>, Round1),
+    ?assertEqual(<<"input_required">>, maps:get(<<"resultType">>, R1)),
+    ?assertNot(maps:is_key(<<"taskId">>, R1)),
+    State = maps:get(<<"requestState">>, R1),
+    Req = call_request(<<"asks_then_works">>, modern_meta(Caps)),
+    Params = maps:get(<<"params">>, Req),
+    Round2 = drive(Req#{
+        <<"params">> => Params#{
+            <<"requestState">> => State,
+            <<"inputResponses">> => #{
+                <<"user_name">> => #{
+                    <<"result">> => #{
+                        <<"action">> => <<"accept">>,
+                        <<"content">> => #{<<"user_name">> => <<"Ada">>}
+                    }
+                }
+            }
+        }
+    }),
+    R2 = maps:get(<<"result">>, Round2),
+    ?assertEqual(<<"task">>, maps:get(<<"resultType">>, R2)),
+    TaskId = maps:get(<<"taskId">>, R2),
+    ?assert(is_integer(maps:get(<<"ttlMs">>, R2))),
+    ?assert(is_integer(maps:get(<<"pollIntervalMs">>, R2))),
+    Owner = {principal, anonymous},
+    %% Durable before the handle is handed out.
+    ?assertMatch({ok, _}, barrel_mcp_tasks:get(Owner, TaskId, modern)),
+    wait_for_status(Owner, TaskId, <<"completed">>, 40),
+    {ok, Task} = barrel_mcp_tasks:get(Owner, TaskId, modern),
+    [Block] = maps:get(<<"content">>, maps:get(<<"result">>, Task)),
+    ?assertEqual(<<"hello Ada">>, maps:get(<<"text">>, Block)).
+
+tools_list_shows_task_support() ->
+    Req = #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => 9,
+        <<"method">> => <<"tools/list">>,
+        <<"params">> => #{<<"_meta">> => modern_meta(#{})}
+    },
+    Resp = barrel_mcp_protocol:handle(Req),
+    Tools = maps:get(<<"tools">>, maps:get(<<"result">>, Resp)),
+    ByName = maps:from_list([{maps:get(<<"name">>, T), T} || T <- Tools]),
+    ?assertEqual(
+        #{<<"taskSupport">> => <<"optional">>},
+        maps:get(<<"execution">>, maps:get(<<"fast">>, ByName))
+    ),
+    ?assertEqual(
+        #{<<"taskSupport">> => <<"required">>},
+        maps:get(<<"execution">>, maps:get(<<"asks_then_works">>, ByName))
+    ).

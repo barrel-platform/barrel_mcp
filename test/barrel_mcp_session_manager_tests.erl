@@ -19,7 +19,12 @@ session_manager_test_() ->
         {"Update activity updates timestamp", fun test_update_activity/0},
         {"Delete session removes it", fun test_delete_session/0},
         {"List sessions returns all", fun test_list_sessions/0},
-        {"Cleanup expired removes old sessions", fun test_cleanup_expired/0}
+        {"Cleanup expired removes old sessions", fun test_cleanup_expired/0},
+        {"Delete drops the session's resource subscriptions",
+            fun test_delete_drops_subscriptions/0},
+        {"The TTL sweep drops them too", fun test_sweep_drops_subscriptions/0},
+        {"Delete drops the session's in-flight records", fun test_delete_drops_in_flight/0},
+        {"Delete fails a caller waiting on the client", fun test_delete_fails_pending/0}
     ]}.
 
 setup() ->
@@ -139,3 +144,54 @@ test_cleanup_expired() ->
     %% Sessions should be gone
     ?assertEqual({error, not_found}, barrel_mcp_session:get(Id1)),
     ?assertEqual({error, not_found}, barrel_mcp_session:get(Id2)).
+
+%% A session's rows in the other three tables are keyed by its id and
+%% nothing else expires them, so deleting it has to take them along.
+
+test_delete_drops_subscriptions() ->
+    Uri = <<"mem://watched">>,
+    {ok, SessionId} = barrel_mcp_session:create(#{}),
+    ok = barrel_mcp_session:subscribe_resource(SessionId, Uri),
+    ?assert(lists:member(SessionId, barrel_mcp_session:subscribers_for(Uri))),
+    ok = barrel_mcp_session:delete(SessionId),
+    ?assertNot(lists:member(SessionId, barrel_mcp_session:subscribers_for(Uri))).
+
+test_sweep_drops_subscriptions() ->
+    Uri = <<"mem://swept">>,
+    {ok, SessionId} = barrel_mcp_session:create(#{}),
+    ok = barrel_mcp_session:subscribe_resource(SessionId, Uri),
+    timer:sleep(50),
+    _ = barrel_mcp_session:cleanup_expired(1),
+    ?assertEqual({error, not_found}, barrel_mcp_session:get(SessionId)),
+    ?assertNot(lists:member(SessionId, barrel_mcp_session:subscribers_for(Uri))).
+
+test_delete_drops_in_flight() ->
+    {ok, SessionId} = barrel_mcp_session:create(#{}),
+    ok = barrel_mcp_session:record_in_flight(SessionId, 1, self(), self()),
+    ok = barrel_mcp_session:delete(SessionId),
+    ok = barrel_mcp_session:cancel_in_flight(SessionId, 1),
+    receive
+        {cancel, 1} -> erlang:error(in_flight_record_outlived_its_session)
+    after 100 -> ok
+    end.
+
+%% The client is gone, so the tool waiting on it must not sit out the
+%% whole timeout.
+test_delete_fails_pending() ->
+    {ok, SessionId} = barrel_mcp_session:create(#{
+        client_capabilities => #{<<"sampling">> => #{}}
+    }),
+    ok = barrel_mcp_session:set_sse_pid(SessionId, self()),
+    Caller = self(),
+    _ = spawn(fun() ->
+        Caller ! {sampled, barrel_mcp_session:sampling_create_message(SessionId, #{}, #{})}
+    end),
+    receive
+        {sse_send_message, #{<<"method">> := <<"sampling/createMessage">>}} -> ok
+    after 1000 -> erlang:error(no_sampling_request)
+    end,
+    ok = barrel_mcp_session:delete(SessionId),
+    receive
+        {sampled, Result} -> ?assertMatch({error, {client_error, _}}, Result)
+    after 1000 -> erlang:error(caller_left_waiting)
+    end.

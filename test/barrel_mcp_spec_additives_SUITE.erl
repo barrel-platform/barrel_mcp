@@ -8,6 +8,8 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
+-import(barrel_mcp_test_helpers, [url/1]).
+
 -export([
     all/0,
     init_per_suite/1,
@@ -122,7 +124,7 @@ metadata_surfaces_in_list(Config) ->
         Body,
         [with_body]
     ),
-    Result = maps:get(<<"result">>, json:decode(Resp)),
+    Result = maps:get(<<"result">>, envelope_of(Resp)),
     [Tool] = lists:filter(
         fun(T) ->
             maps:get(<<"name">>, T) =:= <<"titled">>
@@ -167,7 +169,7 @@ structured_output_round_trip(Config) ->
         Body,
         [with_body]
     ),
-    Result = maps:get(<<"result">>, json:decode(Resp)),
+    Result = maps:get(<<"result">>, envelope_of(Resp)),
     Structured = maps:get(<<"structuredContent">>, Result),
     ?assertEqual(<<"42">>, maps:get(<<"answer">>, Structured)),
     ?assertMatch([_ | _], maps:get(<<"content">>, Result)),
@@ -204,7 +206,7 @@ structured_output_validation_fails(Config) ->
         Body,
         [with_body]
     ),
-    Result = maps:get(<<"result">>, json:decode(Resp)),
+    Result = maps:get(<<"result">>, envelope_of(Resp)),
     ?assertEqual(true, maps:get(<<"isError">>, Result)),
     ok = barrel_mcp_registry:unreg(tool, <<"badstruct">>),
     ok.
@@ -252,7 +254,7 @@ completion_dispatch(Config) ->
     ),
     Completion = maps:get(
         <<"completion">>,
-        maps:get(<<"result">>, json:decode(Resp))
+        maps:get(<<"result">>, envelope_of(Resp))
     ),
     Values = maps:get(<<"values">>, Completion),
     ?assertEqual([<<"short">>], Values),
@@ -286,7 +288,7 @@ long_running_returns_taskid(Config) ->
         Body,
         [with_body]
     ),
-    Result = maps:get(<<"result">>, json:decode(Resp)),
+    Result = maps:get(<<"result">>, envelope_of(Resp)),
     %% Spec shape: {task: {taskId, status, ...}}.
     Task = maps:get(<<"task">>, Result),
     TaskId = maps:get(<<"taskId">>, Task),
@@ -309,7 +311,7 @@ long_running_returns_taskid(Config) ->
         }),
         [with_body]
     ),
-    GetResult = maps:get(<<"result">>, json:decode(GetResp)),
+    GetResult = maps:get(<<"result">>, envelope_of(GetResp)),
     ?assertEqual(<<"completed">>, maps:get(<<"status">>, GetResult)),
     %% Timestamps are RFC 3339 strings now, not integers.
     ?assert(is_binary(maps:get(<<"createdAt">>, GetResult))),
@@ -375,7 +377,7 @@ long_running_cancel_signals_worker(Config) ->
         call_body(<<"cancellable">>, 31),
         [with_body]
     ),
-    Result = maps:get(<<"result">>, json:decode(RB)),
+    Result = maps:get(<<"result">>, envelope_of(RB)),
     TaskId = maps:get(<<"taskId">>, maps:get(<<"task">>, Result)),
     %% Cancel the task — the worker should receive a `{cancel, _}'
     %% signal in its mailbox (cooperatively observed by our tool).
@@ -507,9 +509,6 @@ suggest_lengths(_, _Ctx) -> {ok, []}.
 %% Helpers
 %%====================================================================
 
-url(Port) ->
-    iolist_to_binary(io_lib:format("http://127.0.0.1:~B/mcp", [Port])).
-
 post_init(Port) ->
     Body = json:encode(#{
         <<"jsonrpc">> => <<"2.0">>,
@@ -546,3 +545,14 @@ call_body(Name, Id) ->
             <<"arguments">> => #{}
         }
     }).
+
+%% The envelope, whether a JSON body or the last event of an SSE
+%% stream: a legacy call streams now, as the reference server's does.
+envelope_of(Body) ->
+    case binary:match(Body, <<"data: ">>) of
+        nomatch ->
+            json:decode(Body);
+        _ ->
+            Datas = [D || <<"data: ", D/binary>> <- binary:split(Body, <<"\n">>, [global])],
+            json:decode(lists:last(Datas))
+    end.

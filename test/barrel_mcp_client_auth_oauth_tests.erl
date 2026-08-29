@@ -269,7 +269,9 @@ json_encode(M) -> iolist_to_binary(json:encode(M)).
 
 test_discover_prm() ->
     Url = <<?BASE/binary, "/.well-known/oauth-protected-resource">>,
-    {ok, Doc} = barrel_mcp_client_auth_oauth:discover_protected_resource(Url),
+    {ok, Doc} = barrel_mcp_client_auth_oauth:discover_protected_resource(Url, #{
+        allow_insecure_oauth => true
+    }),
     ?assertEqual(
         <<"http://127.0.0.1:19494/mcp">>,
         maps:get(<<"resource">>, Doc)
@@ -280,7 +282,9 @@ test_discover_prm() ->
     ).
 
 test_discover_as() ->
-    {ok, AS} = barrel_mcp_client_auth_oauth:discover_authorization_server(?BASE),
+    {ok, AS} = barrel_mcp_client_auth_oauth:discover_authorization_server(?BASE, #{
+        allow_insecure_oauth => true
+    }),
     ?assertEqual(
         <<?BASE/binary, "/oauth/token">>,
         maps:get(<<"token_endpoint">>, AS)
@@ -290,6 +294,7 @@ test_refresh_token() ->
     {ok, Resp} = barrel_mcp_client_auth_oauth:refresh_token(
         <<?BASE/binary, "/oauth/token">>,
         #{
+            allow_insecure_oauth => true,
             refresh_token => <<"old-refresh">>,
             client_id => <<"client-1">>,
             resource => <<"http://127.0.0.1:19494/mcp">>
@@ -302,6 +307,7 @@ test_behaviour_refresh() ->
     %% Build the handle that barrel_mcp_client_auth would produce.
     Auth = barrel_mcp_client_auth:new(
         {oauth, #{
+            allow_insecure_oauth => true,
             access_token => <<"old-access">>,
             refresh_token => <<"old-refresh">>,
             token_endpoint => <<?BASE/binary, "/oauth/token">>,
@@ -324,6 +330,7 @@ test_client_credentials() ->
     {ok, Resp} = barrel_mcp_client_auth_oauth:client_credentials(
         <<?BASE/binary, "/oauth/token">>,
         #{
+            allow_insecure_oauth => true,
             client_id => <<"client-1">>,
             client_secret => <<"top-secret">>,
             scopes => [<<"read">>, <<"write">>],
@@ -338,6 +345,7 @@ test_client_credentials_handle() ->
     %% barrel_mcp_client. init/1 must fetch the token eagerly.
     Auth = barrel_mcp_client_auth:new(
         {oauth_client_credentials, #{
+            allow_insecure_oauth => true,
             token_endpoint => <<?BASE/binary, "/oauth/token">>,
             client_id => <<"client-1">>,
             client_secret => <<"top-secret">>,
@@ -356,6 +364,7 @@ test_client_credentials_jwt() ->
     {ok, Resp} = barrel_mcp_client_auth_oauth:client_credentials(
         <<?BASE/binary, "/oauth/token">>,
         #{
+            allow_insecure_oauth => true,
             client_id => <<"client-1">>,
             client_assertion => <<"signed.jwt.token">>,
             resource => <<"http://127.0.0.1:19494/mcp">>
@@ -368,6 +377,7 @@ test_client_credentials_refresh() ->
     %% same grant — no refresh_token involved.
     Auth = barrel_mcp_client_auth:new(
         {oauth_client_credentials, #{
+            allow_insecure_oauth => true,
             token_endpoint => <<?BASE/binary, "/oauth/token">>,
             client_id => <<"client-1">>,
             client_secret => <<"top-secret">>
@@ -395,6 +405,7 @@ test_token_exchange() ->
     {ok, IdJag} = barrel_mcp_client_auth_oauth:token_exchange(
         <<?BASE/binary, "/idp/token">>,
         #{
+            allow_insecure_oauth => true,
             client_id => <<"client-1">>,
             client_secret => <<"top-secret">>,
             subject_token => <<"oidc-id-token">>,
@@ -412,6 +423,7 @@ test_jwt_bearer() ->
     {ok, Resp} = barrel_mcp_client_auth_oauth:jwt_bearer(
         <<?BASE/binary, "/oauth/token">>,
         #{
+            allow_insecure_oauth => true,
             client_id => <<"client-1">>,
             client_secret => <<"top-secret">>,
             assertion => <<"id-jag.signed.jwt">>,
@@ -426,6 +438,7 @@ test_enterprise_managed_handle() ->
     %% then jwt-bearer) and the Authorization header is ready.
     Auth = barrel_mcp_client_auth:new(
         {oauth_enterprise, #{
+            allow_insecure_oauth => true,
             idp_token_endpoint => <<?BASE/binary, "/idp/token">>,
             as_token_endpoint => <<?BASE/binary, "/oauth/token">>,
             client_id => <<"client-1">>,
@@ -447,6 +460,7 @@ test_enterprise_managed_refresh() ->
     %% A 401 in enterprise_managed mode re-walks the chain.
     Auth = barrel_mcp_client_auth:new(
         {oauth_enterprise, #{
+            allow_insecure_oauth => true,
             idp_token_endpoint => <<?BASE/binary, "/idp/token">>,
             as_token_endpoint => <<?BASE/binary, "/oauth/token">>,
             client_id => <<"client-1">>,
@@ -472,6 +486,7 @@ test_enterprise_managed_subject_token_expired() ->
     %% Token from the IdP.
     Result = barrel_mcp_client_auth:new(
         {oauth_enterprise, #{
+            allow_insecure_oauth => true,
             idp_token_endpoint => <<?BASE/binary, "/idp/token">>,
             as_token_endpoint => <<?BASE/binary, "/oauth/token">>,
             client_id => <<"client-1">>,
@@ -500,7 +515,8 @@ test_register_client_public() ->
             <<"grant_types">> => [<<"authorization_code">>],
             <<"response_types">> => [<<"code">>],
             <<"token_endpoint_auth_method">> => <<"none">>
-        }
+        },
+        #{allow_insecure_oauth => true}
     ),
     ?assertEqual(<<"new-client-id">>, maps:get(<<"client_id">>, Resp)),
     ?assertNot(maps:is_key(<<"client_secret">>, Resp)).
@@ -513,7 +529,8 @@ test_register_client_confidential() ->
         #{
             <<"client_name">> => <<"confidential">>,
             <<"grant_types">> => [<<"client_credentials">>]
-        }
+        },
+        #{allow_insecure_oauth => true}
     ),
     ?assertEqual(<<"new-client-id">>, maps:get(<<"client_id">>, Resp)),
     ?assertEqual(<<"new-secret">>, maps:get(<<"client_secret">>, Resp)).
@@ -523,7 +540,8 @@ test_register_client_error() ->
     %% status + body so it can react.
     Result = barrel_mcp_client_auth_oauth:register_client(
         <<?BASE/binary, "/oauth/register">>,
-        #{<<"client_name">> => <<"bad">>}
+        #{<<"client_name">> => <<"bad">>},
+        #{allow_insecure_oauth => true}
     ),
     ?assertMatch({error, {http_error, 400, _}}, Result).
 
@@ -534,7 +552,7 @@ test_register_client_protected() ->
     {ok, Resp} = barrel_mcp_client_auth_oauth:register_client(
         <<?BASE/binary, "/oauth/register">>,
         #{<<"client_name">> => <<"protected">>},
-        #{initial_access_token => <<"init-tok">>}
+        #{initial_access_token => <<"init-tok">>, allow_insecure_oauth => true}
     ),
     ?assertEqual(
         <<"protected-client-id">>,
@@ -546,6 +564,580 @@ test_register_client_protected_unauth() ->
     %% with 401, surfaced as {error, {http_error, 401, _}}.
     Result = barrel_mcp_client_auth_oauth:register_client(
         <<?BASE/binary, "/oauth/register">>,
-        #{<<"client_name">> => <<"protected">>}
+        #{<<"client_name">> => <<"protected">>},
+        #{allow_insecure_oauth => true}
     ),
     ?assertMatch({error, {http_error, 401, _}}, Result).
+
+%%====================================================================
+%% Authorization response validation (RFC 9207)
+%%====================================================================
+
+expected() ->
+    #{state => <<"st-1">>, issuer => <<"https://idp.example">>}.
+
+callback_accepts_matching_iss_test() ->
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"st-1">>, <<"iss">> => <<"https://idp.example">>},
+            expected()
+        )
+    ).
+
+%% A server that says nothing about iss is only asked to send it, so
+%% its absence cannot be an error or half the servers in the world
+%% become unusable.
+callback_accepts_absent_iss_test() ->
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"st-1">>},
+            expected()
+        )
+    ).
+
+%% The attack this prevents: a client talking to two authorization
+%% servers is handed a code minted by one at the other's endpoint.
+callback_rejects_wrong_iss_test() ->
+    ?assertMatch(
+        {error, {issuer_mismatch, <<"https://evil.example">>, <<"https://idp.example">>}},
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"st-1">>, <<"iss">> => <<"https://evil.example">>},
+            expected()
+        )
+    ).
+
+callback_rejects_wrong_state_test() ->
+    ?assertMatch(
+        {error, {state_mismatch, <<"other">>, <<"st-1">>}},
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"other">>, <<"iss">> => <<"https://idp.example">>},
+            expected()
+        )
+    ).
+
+%% Nothing to compare against is a caller bug, not a pass.
+callback_requires_expectations_test() ->
+    ?assertEqual(
+        {error, no_expected_state},
+        barrel_mcp_client_auth_oauth:validate_callback(#{<<"state">> => <<"x">>}, #{})
+    ),
+    ?assertEqual(
+        {error, no_expected_issuer},
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"st-1">>, <<"iss">> => <<"https://idp.example">>},
+            #{state => <<"st-1">>}
+        )
+    ).
+
+%% Hosts parse query strings into whichever key type they favour.
+callback_accepts_atom_keys_test() ->
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{state => <<"st-1">>, iss => <<"https://idp.example">>},
+            expected()
+        )
+    ).
+
+promising() ->
+    (expected())#{
+        as_metadata => #{<<"authorization_response_iss_parameter_supported">> => true}
+    }.
+
+%% A server that advertises iss and then omits it is not an old server
+%% we are tolerating: something stripped the parameter, and the whole
+%% point of the check is gone.
+callback_rejects_absent_iss_when_advertised_test() ->
+    ?assertEqual(
+        {error, missing_iss},
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"st-1">>},
+            promising()
+        )
+    ).
+
+callback_accepts_advertised_iss_test() ->
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"st-1">>, <<"iss">> => <<"https://idp.example">>},
+            promising()
+        )
+    ).
+
+%% Metadata that says false, or says nothing, leaves absence tolerated.
+callback_tolerates_absent_iss_when_not_advertised_test() ->
+    NotPromising = (expected())#{
+        as_metadata => #{<<"authorization_response_iss_parameter_supported">> => false}
+    },
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"st-1">>}, NotPromising
+        )
+    ),
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:validate_callback(
+            #{<<"state">> => <<"st-1">>}, (expected())#{as_metadata => #{}}
+        )
+    ).
+
+%% Each of these is a distinct issuer. Normalising any of them away
+%% would let a code from one server be redeemed against another.
+callback_compares_issuers_exactly_test() ->
+    lists:foreach(
+        fun(Iss) ->
+            ?assertMatch(
+                {error, {issuer_mismatch, _, _}},
+                barrel_mcp_client_auth_oauth:validate_callback(
+                    #{<<"state">> => <<"st-1">>, <<"iss">> => Iss},
+                    expected()
+                )
+            )
+        end,
+        [
+            %% Trailing slash.
+            <<"https://idp.example/">>,
+            %% Host case folding.
+            <<"https://IDP.example">>,
+            %% Default-port elision.
+            <<"https://idp.example:443">>,
+            %% Percent-encoding.
+            <<"https://idp%2Eexample">>
+        ]
+    ).
+
+%%====================================================================
+%% Choosing a registration mechanism
+%%====================================================================
+
+cimd_as() ->
+    #{
+        <<"client_id_metadata_document_supported">> => true,
+        <<"registration_endpoint">> => <<"https://idp.example/register">>
+    }.
+
+%% A relationship that already exists beats anything discoverable.
+strategy_prefers_pre_registration_test() ->
+    ?assertEqual(
+        {pre_registered, <<"cid-1">>},
+        barrel_mcp_client_auth_oauth:registration_strategy(
+            cimd_as(),
+            #{
+                client_id => <<"cid-1">>,
+                client_id_metadata_url => <<"https://app.example/c.json">>
+            }
+        )
+    ).
+
+strategy_prefers_cimd_over_registration_test() ->
+    ?assertEqual(
+        {client_id_metadata_document, <<"https://app.example/c.json">>},
+        barrel_mcp_client_auth_oauth:registration_strategy(
+            cimd_as(),
+            #{client_id_metadata_url => <<"https://app.example/c.json">>}
+        )
+    ).
+
+%% Hosting a document is no use against a server that will not fetch
+%% one, so this has to fall through rather than fail.
+strategy_falls_back_when_cimd_unsupported_test() ->
+    ?assertEqual(
+        {dynamic_registration, <<"https://idp.example/register">>},
+        barrel_mcp_client_auth_oauth:registration_strategy(
+            #{<<"registration_endpoint">> => <<"https://idp.example/register">>},
+            #{client_id_metadata_url => <<"https://app.example/c.json">>}
+        )
+    ).
+
+strategy_uses_registration_endpoint_test() ->
+    ?assertEqual(
+        {dynamic_registration, <<"https://idp.example/register">>},
+        barrel_mcp_client_auth_oauth:registration_strategy(
+            #{<<"registration_endpoint">> => <<"https://idp.example/register">>},
+            #{}
+        )
+    ).
+
+%% A client cannot invent an identity, so someone has to supply one.
+strategy_prompts_when_nothing_available_test() ->
+    ?assertEqual(
+        prompt_user,
+        barrel_mcp_client_auth_oauth:registration_strategy(#{}, #{})
+    ),
+    ?assertEqual(
+        prompt_user,
+        barrel_mcp_client_auth_oauth:registration_strategy(
+            #{<<"client_id_metadata_document_supported">> => false}, #{}
+        )
+    ).
+
+%% Empty is not a client id.
+strategy_ignores_blank_values_test() ->
+    ?assertEqual(
+        prompt_user,
+        barrel_mcp_client_auth_oauth:registration_strategy(
+            (cimd_as())#{<<"registration_endpoint">> => <<>>},
+            #{client_id => <<>>, client_id_metadata_url => <<>>}
+        )
+    ).
+
+%%====================================================================
+%% Client ID Metadata Documents
+%%====================================================================
+
+cimd_doc() ->
+    #{
+        <<"client_id">> => <<"https://app.example/oauth/client.json">>,
+        <<"client_name">> => <<"Example MCP Client">>,
+        <<"redirect_uris">> => [<<"http://127.0.0.1:3000/callback">>]
+    }.
+
+cimd_document_fills_public_client_defaults_test() ->
+    {ok, Doc} = barrel_mcp_client_auth_oauth:client_id_metadata_document(cimd_doc()),
+    ?assertEqual([<<"authorization_code">>], maps:get(<<"grant_types">>, Doc)),
+    ?assertEqual([<<"code">>], maps:get(<<"response_types">>, Doc)),
+    ?assertEqual(<<"none">>, maps:get(<<"token_endpoint_auth_method">>, Doc)),
+    %% What the caller supplied survives.
+    ?assertEqual(
+        <<"https://app.example/oauth/client.json">>,
+        maps:get(<<"client_id">>, Doc)
+    ).
+
+cimd_document_keeps_caller_values_test() ->
+    Given = (cimd_doc())#{
+        <<"grant_types">> => [<<"authorization_code">>, <<"refresh_token">>],
+        <<"token_endpoint_auth_method">> => <<"private_key_jwt">>,
+        <<"logo_uri">> => <<"https://app.example/logo.png">>
+    },
+    {ok, Doc} = barrel_mcp_client_auth_oauth:client_id_metadata_document(Given),
+    ?assertEqual(
+        [<<"authorization_code">>, <<"refresh_token">>],
+        maps:get(<<"grant_types">>, Doc)
+    ),
+    ?assertEqual(<<"private_key_jwt">>, maps:get(<<"token_endpoint_auth_method">>, Doc)),
+    ?assertEqual(<<"https://app.example/logo.png">>, maps:get(<<"logo_uri">>, Doc)).
+
+%% The server rejects a document missing any of these, having already
+%% sent the user to a consent page. Better to fail here.
+cimd_document_requires_the_mandatory_fields_test() ->
+    ?assertEqual(
+        {error, {missing, <<"client_id">>}},
+        barrel_mcp_client_auth_oauth:client_id_metadata_document(
+            maps:remove(<<"client_id">>, cimd_doc())
+        )
+    ),
+    ?assertEqual(
+        {error, {missing, <<"client_name">>}},
+        barrel_mcp_client_auth_oauth:client_id_metadata_document(
+            maps:remove(<<"client_name">>, cimd_doc())
+        )
+    ),
+    ?assertEqual(
+        {error, {missing, <<"redirect_uris">>}},
+        barrel_mcp_client_auth_oauth:client_id_metadata_document(
+            maps:remove(<<"redirect_uris">>, cimd_doc())
+        )
+    ),
+    ?assertEqual(
+        {error, {missing, <<"redirect_uris">>}},
+        barrel_mcp_client_auth_oauth:client_id_metadata_document(
+            (cimd_doc())#{<<"redirect_uris">> => []}
+        )
+    ).
+
+cimd_document_rejects_a_non_url_client_id_test() ->
+    lists:foreach(
+        fun(ClientId) ->
+            ?assertEqual(
+                {error, {invalid_client_id, ClientId}},
+                barrel_mcp_client_auth_oauth:client_id_metadata_document(
+                    (cimd_doc())#{<<"client_id">> => ClientId}
+                )
+            )
+        end,
+        [
+            <<"cid-1">>,
+            <<"http://app.example/c.json">>,
+            <<"https://app.example">>,
+            <<"https://app.example/">>
+        ]
+    ).
+
+client_id_metadata_url_test() ->
+    ?assert(
+        barrel_mcp_client_auth_oauth:is_client_id_metadata_url(
+            <<"https://app.example/c.json">>
+        )
+    ),
+    ?assert(
+        barrel_mcp_client_auth_oauth:is_client_id_metadata_url(
+            <<"https://app.example/oauth/client-metadata.json">>
+        )
+    ),
+    %% No path: an origin is not an identity.
+    ?assertNot(
+        barrel_mcp_client_auth_oauth:is_client_id_metadata_url(
+            <<"https://app.example">>
+        )
+    ),
+    %% Not https, so the document could be swapped in transit.
+    ?assertNot(
+        barrel_mcp_client_auth_oauth:is_client_id_metadata_url(
+            <<"http://app.example/c.json">>
+        )
+    ),
+    ?assertNot(barrel_mcp_client_auth_oauth:is_client_id_metadata_url(<<"cid-1">>)),
+    ?assertNot(barrel_mcp_client_auth_oauth:is_client_id_metadata_url(<<>>)),
+    ?assertNot(barrel_mcp_client_auth_oauth:is_client_id_metadata_url(not_a_binary)).
+
+%%====================================================================
+%% Authorization server binding
+%%====================================================================
+
+binding_accepts_the_issuing_server_test() ->
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:check_issuer_binding(
+            #{client_id => <<"cid-1">>, issuer => <<"https://idp.example">>},
+            <<"https://idp.example">>
+        )
+    ).
+
+%% The credentials name a client at the old server. Sending them to
+%% the new one hands it an identity it was never given, and fails in a
+%% way that reads like a bad token.
+binding_rejects_a_changed_server_test() ->
+    ?assertEqual(
+        {error, {issuer_changed, <<"https://old.example">>, <<"https://new.example">>}},
+        barrel_mcp_client_auth_oauth:check_issuer_binding(
+            #{client_id => <<"cid-1">>, issuer => <<"https://old.example">>},
+            <<"https://new.example">>
+        )
+    ).
+
+%% Credentials that never recorded where they came from cannot be
+%% checked, which is itself the problem.
+binding_rejects_unbound_credentials_test() ->
+    ?assertEqual(
+        {error, unbound_credentials},
+        barrel_mcp_client_auth_oauth:check_issuer_binding(
+            #{client_id => <<"cid-1">>}, <<"https://idp.example">>
+        )
+    ).
+
+%% A CIMD client id is a URL any server resolves for itself, so it is
+%% not bound to one and survives the server changing.
+binding_accepts_a_cimd_client_id_anywhere_test() ->
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:check_issuer_binding(
+            #{client_id => <<"https://app.example/c.json">>},
+            <<"https://new.example">>
+        )
+    ),
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:check_issuer_binding(
+            #{
+                client_id => <<"https://app.example/c.json">>,
+                issuer => <<"https://old.example">>
+            },
+            <<"https://new.example">>
+        )
+    ).
+
+binding_accepts_binary_keys_test() ->
+    ?assertEqual(
+        ok,
+        barrel_mcp_client_auth_oauth:check_issuer_binding(
+            #{<<"client_id">> => <<"cid-1">>, <<"issuer">> => <<"https://idp.example">>},
+            <<"https://idp.example">>
+        )
+    ).
+
+%%====================================================================
+%% Authorization server discovery (2026-07-28 rules)
+%%====================================================================
+
+-define(DPORT, 19495).
+-define(DBASE, <<"http://127.0.0.1:19495">>).
+-define(DTAB, oauth_discovery_mock).
+
+discovery_test_() ->
+    {setup, fun setup_discovery_mock/0, fun cleanup_discovery_mock/1,
+        {timeout, 30, [
+            {"path issuer tries the three well-known URLs in order",
+                fun test_disc_path_issuer_order/0},
+            {"root issuer tries the two root documents", fun test_disc_root_issuer_order/0},
+            {"a 500 falls through to the next URL", fun test_disc_fallthrough_on_500/0},
+            {"a 200 with malformed JSON falls through", fun test_disc_fallthrough_on_bad_json/0},
+            {"an issuer mismatch is terminal", fun test_disc_issuer_mismatch/0},
+            {"missing code_challenge_methods_supported is refused", fun test_disc_no_pkce/0},
+            {"methods without S256 are refused", fun test_disc_no_s256/0},
+            {"a plaintext issuer is refused before any fetch", fun test_disc_insecure_issuer/0},
+            {"a plaintext configured token_endpoint is refused by init",
+                fun test_insecure_token_endpoint/0},
+            {"secure_url accepts https and only https", fun test_secure_url/0}
+        ]}}.
+
+setup_discovery_mock() ->
+    {ok, _} = application:ensure_all_started(hackney),
+    _ = ets:new(?DTAB, [named_table, public, set]),
+    {ok, _} = barrel_mcp_test_http:start(discovery_mock, ?DPORT, fun handle_discovery/1),
+    ok.
+
+cleanup_discovery_mock(_) ->
+    try
+        barrel_mcp_test_http:stop(discovery_mock)
+    catch
+        _:_ -> ok
+    end,
+    _ =
+        try
+            ets:delete(?DTAB)
+        catch
+            _:_ -> ok
+        end,
+    ok.
+
+%% The mock answers from a script the test installs, `#{Path =>
+%% Response}', and logs every path it is asked for.
+handle_discovery(#{path := Path}) ->
+    true = ets:insert(?DTAB, {{log, erlang:unique_integer([monotonic])}, Path}),
+    [{script, Script}] = ets:lookup(?DTAB, script),
+    case maps:get(Path, Script, undefined) of
+        undefined -> {404, json_ct(), <<"{}">>};
+        {Status, Body} when is_binary(Body) -> {Status, json_ct(), Body};
+        Doc when is_map(Doc) -> {200, json_ct(), json_encode(Doc)}
+    end.
+
+script(Script) ->
+    ets:match_delete(?DTAB, {{log, '_'}, '_'}),
+    true = ets:insert(?DTAB, {script, Script}).
+
+requested() ->
+    [P || {_, P} <- lists:sort(ets:match_object(?DTAB, {{log, '_'}, '_'}))].
+
+good_as(Issuer) ->
+    #{
+        <<"issuer">> => Issuer,
+        <<"authorization_endpoint">> => <<Issuer/binary, "/authorize">>,
+        <<"token_endpoint">> => <<Issuer/binary, "/token">>,
+        <<"code_challenge_methods_supported">> => [<<"S256">>]
+    }.
+
+insecure() -> #{allow_insecure_oauth => true}.
+
+test_disc_path_issuer_order() ->
+    Issuer = <<?DBASE/binary, "/tenant1">>,
+    script(#{<<"/tenant1/.well-known/openid-configuration">> => good_as(Issuer)}),
+    {ok, Doc} = barrel_mcp_client_auth_oauth:discover_authorization_server(Issuer, insecure()),
+    ?assertEqual(<<Issuer/binary, "/token">>, maps:get(<<"token_endpoint">>, Doc)),
+    ?assertEqual(
+        [
+            <<"/.well-known/oauth-authorization-server/tenant1">>,
+            <<"/.well-known/openid-configuration/tenant1">>,
+            <<"/tenant1/.well-known/openid-configuration">>
+        ],
+        requested()
+    ).
+
+test_disc_root_issuer_order() ->
+    script(#{<<"/.well-known/openid-configuration">> => good_as(?DBASE)}),
+    {ok, _} = barrel_mcp_client_auth_oauth:discover_authorization_server(?DBASE, insecure()),
+    ?assertEqual(
+        [
+            <<"/.well-known/oauth-authorization-server">>,
+            <<"/.well-known/openid-configuration">>
+        ],
+        requested()
+    ).
+
+test_disc_fallthrough_on_500() ->
+    script(#{
+        <<"/.well-known/oauth-authorization-server">> => {500, <<"boom">>},
+        <<"/.well-known/openid-configuration">> => good_as(?DBASE)
+    }),
+    ?assertMatch(
+        {ok, _},
+        barrel_mcp_client_auth_oauth:discover_authorization_server(?DBASE, insecure())
+    ).
+
+test_disc_fallthrough_on_bad_json() ->
+    script(#{
+        <<"/.well-known/oauth-authorization-server">> => {200, <<"{not json">>},
+        <<"/.well-known/openid-configuration">> => good_as(?DBASE)
+    }),
+    ?assertMatch(
+        {ok, _},
+        barrel_mcp_client_auth_oauth:discover_authorization_server(?DBASE, insecure())
+    ).
+
+test_disc_issuer_mismatch() ->
+    script(#{
+        <<"/.well-known/oauth-authorization-server">> => good_as(<<"https://honest.example">>),
+        <<"/.well-known/openid-configuration">> => good_as(?DBASE)
+    }),
+    ?assertEqual(
+        {error, {issuer_mismatch, <<"https://honest.example">>, ?DBASE}},
+        barrel_mcp_client_auth_oauth:discover_authorization_server(?DBASE, insecure())
+    ),
+    ?assertEqual([<<"/.well-known/oauth-authorization-server">>], requested()).
+
+test_disc_no_pkce() ->
+    Doc = maps:remove(<<"code_challenge_methods_supported">>, good_as(?DBASE)),
+    script(#{<<"/.well-known/oauth-authorization-server">> => Doc}),
+    ?assertEqual(
+        {error, no_pkce},
+        barrel_mcp_client_auth_oauth:discover_authorization_server(?DBASE, insecure())
+    ).
+
+test_disc_no_s256() ->
+    Doc = (good_as(?DBASE))#{<<"code_challenge_methods_supported">> => [<<"plain">>]},
+    script(#{<<"/.well-known/oauth-authorization-server">> => Doc}),
+    ?assertEqual(
+        {error, {no_s256, [<<"plain">>]}},
+        barrel_mcp_client_auth_oauth:discover_authorization_server(?DBASE, insecure())
+    ).
+
+test_disc_insecure_issuer() ->
+    script(#{<<"/.well-known/oauth-authorization-server">> => good_as(?DBASE)}),
+    ?assertEqual(
+        {error, {insecure_url, ?DBASE}},
+        barrel_mcp_client_auth_oauth:discover_authorization_server(?DBASE)
+    ),
+    ?assertEqual([], requested()).
+
+test_insecure_token_endpoint() ->
+    Cfg = #{
+        access_token => <<"tok">>,
+        refresh_token => <<"r">>,
+        client_id => <<"c">>,
+        token_endpoint => <<?DBASE/binary, "/token">>
+    },
+    ?assertEqual(
+        {error, {insecure_url, <<?DBASE/binary, "/token">>}},
+        barrel_mcp_client_auth:new({oauth, Cfg})
+    ),
+    ?assertNotMatch(
+        {error, _}, barrel_mcp_client_auth:new({oauth, Cfg#{allow_insecure_oauth => true}})
+    ).
+
+test_secure_url() ->
+    ?assertEqual(ok, barrel_mcp_client_auth_oauth:secure_url(<<"https://as.example/x">>, #{})),
+    ?assertEqual(
+        {error, {insecure_url, <<"http://as.example/x">>}},
+        barrel_mcp_client_auth_oauth:secure_url(<<"http://as.example/x">>, #{})
+    ),
+    ?assertEqual(
+        {error, {insecure_url, <<"http://localhost/x">>}},
+        barrel_mcp_client_auth_oauth:secure_url(<<"http://localhost/x">>, #{})
+    ),
+    ?assertEqual(ok, barrel_mcp_client_auth_oauth:secure_url(<<"http://localhost/x">>, insecure())),
+    ?assertEqual(
+        {error, {insecure_url, undefined}}, barrel_mcp_client_auth_oauth:secure_url(undefined, #{})
+    ).

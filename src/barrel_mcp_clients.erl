@@ -7,48 +7,31 @@
 %%% namespacing across servers is the host's policy and is not
 %%% enforced here.
 %%%
-%%% This module is a tiny `gen_server' whose only job is to own the
-%%% lookup ETS table (so the table outlives any single caller) and to
-%%% serialize registration so two callers cannot race on the same
-%%% `ServerId'. Lookups go directly to ETS without crossing the
-%%% process boundary.
+%%% The registry is the supervision tree: {@link barrel_mcp_client_sup}
+%%% holds one {@link barrel_mcp_client_shell} per `ServerId', and the
+%%% shell holds the client. A restart keeps the id bound to the new
+%%% pid, and there is no second table to fall out of step with it.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_clients).
 
--behaviour(gen_server).
-
 -export([
-    start_link/0,
     start_client/2,
     stop_client/1,
     whereis_client/1,
     list_clients/0
 ]).
 
--export([
-    init/1,
-    handle_call/3,
-    handle_cast/2,
-    handle_info/2,
-    terminate/2,
-    code_change/3
-]).
-
--define(TABLE, ?MODULE).
+-define(SUP, barrel_mcp_client_sup).
 
 %%====================================================================
 %% Public API
 %%====================================================================
 
-%% @doc Start the registry. Called by `barrel_mcp_sup'; you don't
-%% normally call this directly.
-start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
-
 %% @doc Start a supervised `barrel_mcp_client' worker registered as
 %% `ServerId'. Fails with `{already_registered, Pid}' if a worker
-%% already holds that id.
+%% already holds that id, and `{restarting, ServerId}' while its shell
+%% is still retrying a failed restart of it.
 %%
 %% Example:
 %% ```
@@ -60,76 +43,64 @@ start_link() ->
 -spec start_client(term(), barrel_mcp_client:connect_spec()) ->
     {ok, pid()} | {error, term()}.
 start_client(ServerId, Spec) ->
-    gen_server:call(?MODULE, {start_client, ServerId, Spec}).
+    case barrel_mcp_client_sup:start_child(ServerId, Spec) of
+        {ok, Shell} ->
+            case barrel_mcp_client_shell:client(Shell) of
+                Pid when is_pid(Pid) -> {ok, Pid};
+                _ -> {error, {restarting, ServerId}}
+            end;
+        {error, {already_started, Shell}} ->
+            case barrel_mcp_client_shell:client(Shell) of
+                Pid when is_pid(Pid) -> {error, {already_registered, Pid}};
+                _ -> {error, {restarting, ServerId}}
+            end;
+        {error, {shutdown, Reason}} ->
+            %% The shell's client refused to start, so the shell shut
+            %% itself down: the id is free again and the reason is
+            %% the client's.
+            {error, unwrap_start_error(Reason)};
+        {error, _} = Err ->
+            Err
+    end.
+
+unwrap_start_error({failed_to_start_child, client, Reason}) -> Reason;
+unwrap_start_error(Reason) -> Reason.
 
 %% @doc Stop the client worker registered as `ServerId'. Returns
 %% `{error, not_found}' if no worker holds that id.
 -spec stop_client(term()) -> ok | {error, not_found}.
 stop_client(ServerId) ->
-    gen_server:call(?MODULE, {stop_client, ServerId}).
-
-%% @doc Look up a worker pid by its `ServerId'. Returns `undefined' if
-%% none is registered. ETS-backed; safe to call from any process.
--spec whereis_client(term()) -> pid() | undefined.
-whereis_client(ServerId) ->
-    case ets:lookup(?TABLE, ServerId) of
-        [{_, Pid, _Ref}] -> Pid;
-        [] -> undefined
+    case supervisor:terminate_child(?SUP, ServerId) of
+        ok ->
+            %% A temporary child's spec goes with it; this only matters
+            %% for a spec left behind, and either answer is fine.
+            _ = supervisor:delete_child(?SUP, ServerId),
+            ok;
+        {error, not_found} ->
+            {error, not_found}
     end.
 
-%% @doc Snapshot the registry as `[{ServerId, Pid}]'. ETS-backed.
+%% @doc Look up a worker pid by its `ServerId'. Returns `undefined' if
+%% none is running, including while a restart is pending.
+-spec whereis_client(term()) -> pid() | undefined.
+whereis_client(ServerId) ->
+    case lists:keyfind(ServerId, 1, supervisor:which_children(?SUP)) of
+        {_, Shell, _, _} when is_pid(Shell) ->
+            case barrel_mcp_client_shell:client(Shell) of
+                Pid when is_pid(Pid) -> Pid;
+                _ -> undefined
+            end;
+        _ ->
+            undefined
+    end.
+
+%% @doc Snapshot the registry as `[{ServerId, Pid}]'.
 -spec list_clients() -> [{term(), pid()}].
 list_clients() ->
-    ets:foldl(fun({Id, Pid, _}, Acc) -> [{Id, Pid} | Acc] end, [], ?TABLE).
-
-%%====================================================================
-%% gen_server
-%%====================================================================
-
-init([]) ->
-    _ = ets:new(?TABLE, [set, named_table, protected, {read_concurrency, true}]),
-    {ok, #{}}.
-
-handle_call({start_client, ServerId, Spec}, _From, State) ->
-    case ets:lookup(?TABLE, ServerId) of
-        [{_, Pid, _}] when is_pid(Pid) ->
-            {reply, {error, {already_registered, Pid}}, State};
-        [] ->
-            case barrel_mcp_client_sup:start_child(ServerId, Spec) of
-                {ok, Pid} = Ok ->
-                    Ref = erlang:monitor(process, Pid),
-                    true = ets:insert(?TABLE, {ServerId, Pid, Ref}),
-                    {reply, Ok, State};
-                Err ->
-                    {reply, Err, State}
-            end
-    end;
-handle_call({stop_client, ServerId}, _From, State) ->
-    case ets:lookup(?TABLE, ServerId) of
-        [{_, Pid, Ref}] ->
-            erlang:demonitor(Ref, [flush]),
-            true = ets:delete(?TABLE, ServerId),
-            barrel_mcp_client:close(Pid),
-            {reply, ok, State};
-        [] ->
-            {reply, {error, not_found}, State}
-    end;
-handle_call(_Msg, _From, State) ->
-    {reply, {error, badcall}, State}.
-
-handle_cast(_Msg, State) ->
-    {noreply, State}.
-
-handle_info({'DOWN', _Ref, process, Pid, _Reason}, State) ->
-    %% Client crashed or shut down — remove its registration.
-    Match = ets:match_object(?TABLE, {'_', Pid, '_'}),
-    [ets:delete(?TABLE, Id) || {Id, _, _} <- Match],
-    {noreply, State};
-handle_info(_Msg, State) ->
-    {noreply, State}.
-
-terminate(_Reason, _State) ->
-    ok.
-
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
+    [
+        {Id, Pid}
+     || {Id, Shell, _, _} <- supervisor:which_children(?SUP),
+        is_pid(Shell),
+        Pid <- [barrel_mcp_client_shell:client(Shell)],
+        is_pid(Pid)
+    ].

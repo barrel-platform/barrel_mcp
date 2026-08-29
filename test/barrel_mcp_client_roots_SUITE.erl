@@ -13,6 +13,8 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
+-import(barrel_mcp_test_helpers, [wait_ready/2]).
+
 -export([
     all/0,
     init_per_suite/1,
@@ -86,7 +88,10 @@ client_emits_roots_list_changed(Config) ->
         )
     ),
     {ok, Pid} = barrel_mcp_client:start(#{
-        transport => {http, Url}
+        transport => {http, Url},
+        %% Roots, and the list_changed notification, belong to the
+        %% handshake era; 2026-07-28 removed both.
+        protocol_version => <<"2025-11-25">>
     }),
     ok = wait_ready(Pid, 30),
 
@@ -137,21 +142,4 @@ observer() ->
         persistent_term:get({?MODULE, observer})
     catch
         _:_ -> undefined
-    end.
-
-wait_ready(_Pid, 0) ->
-    {error, not_ready};
-wait_ready(Pid, N) ->
-    case
-        (try
-            barrel_mcp_client:server_capabilities(Pid)
-        catch
-            _:_ -> error
-        end)
-    of
-        {ok, _} ->
-            ok;
-        _ ->
-            timer:sleep(100),
-            wait_ready(Pid, N - 1)
     end.

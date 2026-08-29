@@ -12,12 +12,39 @@
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_client_auth).
 
--export([new/1, header/1, refresh/2]).
+-export([new/1, header/1, refresh/2, challenge/2, settled/1, request_headers/3]).
 
--export_type([t/0, handle/0]).
+-export_type([t/0, handle/0, challenge/0]).
 
 -type handle() :: term().
 -type t() :: {module(), handle()} | none.
+
+%% What the transport knows when the server refuses a request:
+%% the status (401, or 403 with `insufficient_scope'), the raw
+%% `WWW-Authenticate' value, the MCP server URL the request went to, and
+%% the negotiated protocol version if any. An OAuth handle discovers,
+%% registers and authorizes from that.
+-type challenge() :: #{
+    status := 401 | 403,
+    www_authenticate := binary() | undefined,
+    server_url := binary(),
+    protocol_version := binary() | undefined,
+    %% The `DPoP-Nonce' response header, when the server sent one.
+    dpop_nonce => binary() | undefined
+}.
+
+%% A handle that can run a whole authorization from a challenge
+%% exports these two; one that only refreshes a token in hand does
+%% not, and the transport falls back to `refresh/2' for it.
+-callback challenge(handle(), challenge()) -> {ok, handle()} | {error, term()}.
+%% The transport reports a request the server accepted.
+-callback settled(handle()) -> handle().
+%% Headers for one request beyond `Authorization', such as a DPoP proof
+%% bound to this method and URL. The handle comes back because a proof
+%% changes state (`jti', nonce).
+-callback request_headers(handle(), Method :: binary(), Url :: binary()) ->
+    {[{binary(), binary()}], handle()}.
+-optional_callbacks([challenge/2, settled/1, request_headers/3]).
 
 %% Build the auth handle from a config term.
 %%   `none' — no auth header sent.
@@ -59,6 +86,7 @@
     | {oauth, map()}
     | {oauth_client_credentials, map()}
     | {oauth_enterprise, map()}
+    | {oauth_jwt_bearer, map()}
 ) ->
     t() | {error, term()}.
 new(none) ->
@@ -84,6 +112,12 @@ new({oauth_enterprise, Config}) when is_map(Config) ->
     case barrel_mcp_client_auth_oauth:init(Cfg) of
         {ok, H} -> {barrel_mcp_client_auth_oauth, H};
         Err -> Err
+    end;
+new({oauth_jwt_bearer, Config}) when is_map(Config) ->
+    Cfg = Config#{grant_type => jwt_bearer},
+    case barrel_mcp_client_auth_oauth:init(Cfg) of
+        {ok, H} -> {barrel_mcp_client_auth_oauth, H};
+        Err -> Err
     end.
 
 %% @doc Lookup the Authorization header for the current state.
@@ -99,4 +133,45 @@ refresh({Mod, H}, Www) ->
     case Mod:refresh(H, Www) of
         {ok, H1} -> {ok, {Mod, H1}};
         Err -> Err
+    end.
+
+%% @doc Answer a server's refusal with a new handle. Runs the handle's
+%% `challenge/2' when it has one, else its `refresh/2' with the header.
+%% May take as long as a person takes to authorize; the transport
+%% calls it from a worker, never inline.
+-spec challenge(t(), challenge()) -> {ok, t()} | {error, term()}.
+challenge(none, _Challenge) ->
+    {error, no_auth_configured};
+challenge({Mod, H}, Challenge) ->
+    Result =
+        case erlang:function_exported(Mod, challenge, 2) of
+            true -> Mod:challenge(H, Challenge);
+            false -> Mod:refresh(H, maps:get(www_authenticate, Challenge, undefined))
+        end,
+    case Result of
+        {ok, H1} -> {ok, {Mod, H1}};
+        Err -> Err
+    end.
+
+%% @doc Extra headers for one request, and the handle after issuing them.
+-spec request_headers(t(), binary(), binary()) -> {[{binary(), binary()}], t()}.
+request_headers(none, _Method, _Url) ->
+    {[], none};
+request_headers({Mod, H}, Method, Url) ->
+    case erlang:function_exported(Mod, request_headers, 3) of
+        true ->
+            {Headers, H1} = Mod:request_headers(H, Method, Url),
+            {Headers, {Mod, H1}};
+        false ->
+            {[], {Mod, H}}
+    end.
+
+%% @doc Tell the handle a request was accepted.
+-spec settled(t()) -> t().
+settled(none) ->
+    none;
+settled({Mod, H}) ->
+    case erlang:function_exported(Mod, settled, 1) of
+        true -> {Mod, Mod:settled(H)};
+        false -> {Mod, H}
     end.

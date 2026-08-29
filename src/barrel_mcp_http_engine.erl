@@ -71,6 +71,7 @@
     allowed_origins => any | [term()],
     allow_missing_origin => boolean(),
     sse_buffer_size => pos_integer(),
+    subscription_keepalive_ms => pos_integer(),
     resource_metadata => undefined | map(),
     _ => _
 }.
@@ -102,20 +103,27 @@ handle(Method, RawPath, Headers, Body, Responder, Config) ->
         _ ->
             case validate_origin(Headers, Config) of
                 ok ->
-                    dispatch(
-                        maps:get(mode, Config, stream),
-                        Method,
-                        Headers,
-                        Body,
-                        Responder,
-                        Config
-                    );
+                    route(Method, Path, RawPath, Headers, Body, Responder, Config);
                 {error, _Reason} ->
                     %% 403 with no CORS header so the browser surfaces
                     %% the rejection rather than retrying.
                     reply(Responder, 403, #{}, <<>>)
             end
     end.
+
+%% The 2024-11-05 transport lives on its own two routes, and only when
+%% they are configured: a GET there and a Streamable GET are otherwise
+%% indistinguishable.
+route(<<"GET">>, Path, _RawPath, Headers, _Body, Responder, Config) when
+    map_get(sse_path, Config) =:= Path
+->
+    legacy_sse_open(Headers, Responder, Config);
+route(<<"POST">>, Path, RawPath, Headers, Body, Responder, Config) when
+    map_get(sse_message_path, Config) =:= Path
+->
+    legacy_sse_post(RawPath, Headers, Body, Responder, Config);
+route(Method, _Path, _RawPath, Headers, Body, Responder, Config) ->
+    dispatch(maps:get(mode, Config, stream), Method, Headers, Body, Responder, Config).
 
 serve_prm(Responder, Doc) ->
     Body = iolist_to_binary(json:encode(Doc)),
@@ -139,29 +147,32 @@ dispatch(simple, <<"POST">>, Headers, Body, Responder, Config) ->
 dispatch(simple, <<"OPTIONS">>, Headers, _Body, Responder, Config) ->
     reply(Responder, 204, cors_headers(Headers, Config, #{}), <<>>);
 dispatch(simple, _Method, Headers, _Body, Responder, Config) ->
-    reply(
-        Responder,
-        405,
-        cors_headers(
-            Headers,
-            Config,
-            #{
-                <<"content-type">> => <<"application/json">>,
-                <<"allow">> => <<"POST, OPTIONS">>
-            }
-        ),
-        <<"{\"error\":\"Method not allowed\"}">>
-    );
+    method_not_allowed(Headers, Responder, Config, <<"POST, OPTIONS">>);
 %% --- Streamable transport ---
 dispatch(stream, <<"POST">>, Headers, Body, Responder, Config) ->
     stream_post(Headers, Body, Responder, Config);
 dispatch(stream, <<"GET">>, Headers, _Body, Responder, Config) ->
-    stream_get_sse(Headers, Responder, Config);
+    case sessions_enabled(Config) of
+        true -> stream_get_sse(Headers, Responder, Config);
+        false -> modern_only_method(Headers, Responder, Config)
+    end;
 dispatch(stream, <<"DELETE">>, Headers, _Body, Responder, Config) ->
-    stream_delete(Headers, Responder, Config);
+    case sessions_enabled(Config) of
+        true -> stream_delete(Headers, Responder, Config);
+        false -> modern_only_method(Headers, Responder, Config)
+    end;
 dispatch(stream, <<"OPTIONS">>, Headers, _Body, Responder, Config) ->
     reply(Responder, 204, cors_headers(Headers, Config, #{}), <<>>);
 dispatch(stream, _Method, Headers, _Body, Responder, Config) ->
+    method_not_allowed(Headers, Responder, Config, <<"POST, GET, DELETE, OPTIONS">>).
+
+%% Sessions off means only 2026-07-28 is served, which has neither a
+%% standalone GET stream nor a DELETE. An older client that tries either
+%% "SHOULD" get 405 (2026-07-28/.../streamable-http.mdx:683).
+modern_only_method(Headers, Responder, Config) ->
+    method_not_allowed(Headers, Responder, Config, <<"POST, OPTIONS">>).
+
+method_not_allowed(Headers, Responder, Config, Allow) ->
     reply(
         Responder,
         405,
@@ -170,11 +181,17 @@ dispatch(stream, _Method, Headers, _Body, Responder, Config) ->
             Config,
             #{
                 <<"content-type">> => <<"application/json">>,
-                <<"allow">> => <<"POST, GET, DELETE, OPTIONS">>
+                <<"allow">> => Allow
             }
         ),
         <<"{\"error\":\"Method not allowed\"}">>
     ).
+
+sessions_enabled(Config) ->
+    case maps:get(session_enabled, Config, true) of
+        false -> false;
+        _ -> true
+    end.
 
 %%====================================================================
 %% Simple transport
@@ -260,17 +277,8 @@ stream_post(Headers, Body, Responder, Config) ->
 stream_post_authed(Headers, Body, Responder, Config, AuthInfo) ->
     SessionEnabled = maps:get(session_enabled, Config, true),
     case barrel_mcp_protocol:decode(Body) of
-        {ok, Request} when is_list(Request) ->
-            reply_jsonrpc_error(
-                Headers,
-                Responder,
-                Config,
-                undefined,
-                400,
-                null,
-                ?JSONRPC_INVALID_REQUEST,
-                <<"Batch requests are not supported">>
-            );
+        {ok, Batch} when is_list(Batch) ->
+            stream_post_batch(Headers, Responder, Config, SessionEnabled, Batch, AuthInfo);
         {ok, Request} when is_map(Request) ->
             %% Pass the raw request through the response-vs-request
             %% split; `_auth' is attached only on the request path
@@ -296,35 +304,399 @@ stream_post_authed(Headers, Body, Responder, Config, AuthInfo) ->
             )
     end.
 
+%% A batch never carries a session id of its own and never creates one,
+%% so it reuses the session the header names, if any. Whether it is
+%% accepted at all depends on the negotiated revision, which the
+%% protocol core decides.
+stream_post_batch(Headers, Responder, Config, SessionEnabled, Batch, AuthInfo) ->
+    SessionId =
+        case lookup_session(Headers, Config, SessionEnabled, undefined, AuthInfo) of
+            {ok, Sid} -> Sid;
+            {error, _} -> undefined
+        end,
+    ProtocolState = #{
+        auth_info => AuthInfo,
+        protocol_version => negotiated_version(Headers, SessionId),
+        session_id => SessionId
+    },
+    case barrel_mcp_protocol:handle(with_auth_elements(Batch, AuthInfo), ProtocolState) of
+        no_response ->
+            Hdrs = add_session_header(cors_headers(Headers, Config, #{}), SessionId),
+            reply(Responder, 202, Hdrs, <<>>);
+        Response when is_map(Response) ->
+            %% A refusal of the whole envelope, not a per-element answer.
+            reply_json(Headers, Responder, Config, 400, Response);
+        Responses when is_list(Responses) ->
+            reply_json(Headers, Responder, Config, 200, Responses)
+    end.
+
+with_auth_elements(Batch, AuthInfo) ->
+    [
+        case E of
+            M when is_map(M) -> with_auth(M, AuthInfo);
+            Other -> Other
+        end
+     || E <- Batch
+    ].
+
 %% Keep both the original request (for response detection) and an
 %% auth-tagged copy used when dispatching to the protocol core.
+%%
+%% This is the era fork. It sits after decode and before session
+%% lookup, so a modern request never touches the session machinery and
+%% every legacy request takes exactly the path it did before.
 stream_post_request(Headers, Responder, Config, SessionEnabled, Request, AuthInfo) ->
     case is_jsonrpc_response(Request) of
         true ->
-            handle_inbound_response(Headers, Responder, Config, Request);
+            %% Only legacy clients send responses: modern servers never
+            %% issue requests, so there is nothing to answer.
+            handle_inbound_response(
+                Headers, Responder, Config, SessionEnabled, Request, AuthInfo
+            );
         false ->
-            handle_inbound_request(
+            %% The era is decided from the body's `_meta' and from the
+            %% version the transport declares, so the second decision
+            %% inside the protocol core has to see the same evidence.
+            Transport = negotiated_version(Headers, session_header(Headers)),
+            Extra = #{transport_version => Transport},
+            case barrel_mcp_ctx:era(barrel_mcp_ctx:from_request(Request, Extra)) of
+                modern ->
+                    handle_modern_request(
+                        Headers,
+                        Responder,
+                        Config,
+                        Request,
+                        AuthInfo,
+                        Transport
+                    );
+                legacy ->
+                    handle_inbound_request(
+                        Headers,
+                        Responder,
+                        Config,
+                        SessionEnabled,
+                        Request,
+                        AuthInfo
+                    )
+            end
+    end.
+
+%%====================================================================
+%% Streamable transport: modern (2026-07-28) requests
+%%====================================================================
+
+%% Stateless: no session to look up, none to mint, and no
+%% `Mcp-Session-Id' on the way back.
+handle_modern_request(Headers, Responder, Config, Request, AuthInfo, Transport) ->
+    case validate_metadata_headers(Headers, Request) of
+        {error, Message} ->
+            Id = maps:get(<<"id">>, Request, null),
+            reply_jsonrpc_error(
                 Headers,
                 Responder,
                 Config,
-                SessionEnabled,
-                Request,
-                AuthInfo
+                undefined,
+                400,
+                Id,
+                ?MCP_HEADER_MISMATCH,
+                Message
+            );
+        ok ->
+            dispatch_modern_request(Headers, Responder, Config, Request, AuthInfo, Transport)
+    end.
+
+%% The headers mirror body fields so an intermediary can route without
+%% parsing the body. If the two disagree, one component has acted on a
+%% different request than the other will, so the request is rejected
+%% rather than resolved in favour of either.
+validate_metadata_headers(Headers, Request) ->
+    case maps:is_key(<<"id">>, Request) of
+        false ->
+            %% A notification. This revision leaves header requirements
+            %% for notification POSTs undefined, so there is nothing to
+            %% hold it to.
+            ok;
+        true ->
+            validate_request_headers(Headers, Request)
+    end.
+
+validate_request_headers(Headers, Request) ->
+    Method = maps:get(<<"method">>, Request, <<>>),
+    Params = params_of(Request),
+    case check_protocol_version_header(Headers, Params) of
+        {error, _} = Err ->
+            Err;
+        ok ->
+            barrel_mcp_headers:validate(
+                Headers,
+                Method,
+                Params,
+                header_params_for(Method, Params)
             )
     end.
+
+%% The header has to carry the same version as the body: an
+%% intermediary enforcing policy reads one, the server executes on the
+%% other.
+check_protocol_version_header(Headers, Params) ->
+    Meta =
+        case maps:get(<<"_meta">>, Params, #{}) of
+            M when is_map(M) -> M;
+            _ -> #{}
+        end,
+    case maps:get(?MCP_META_PROTOCOL_VERSION, Meta, undefined) of
+        Declared when is_binary(Declared) ->
+            Header = header(<<"mcp-protocol-version">>, Headers, undefined),
+            compare_protocol_version_header(Header, Declared);
+        _ ->
+            %% Absent, or there and not a string. Both are `_meta'
+            %% problems rather than a disagreement between two stated
+            %% versions, and `barrel_mcp_ctx:validate/1' names them.
+            ok
+    end.
+
+compare_protocol_version_header(undefined, _Declared) ->
+    {error, <<"Header mismatch: MCP-Protocol-Version header is required">>};
+compare_protocol_version_header(Declared, Declared) ->
+    ok;
+compare_protocol_version_header(Other, Declared) ->
+    {error,
+        <<"Header mismatch: MCP-Protocol-Version header value '", Other/binary,
+            "' does not match body value '", Declared/binary, "'">>}.
+
+%% Only a tool call mirrors parameters, and only the ones its schema
+%% opted into. The bindings were validated and stored at registration.
+header_params_for(<<"tools/call">>, Params) ->
+    case barrel_mcp_registry:find(tool, maps:get(<<"name">>, Params, <<>>)) of
+        {ok, Handler} -> maps:get(header_params, Handler, []);
+        error -> []
+    end;
+header_params_for(_Method, _Params) ->
+    [].
+
+params_of(Request) ->
+    case maps:get(<<"params">>, Request, #{}) of
+        P when is_map(P) -> P;
+        _ -> #{}
+    end.
+
+dispatch_modern_request(Headers, Responder, Config, Request, AuthInfo, Transport) ->
+    case
+        barrel_mcp_protocol:handle(
+            with_auth(Request, AuthInfo),
+            #{
+                auth_info => AuthInfo,
+                streaming => true,
+                transport_version => Transport
+            }
+        )
+    of
+        no_response ->
+            reply(Responder, 202, cors_headers(Headers, Config, #{}), <<>>);
+        {subscribe, Sub} ->
+            handle_subscription(Headers, Responder, Config, Sub);
+        {async, AsyncPlan} ->
+            handle_async_tool_call(
+                Headers,
+                Responder,
+                Config,
+                undefined,
+                Request,
+                AsyncPlan,
+                AuthInfo
+            );
+        Result ->
+            case wants_sse_response(Headers) of
+                true ->
+                    stream_sse_response(Headers, Responder, Config, undefined, Result);
+                false ->
+                    Hdrs = cors_headers(
+                        Headers,
+                        Config,
+                        #{<<"content-type">> => <<"application/json">>}
+                    ),
+                    reply(
+                        Responder,
+                        modern_status(Result),
+                        Hdrs,
+                        barrel_mcp_protocol:encode(Result)
+                    )
+            end
+    end.
+
+%%====================================================================
+%% Streamable transport: subscriptions/listen
+%%====================================================================
+
+%% The response stream to a `subscriptions/listen' request stays open
+%% and carries the notifications the client opted into. Runs in the
+%% per-request process until the client goes away or the server ends
+%% the subscription.
+handle_subscription(Headers, Responder, Config, #{id := SubId, filter := Filter}) ->
+    Hdrs = cors_headers(
+        Headers,
+        Config,
+        #{
+            <<"content-type">> => <<"text/event-stream">>,
+            <<"cache-control">> => <<"no-cache">>,
+            <<"x-accel-buffering">> => <<"no">>
+        }
+    ),
+    stream_start(Responder, 200, Hdrs),
+    %% Register before acknowledging, so nothing fired between the two
+    %% is lost. Ordering is still guaranteed because this process is
+    %% the only writer: a notification arriving now waits in the
+    %% mailbox and is written after the acknowledgment, which the spec
+    %% requires to come first.
+    ok = barrel_mcp_subscriptions:subscribe(SubId, Filter),
+    _ = push_sse_data(Responder, acknowledgment(SubId, Filter)),
+    subscription_loop(Responder, SubId, keepalive_interval(Config)).
+
+acknowledgment(SubId, Filter) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"method">> => <<"notifications/subscriptions/acknowledged">>,
+        <<"params">> => #{
+            <<"_meta">> => #{?MCP_META_SUBSCRIPTION_ID => SubId},
+            <<"notifications">> => honoured(Filter)
+        }
+    }.
+
+%% Report back what we agreed to, in the wire shape the client used.
+honoured(Filter) ->
+    Flags = [
+        {tools_list_changed, <<"toolsListChanged">>},
+        {prompts_list_changed, <<"promptsListChanged">>},
+        {resources_list_changed, <<"resourcesListChanged">>}
+    ],
+    Base = lists:foldl(
+        fun({Key, WireKey}, Acc) ->
+            case maps:get(Key, Filter, false) of
+                true -> Acc#{WireKey => true};
+                false -> Acc
+            end
+        end,
+        #{},
+        Flags
+    ),
+    Base1 =
+        case maps:get(resource_subscriptions, Filter, []) of
+            [] -> Base;
+            Uris -> Base#{<<"resourceSubscriptions">> => Uris}
+        end,
+    %% Only the ids we agreed to deliver. An id belonging to someone
+    %% else, or naming no task, is left out rather than refused, so a
+    %% caller cannot learn which of the two it was.
+    case maps:get(task_ids, Filter, []) of
+        [] -> Base1;
+        Ids -> Base1#{<<"taskIds">> => Ids}
+    end.
+
+subscription_loop(Responder, SubId, Interval) ->
+    receive
+        {mcp_notification, SubId, Envelope} ->
+            case push_sse_data(Responder, Envelope) of
+                ok -> subscription_loop(Responder, SubId, Interval);
+                {error, _} -> end_subscription(Responder, SubId)
+            end;
+        {mcp_subscription_close, SubId} ->
+            %% "MUST send notifications/cancelled referencing a
+            %% subscriptions/listen request ID when it tears down that
+            %% subscription stream" (cancellation.mdx:12), then "SHOULD
+            %% respond to the original subscriptions/listen request with
+            %% a completion result" (subscriptions.mdx:130).
+            _ = push_sse_data(Responder, subscription_cancelled(SubId)),
+            _ = push_sse_data(Responder, subscription_closed(SubId)),
+            end_subscription(Responder, SubId);
+        mcp_disconnect ->
+            end_subscription(Responder, SubId);
+        {'EXIT', _Conn, _Reason} ->
+            end_subscription(Responder, SubId);
+        _Other ->
+            subscription_loop(Responder, SubId, Interval)
+    after Interval ->
+        %% An SSE comment. Keeps intermediaries and idle timeouts from
+        %% dropping a quiet stream; clients ignore it.
+        case stream_chunk(Responder, <<":\r\n">>) of
+            ok -> subscription_loop(Responder, SubId, Interval);
+            {error, _} -> end_subscription(Responder, SubId)
+        end
+    end.
+
+%% The one purpose a server may send this for: "Servers MUST NOT send
+%% notifications/cancelled for any other purpose" (cancellation.mdx:12).
+subscription_cancelled(SubId) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"method">> => <<"notifications/cancelled">>,
+        <<"params">> => #{
+            <<"_meta">> => #{?MCP_META_SUBSCRIPTION_ID => SubId},
+            <<"requestId">> => SubId,
+            <<"reason">> => <<"Subscription torn down by the server">>
+        }
+    }.
+
+subscription_closed(SubId) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => SubId,
+        <<"result">> => #{
+            <<"resultType">> => <<"complete">>,
+            <<"_meta">> => #{?MCP_META_SUBSCRIPTION_ID => SubId}
+        }
+    }.
+
+end_subscription(Responder, SubId) ->
+    _ =
+        (try
+            barrel_mcp_subscriptions:unsubscribe(SubId)
+        catch
+            _:_ -> ok
+        end),
+    _ = stream_end(Responder),
+    ok.
+
+keepalive_interval(Config) ->
+    maps:get(subscription_keepalive_ms, Config, 15000).
+
+%% The 2026-07-28 transport binding pins a few JSON-RPC errors to an
+%% HTTP status so an intermediary can act on them without parsing the
+%% body: an unimplemented method is 404, and a malformed or
+%% unservable request is 400. Everything else, including ordinary
+%% handler failures, stays 200 with the error in the body.
+modern_status(#{<<"error">> := #{<<"code">> := Code}}) ->
+    case Code of
+        ?JSONRPC_METHOD_NOT_FOUND -> 404;
+        ?JSONRPC_INVALID_PARAMS -> 400;
+        ?MCP_HEADER_MISMATCH -> 400;
+        ?MCP_MISSING_CLIENT_CAPABILITY -> 400;
+        ?MCP_UNSUPPORTED_PROTOCOL_VERSION -> 400;
+        _ -> 200
+    end;
+modern_status(_Result) ->
+    200.
 
 is_jsonrpc_response(R) ->
     is_map_key(<<"id">>, R) andalso
         (is_map_key(<<"result">>, R) orelse is_map_key(<<"error">>, R)) andalso
         not is_map_key(<<"method">>, R).
 
-handle_inbound_response(Headers, Responder, Config, #{<<"id">> := RespId} = Request) ->
-    _ = barrel_mcp_session:deliver_response(RespId, Request),
+%% Delivered against the session the header names, once that session
+%% is the caller's own; anything else is dropped behind the same 202,
+%% so a guessed id learns nothing.
+handle_inbound_response(
+    Headers, Responder, Config, SessionEnabled, #{<<"id">> := RespId} = Request, AuthInfo
+) ->
+    _ =
+        case lookup_session(Headers, Config, SessionEnabled, undefined, AuthInfo) of
+            {ok, SessionId} -> barrel_mcp_session:deliver_response(SessionId, RespId, Request);
+            {error, _} -> ok
+        end,
     reply(Responder, 202, cors_headers(Headers, Config, #{}), <<>>).
 
 handle_inbound_request(Headers, Responder, Config, SessionEnabled, Request, AuthInfo) ->
     Method = maps:get(<<"method">>, Request, undefined),
-    case lookup_session(Headers, Config, SessionEnabled, Method) of
+    case lookup_session(Headers, Config, SessionEnabled, Method, AuthInfo) of
         {ok, SessionId} ->
             handle_dispatch(Headers, Responder, Config, SessionId, Request, AuthInfo);
         {error, missing_session_id} ->
@@ -376,7 +748,13 @@ handle_dispatch(Headers, Responder, Config, SessionId, Request, AuthInfo) ->
                     undefined -> #{};
                     _ -> #{session_id => SessionId}
                 end,
-            ProtocolState = ProtocolState0#{auth_info => AuthInfo},
+            %% The negotiated revision decides whether a batch is
+            %% accepted at all, so the protocol core needs it rather
+            %% than only the session id it is recorded against.
+            ProtocolState = ProtocolState0#{
+                auth_info => AuthInfo,
+                protocol_version => negotiated_version(Headers, SessionId)
+            },
             case
                 barrel_mcp_protocol:handle(
                     with_auth(Request, AuthInfo),
@@ -443,19 +821,52 @@ handle_async_tool_call(
     RequestId = maps:get(request_id, AsyncPlan),
     Spawn = maps:get(spawn, AsyncPlan),
     Timeout = maps:get(timeout, AsyncPlan, 60000),
+    %% What the reply needs: the session to echo (legacy only) and the
+    %% request context that decorates a modern result.
     Params = maps:get(<<"params">>, Request, #{}),
+    Reply = #{
+        session_id => SessionId,
+        ctx => maps:get(ctx, AsyncPlan, undefined),
+        plan => AsyncPlan,
+        %% Kept on the task, since a resumed MRTR run starts from them.
+        params => Params
+    },
     ToolName = maps:get(<<"name">>, Params, <<>>),
-    LongRunning = is_long_running_tool(ToolName),
+    RequestCtx = maps:get(ctx, Reply),
+    %% A tool may support tasks, but a client that never declared the
+    %% extension has no way to poll one: it runs synchronously, or is
+    %% refused when the tool insists. A legacy client gets a task at
+    %% once; a modern one gets a task only when the tool takes longer
+    %% than the inline window (barrel_mcp_task_relay).
+    Support = barrel_mcp_registry:task_support(ToolName),
+    Enabled = tasks_available(RequestCtx),
+    Modern = RequestCtx =/= undefined andalso barrel_mcp_ctx:is_modern(RequestCtx),
+    TaskMode =
+        case {Support, Enabled} of
+            {forbidden, _} -> inline;
+            {optional, false} -> inline;
+            {required, false} -> refuse;
+            {_, true} when Modern -> escalate;
+            {_, true} -> task
+        end,
     Meta = maps:get(<<"_meta">>, Params, #{}),
     ProgressToken = maps:get(<<"progressToken">>, Meta, undefined),
     Self = self(),
-    case LongRunning of
-        true ->
+    case TaskMode of
+        refuse ->
+            reply_json(
+                Headers,
+                Responder,
+                Config,
+                200,
+                barrel_mcp_protocol:missing_tasks_capability(RequestId)
+            );
+        task ->
             handle_long_running_call(
                 Headers,
                 Responder,
                 Config,
-                SessionId,
+                Reply,
                 RequestId,
                 ToolName,
                 ProgressToken,
@@ -463,51 +874,186 @@ handle_async_tool_call(
                 Spawn,
                 AuthInfo
             );
-        false ->
+        _ when TaskMode =:= inline; TaskMode =:= escalate ->
+            %% Opting into progress or logging turns the reply into an
+            %% SSE stream, opened before the tool runs.
+            LogLevel = request_log_level(Reply),
+            Streaming = streams_notifications(Reply, ProgressToken, LogLevel, Headers),
+            EmitProgress =
+                case Streaming of
+                    true -> self_progress_fun(Self, RequestId, ProgressToken);
+                    false -> emit_progress_fun(SessionId, ProgressToken)
+                end,
+            EmitLog =
+                case {Streaming, LogLevel} of
+                    %% A modern request opted in per request.
+                    {true, L} when L =/= undefined -> self_log_fun(Self, RequestId, L);
+                    %% A legacy streamed call has no per-request level:
+                    %% the session's logging/setLevel decides, and the
+                    %% message rides this request's own stream.
+                    {true, undefined} -> session_log_on_stream_fun(Self, RequestId, SessionId);
+                    {false, _} -> emit_log_fun(Reply, SessionId)
+                end,
+            Relay =
+                case TaskMode of
+                    escalate -> barrel_mcp_task_relay:start();
+                    inline -> undefined
+                end,
             Ctx = #{
                 session_id => SessionId,
                 request_id => RequestId,
                 progress_token => ProgressToken,
                 meta => Meta,
-                emit_progress => emit_progress_fun(SessionId, ProgressToken),
-                reply_to => Self,
+                emit_progress => EmitProgress,
+                emit_log => EmitLog,
+                reply_to => reply_target(Relay, Self),
+                %% Where a server request raised by this tool goes: its
+                %% own response stream, the way the reference server
+                %% routes by related_request_id.
+                channel => channel_of(Streaming, Self),
                 auth_info => AuthInfo
             },
+            OnProgress = start_progress_stream(
+                Streaming, Headers, Responder, Config, Reply
+            ),
             WorkerPid = Spawn(Ctx),
-            case SessionId of
-                undefined ->
+            _ = Relay =/= undefined andalso barrel_mcp_task_relay:worker(Relay, WorkerPid),
+            %% No worker means nothing to cancel, and its `tool_failed'
+            %% is already on its way.
+            case {SessionId, is_pid(WorkerPid)} of
+                {undefined, _} ->
                     ok;
-                _ ->
+                {_, false} ->
+                    ok;
+                {_, true} ->
                     ok = barrel_mcp_session:record_in_flight(
                         SessionId, RequestId, WorkerPid, Self
                     )
             end,
-            Outcome = wait_for_tool(RequestId, Timeout),
+            Outcome0 =
+                case Relay of
+                    undefined ->
+                        wait_for_tool(RequestId, Timeout, OnProgress, cancels_on_disconnect(Reply));
+                    _ ->
+                        wait_inline_or_escalate(
+                            Relay, WorkerPid, RequestId, ToolName, Reply, OnProgress
+                        )
+                end,
+            Outcome = settle_disconnect(Outcome0, WorkerPid),
             case SessionId of
                 undefined -> ok;
                 _ -> ok = barrel_mcp_session:clear_in_flight(SessionId, RequestId)
             end,
-            deliver_tool_outcome(
-                Headers,
-                Responder,
-                Config,
-                SessionId,
-                RequestId,
-                Outcome
-            )
+            case Streaming of
+                true ->
+                    finish_progress_stream(Responder, Reply, RequestId, Outcome);
+                false ->
+                    deliver_tool_outcome(
+                        Headers,
+                        Responder,
+                        Config,
+                        Reply,
+                        RequestId,
+                        Outcome
+                    )
+            end
     end.
 
-is_long_running_tool(Name) ->
-    case barrel_mcp_registry:find(tool, Name) of
-        {ok, Handler} -> maps:get(long_running, Handler, false);
-        error -> false
+%% Legacy delivers both out of band on the session channel, so only a
+%% modern request that opted in needs its response turned into a stream.
+%% The reference server answers every POST as a stream unless a JSON
+%% response was explicitly enabled (mcp/server/streamable_http.py:141),
+%% and routes a server request raised by a tool to the originating
+%% request's stream (related_request_id, :1009). A legacy client that
+%% only POSTs can therefore be asked something mid-request. Ours answers
+%% a legacy call as a stream whenever the client's Accept allows one,
+%% which validate_accept_header/1 already requires it to.
+%%
+%% Modern keeps its own rule: it streams only with a progress token or
+%% a log level, so an error the tool returns before anything is written
+%% still carries its HTTP status.
+streams_notifications(#{ctx := Ctx}, Token, Level, Headers) when Ctx =/= undefined ->
+    case barrel_mcp_ctx:is_modern(Ctx) of
+        true -> Token =/= undefined orelse Level =/= undefined;
+        false -> accepts_sse(Headers)
+    end;
+streams_notifications(_Reply, _Token, _Level, Headers) ->
+    accepts_sse(Headers).
+
+accepts_sse(Headers) ->
+    binary:match(header(<<"accept">>, Headers, <<>>), <<"text/event-stream">>) =/= nomatch.
+
+%% 2026-07-28: the server "MUST treat a client disconnect as
+%% cancellation of that request"
+%% (2026-07-28/basic/patterns/cancellation.mdx:38). Through 2025-11-25:
+%% "disconnection SHOULD NOT be interpreted as the client cancelling its
+%% request" (2025-11-25/basic/transports.mdx:128).
+cancels_on_disconnect(#{ctx := Ctx}) when Ctx =/= undefined ->
+    barrel_mcp_ctx:is_modern(Ctx);
+cancels_on_disconnect(_Reply) ->
+    false.
+
+%% Nobody left to answer, so stop the worker and use the outcome that
+%% has no envelope.
+settle_disconnect(disconnected, WorkerPid) ->
+    _ =
+        case is_pid(WorkerPid) andalso is_process_alive(WorkerPid) of
+            true -> exit(WorkerPid, kill);
+            false -> ok
+        end,
+    cancelled;
+settle_disconnect(Outcome, _WorkerPid) ->
+    Outcome.
+
+%% `undefined' unless this request named a level in its `_meta'.
+request_log_level(#{ctx := Ctx}) when Ctx =/= undefined ->
+    case barrel_mcp_ctx:is_modern(Ctx) of
+        true -> barrel_mcp_ctx:log_level(Ctx);
+        false -> undefined
+    end;
+request_log_level(_Reply) ->
+    undefined.
+
+start_progress_stream(false, _Headers, _Responder, _Config, _Reply) ->
+    fun(_Envelope) -> ok end;
+start_progress_stream(true, Headers, Responder, Config, Reply) ->
+    Hdrs = reply_headers(
+        Headers,
+        Config,
+        Reply,
+        #{
+            <<"content-type">> => <<"text/event-stream">>,
+            <<"cache-control">> => <<"no-cache">>,
+            %% Tell reverse proxies not to buffer, or progress arrives
+            %% in one lump at the end.
+            <<"x-accel-buffering">> => <<"no">>
+        }
+    ),
+    stream_start(Responder, 200, Hdrs),
+    fun(Envelope) ->
+        _ = push_sse_data(Responder, Envelope),
+        ok
     end.
+
+%% The final response terminates the stream. A cancelled call has no
+%% response to send, so the stream just ends.
+%%
+%% The status was committed when the stream opened, so an error that
+%% would otherwise be pinned to a 4xx travels as a JSON-RPC error on a
+%% 200 here. That is inherent to having started streaming.
+finish_progress_stream(Responder, Reply, RequestId, cancelled) ->
+    _ = Reply,
+    _ = RequestId,
+    stream_end(Responder);
+finish_progress_stream(Responder, Reply, RequestId, Outcome) ->
+    _ = push_sse_data(Responder, tool_outcome_envelope(Reply, RequestId, Outcome)),
+    stream_end(Responder).
 
 handle_long_running_call(
     Headers,
     Responder,
     Config,
-    SessionId,
+    Reply,
     RequestId,
     ToolName,
     ProgressToken,
@@ -515,65 +1061,133 @@ handle_long_running_call(
     Spawn,
     AuthInfo
 ) ->
-    {ok, TaskId} = barrel_mcp_tasks:create(SessionId, ToolName, #{}),
-    Collector = spawn_task_collector(SessionId, TaskId),
-    Ctx = #{
-        session_id => SessionId,
-        request_id => RequestId,
-        progress_token => ProgressToken,
-        meta => Meta,
-        emit_progress => emit_progress_fun(SessionId, ProgressToken),
-        reply_to => Collector,
-        auth_info => AuthInfo
-    },
-    Worker = Spawn(Ctx),
+    RequestCtx = maps:get(ctx, Reply),
+    Owner = task_owner(RequestCtx),
+    Params = maps:get(params, Reply, #{}),
+    case barrel_mcp_tasks:create(Owner, ToolName, #{params => Params}) of
+        {error, too_many_tasks} ->
+            %% Refused at admission, and the caller is still waiting,
+            %% so it is told rather than left to poll a task that was
+            %% never created.
+            reply_json(
+                Headers,
+                Responder,
+                Config,
+                200,
+                barrel_mcp_protocol:error_response(
+                    RequestId,
+                    ?JSONRPC_INTERNAL_ERROR,
+                    <<"Too many concurrent tasks">>
+                )
+            );
+        {ok, TaskId} ->
+            start_task_worker(
+                {Headers, Responder, Config},
+                Reply,
+                #{
+                    request_id => RequestId,
+                    progress_token => ProgressToken,
+                    meta => Meta,
+                    spawn => Spawn,
+                    auth_info => AuthInfo,
+                    owner => Owner,
+                    task_id => TaskId,
+                    ctx => RequestCtx
+                }
+            )
+    end.
+
+start_task_worker({Headers, Responder, Config}, Reply, Work) ->
+    #{
+        request_id := RequestId,
+        progress_token := ProgressToken,
+        meta := Meta,
+        spawn := Spawn,
+        auth_info := AuthInfo,
+        owner := Owner,
+        task_id := TaskId,
+        ctx := RequestCtx
+    } = Work,
+    SessionId = maps:get(session_id, Reply),
+    {_Collector, Worker} = barrel_mcp_protocol:spawn_task_collector(
+        Owner,
+        TaskId,
+        fun(Collector) ->
+            Spawn(#{
+                session_id => SessionId,
+                request_id => RequestId,
+                progress_token => ProgressToken,
+                meta => Meta,
+                emit_progress => emit_progress_fun(SessionId, ProgressToken),
+                emit_log => emit_log_fun(Reply, SessionId),
+                reply_to => Collector,
+                auth_info => AuthInfo
+            })
+        end
+    ),
     _ = barrel_mcp_tasks:set_worker(
-        SessionId,
+        Owner,
         TaskId,
         #{worker => Worker, request_id => RequestId}
     ),
     Task =
-        case barrel_mcp_tasks:get(SessionId, TaskId) of
+        case barrel_mcp_tasks:get(Owner, TaskId, barrel_mcp_ctx:era(RequestCtx)) of
             {ok, T} -> T;
             _ -> #{<<"taskId">> => TaskId, <<"status">> => <<"working">>}
         end,
-    send_tool_envelope(
+    Result = barrel_mcp_protocol:create_task_result(TaskId, Task, RequestCtx),
+    Envelope = tool_success(Reply, RequestId, Result, #{}),
+    Hdrs = reply_headers(
         Headers,
-        Responder,
         Config,
-        SessionId,
-        RequestId,
-        #{<<"task">> => Task}
-    ).
+        Reply,
+        #{<<"content-type">> => <<"application/json">>}
+    ),
+    reply(Responder, 200, Hdrs, barrel_mcp_protocol:encode(Envelope)).
 
-spawn_task_collector(SessionId, TaskId) ->
-    spawn(fun() -> task_collector_loop(SessionId, TaskId) end).
+reply_target(undefined, Self) -> Self;
+reply_target(Relay, _Self) -> Relay.
 
-task_collector_loop(SessionId, TaskId) ->
-    receive
-        {tool_result, _ReqId, Result} ->
-            Content = barrel_mcp_protocol:format_tool_result_external(Result),
-            barrel_mcp_tasks:finish(SessionId, TaskId, #{<<"content">> => Content});
-        {tool_structured, _ReqId, Data, Content} ->
-            barrel_mcp_tasks:finish(
-                SessionId,
-                TaskId,
-                #{
-                    <<"content">> => Content,
-                    <<"structuredContent">> => Data
-                }
-            );
-        {tool_error, _ReqId, Content} ->
-            barrel_mcp_tasks:fail(SessionId, TaskId, {tool_error, Content});
-        {tool_failed, _ReqId, Reason} ->
-            barrel_mcp_tasks:fail(SessionId, TaskId, Reason);
-        {tool_validation_failed, _ReqId, Errors} ->
-            barrel_mcp_tasks:fail(SessionId, TaskId, {validation_failed, Errors});
-        {cancelled, _ReqId} ->
-            barrel_mcp_tasks:cancel(SessionId, TaskId);
-        _Other ->
-            task_collector_loop(SessionId, TaskId)
+%% The inline window, then the task. Anything that reached this process
+%% between the window closing and the hold is answered in place.
+wait_inline_or_escalate(Relay, WorkerPid, RequestId, ToolName, Reply, OnProgress) ->
+    Cancel = cancels_on_disconnect(Reply),
+    case wait_for_tool(RequestId, barrel_mcp_task_relay:inline_ms(), OnProgress, Cancel) of
+        timeout ->
+            ok = barrel_mcp_task_relay:hold(Relay),
+            case wait_for_tool(RequestId, 0, OnProgress, Cancel) of
+                timeout ->
+                    unlink(Relay),
+                    RequestCtx = maps:get(ctx, Reply),
+                    case
+                        barrel_mcp_task_relay:escalate(
+                            Relay,
+                            WorkerPid,
+                            task_owner(RequestCtx),
+                            ToolName,
+                            maps:get(params, Reply, #{}),
+                            #{request_id => RequestId, mcp_ctx => RequestCtx}
+                        )
+                    of
+                        {ok, Result} -> {task, Result};
+                        {error, too_many_tasks} -> {failed, too_many_tasks}
+                    end;
+                Outcome ->
+                    barrel_mcp_task_relay:stop(Relay),
+                    Outcome
+            end;
+        Outcome ->
+            barrel_mcp_task_relay:stop(Relay),
+            Outcome
     end.
+
+%% `tasks_available/1' and `task_owner/1' live in the protocol core so
+%% stdio decides the same way this transport does.
+tasks_available(undefined) -> false;
+tasks_available(Ctx) -> barrel_mcp_protocol:tasks_enabled(Ctx).
+
+task_owner(undefined) -> undefined;
+task_owner(Ctx) -> barrel_mcp_protocol:task_owner(Ctx).
 
 emit_progress_fun(undefined, _Token) ->
     fun(_, _, _) -> ok end;
@@ -584,33 +1198,92 @@ emit_progress_fun(SessionId, Token) ->
         barrel_mcp_session:notify_progress(SessionId, Token, Progress, Total)
     end.
 
-wait_for_tool(RequestId, Timeout) ->
-    Outcome =
-        receive
-            {tool_result, RequestId, Result} ->
-                {result, Result, #{}};
-            {tool_result_meta, RequestId, Result, Meta} ->
-                {result, Result, Meta};
-            {tool_structured, RequestId, Data, Content} ->
-                {structured, Data, Content, #{}};
-            {tool_structured_meta, RequestId, Data, Content, Meta} ->
-                {structured, Data, Content, Meta};
-            {tool_error, RequestId, Content} ->
-                {tool_error, Content, #{}};
-            {tool_error_meta, RequestId, Content, Meta} ->
-                {tool_error, Content, Meta};
-            {tool_failed, RequestId, Reason} ->
-                {failed, Reason};
-            {tool_validation_failed, RequestId, Errors} ->
-                {validation_failed, Errors};
-            {cancelled, RequestId} ->
-                cancelled
-        after Timeout ->
-            timeout
+%% Modern era: there is no session channel, and the spec puts
+%% request-scoped notifications on the response stream of the request
+%% they relate to. The tool worker hands them back to the request
+%% process, which writes them out ahead of the final response.
+self_progress_fun(_Self, _RequestId, undefined) ->
+    fun(_, _, _) -> ok end;
+self_progress_fun(Self, RequestId, Token) ->
+    fun(Progress, Total, Message) ->
+        Self ! {tool_progress, RequestId, progress_params(Token, Progress, Total, Message)},
+        ok
+    end.
+
+progress_params(Token, Progress, Total, Message) ->
+    Base = #{<<"progressToken">> => Token, <<"progress">> => Progress},
+    WithTotal =
+        case Total of
+            undefined -> Base;
+            _ -> Base#{<<"total">> => Total}
         end,
+    case Message of
+        undefined -> WithTotal;
+        <<>> -> WithTotal;
+        _ -> WithTotal#{<<"message">> => Message}
+    end.
+
+progress_notification(Params) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"method">> => <<"notifications/progress">>,
+        <<"params">> => Params
+    }.
+
+%% Legacy logging stays on the session's SSE channel. A modern request
+%% has no session, so it drops.
+emit_log_fun(_Reply, undefined) ->
+    fun(_, _, _) -> ok end;
+emit_log_fun(_Reply, SessionId) ->
+    fun(Level, Logger, Data) ->
+        barrel_mcp:notify_log(SessionId, Level, Logger, Data)
+    end.
+
+%% "The server MUST NOT emit notifications/message for a request that
+%% does not include this field" (2026-07-28/.../logging.mdx:64).
+self_log_fun(_Self, _RequestId, undefined) ->
+    fun(_, _, _) -> ok end;
+self_log_fun(Self, RequestId, Requested) ->
+    Floor = barrel_mcp_session:log_level_priority(Requested),
+    fun(Level, Logger, Data) ->
+        case barrel_mcp_session:log_level_priority(Level) of
+            error ->
+                ok;
+            Prio when Prio >= Floor ->
+                Self ! {tool_log, RequestId, log_params(Level, Logger, Data)},
+                ok;
+            _ ->
+                ok
+        end
+    end.
+
+log_params(Level, Logger, Data) ->
+    Base = #{<<"level">> => level_to_binary(Level), <<"data">> => Data},
+    case Logger of
+        undefined -> Base;
+        _ -> Base#{<<"logger">> => Logger}
+    end.
+
+level_to_binary(L) when is_atom(L) -> atom_to_binary(L, utf8);
+level_to_binary(L) when is_binary(L) -> L.
+
+log_notification(Params) ->
+    #{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"method">> => <<"notifications/message">>,
+        <<"params">> => Params
+    }.
+
+%% `OnEmit' takes each request-scoped notification envelope. Legacy
+%% passes a sink: it delivers them on the session channel instead.
+wait_for_tool(RequestId, Timeout, OnEmit, CancelOnDisconnect) ->
+    Deadline = progress_deadline(Timeout),
+    Outcome = collect_tool_outcome(RequestId, Deadline, OnEmit, CancelOnDisconnect),
     case Outcome of
         cancelled ->
             cancelled;
+        disconnected ->
+            disconnected;
         timeout ->
             timeout;
         _ ->
@@ -621,40 +1294,84 @@ wait_for_tool(RequestId, Timeout) ->
             end
     end.
 
-deliver_tool_outcome(Headers, Responder, Config, SessionId, _RequestId, cancelled) ->
-    Hdrs = add_session_header(cors_headers(Headers, Config, #{}), SessionId),
-    reply(Responder, 200, Hdrs, <<>>);
-deliver_tool_outcome(
-    Headers,
-    Responder,
-    Config,
-    SessionId,
-    RequestId,
-    {result, Result, Meta}
-) ->
-    Content = barrel_mcp_protocol:format_tool_result_external(Result),
-    send_tool_envelope(
-        Headers,
-        Responder,
-        Config,
-        SessionId,
-        RequestId,
-        #{<<"content">> => Content},
-        Meta
+%% Progress messages must not extend the tool's deadline, so the
+%% remaining budget is recomputed on every hop rather than restarting
+%% the receive timeout.
+progress_deadline(infinity) ->
+    infinity;
+progress_deadline(Timeout) when is_integer(Timeout) ->
+    erlang:monotonic_time(millisecond) + Timeout.
+
+progress_remaining(infinity) ->
+    infinity;
+progress_remaining(Deadline) ->
+    max(0, Deadline - erlang:monotonic_time(millisecond)).
+
+collect_tool_outcome(RequestId, Deadline, OnEmit, CancelOnDisconnect) ->
+    Outcome =
+        receive
+            %% Left in the mailbox otherwise, so a legacy request keeps
+            %% running. The exit signal is the same event: this process
+            %% is linked to the connection.
+            mcp_disconnect when CancelOnDisconnect ->
+                disconnected;
+            {'EXIT', _Conn, _Reason} when CancelOnDisconnect ->
+                disconnected;
+            {tool_progress, RequestId, Params} ->
+                OnEmit(progress_notification(Params)),
+                notified;
+            %% A server request the tool raised, sent here because this
+            %% request's stream is its channel. It travels like a
+            %% notification; the answer arrives on the client's next POST.
+            {sse_send_message, Envelope} ->
+                OnEmit(Envelope),
+                notified;
+            {tool_log, RequestId, Params} ->
+                OnEmit(log_notification(Params)),
+                notified;
+            {tool_result, RequestId, Result} ->
+                {result, Result, #{}};
+            {tool_result_meta, RequestId, Result, Meta} ->
+                {result, Result, Meta};
+            {tool_structured, RequestId, Data, Content} ->
+                {structured, Data, Content, #{}};
+            {tool_structured_meta, RequestId, Data, Content, Meta} ->
+                {structured, Data, Content, Meta};
+            {tool_input_required, RequestId, Requests, State} ->
+                {input_required, Requests, State};
+            {tool_error, RequestId, Content} ->
+                {tool_error, Content, #{}};
+            {tool_error_meta, RequestId, Content, Meta} ->
+                {tool_error, Content, Meta};
+            {tool_failed, RequestId, Reason} ->
+                {failed, Reason};
+            {tool_validation_failed, RequestId, Errors} ->
+                {validation_failed, Errors};
+            {cancelled, RequestId} ->
+                cancelled
+        after progress_remaining(Deadline) ->
+            timeout
+        end,
+    case Outcome of
+        notified -> collect_tool_outcome(RequestId, Deadline, OnEmit, CancelOnDisconnect);
+        _ -> Outcome
+    end.
+
+%% Turn a tool outcome into the JSON-RPC envelope for it. Split out of
+%% the reply so the plain and the streaming path produce byte-identical
+%% envelopes. `cancelled' has no envelope: there is nothing to answer.
+tool_outcome_envelope(Reply, RequestId, {task, Result}) ->
+    tool_success(Reply, RequestId, Result, #{});
+tool_outcome_envelope(Reply, RequestId, {input_required, Requests, State}) ->
+    barrel_mcp_protocol:input_required_envelope(
+        maps:get(plan, Reply, #{}), Requests, State, RequestId
     );
-deliver_tool_outcome(
-    Headers,
-    Responder,
-    Config,
-    SessionId,
-    RequestId,
-    {structured, Data, Content, Meta}
-) ->
-    send_tool_envelope(
-        Headers,
-        Responder,
-        Config,
-        SessionId,
+tool_outcome_envelope(Reply, RequestId, {result, Result, Meta}) ->
+    Content = barrel_mcp_protocol:format_tool_result_external(Result),
+    tool_success(Reply, RequestId, #{<<"content">> => Content}, Meta);
+tool_outcome_envelope(Reply, RequestId, {structured, Data, Content, Meta}) ->
+    tool_success(
+        Reply,
         RequestId,
         #{
             <<"content">> => Content,
@@ -662,93 +1379,101 @@ deliver_tool_outcome(
         },
         Meta
     );
-deliver_tool_outcome(
-    Headers,
-    Responder,
-    Config,
-    SessionId,
-    RequestId,
-    {tool_error, Content, Meta}
-) ->
-    send_tool_envelope(
-        Headers,
-        Responder,
-        Config,
-        SessionId,
+tool_outcome_envelope(Reply, RequestId, {tool_error, Content, Meta}) ->
+    %% `CallToolResult.content' is an array in every revision.
+    tool_success(
+        Reply,
         RequestId,
-        #{<<"content">> => Content, <<"isError">> => true},
+        #{
+            <<"content">> => barrel_mcp_protocol:format_tool_result_external(Content),
+            <<"isError">> => true
+        },
         Meta
     );
-deliver_tool_outcome(
-    Headers,
-    Responder,
-    Config,
-    SessionId,
-    RequestId,
-    {validation_failed, Errors}
-) ->
+tool_outcome_envelope(Reply, RequestId, {validation_failed, Errors}) ->
     Msg = iolist_to_binary(io_lib:format("Invalid tool input: ~p", [Errors])),
-    send_tool_envelope(
-        Headers,
-        Responder,
-        Config,
-        SessionId,
+    tool_success(
+        Reply,
         RequestId,
         #{
             <<"content">> =>
                 [#{<<"type">> => <<"text">>, <<"text">> => Msg}],
             <<"isError">> => true
-        }
+        },
+        #{}
     );
-deliver_tool_outcome(Headers, Responder, Config, SessionId, RequestId, {failed, _}) ->
-    send_jsonrpc_error_envelope(
-        Headers,
-        Responder,
-        Config,
-        SessionId,
+%% Same envelope as the stdio and simple paths, so a tool that could not
+%% run reads identically on every transport: an error result, as the
+%% reference implementation answers, with the crash reason kept off
+%% the wire. The rule lives in barrel_mcp_protocol:tool_failure_result/1;
+%% it is repeated here rather than exported because the protocol module
+%% sits at the export limit the linter enforces.
+tool_outcome_envelope(_Reply, RequestId, {failed, Reason}) ->
+    Text =
+        case Reason of
+            {error, {not_found, tool, Name}} when is_binary(Name) ->
+                <<"Unknown tool: ", Name/binary>>;
+            _ ->
+                <<"Internal tool error">>
+        end,
+    barrel_mcp_protocol:success_response(RequestId, #{
+        <<"resultType">> => <<"complete">>,
+        <<"content">> => [#{<<"type">> => <<"text">>, <<"text">> => Text}],
+        <<"isError">> => true
+    });
+tool_outcome_envelope(Reply, RequestId, timeout) ->
+    barrel_mcp_protocol:error_response(
         RequestId,
-        ?MCP_TOOL_ERROR,
-        <<"Internal tool error">>
-    );
-deliver_tool_outcome(Headers, Responder, Config, SessionId, RequestId, timeout) ->
-    send_jsonrpc_error_envelope(
-        Headers,
-        Responder,
-        Config,
-        SessionId,
-        RequestId,
-        ?MCP_TOOL_ERROR,
+        internal_error_code(Reply),
         <<"Tool timed out">>
     ).
 
-send_tool_envelope(Headers, Responder, Config, SessionId, RequestId, Result) ->
-    send_tool_envelope(Headers, Responder, Config, SessionId, RequestId, Result, #{}).
+%% `-32000' is in the sub-range 2026-07-28 reserved as legacy and told
+%% new implementations not to use (basic/index.mdx:117).
+internal_error_code(#{ctx := Ctx}) when Ctx =/= undefined ->
+    case barrel_mcp_ctx:is_modern(Ctx) of
+        true -> ?JSONRPC_INTERNAL_ERROR;
+        false -> ?MCP_TOOL_ERROR
+    end;
+internal_error_code(_Reply) ->
+    ?MCP_TOOL_ERROR.
 
-send_tool_envelope(Headers, Responder, Config, SessionId, RequestId, Result, Meta) ->
-    Resp = barrel_mcp_protocol:success_response(RequestId, Result, Meta),
-    Json = barrel_mcp_protocol:encode(Resp),
-    Hdrs = add_session_header(
-        cors_headers(
-            Headers,
-            Config,
-            #{<<"content-type">> => <<"application/json">>}
-        ),
-        SessionId
-    ),
-    reply(Responder, 200, Hdrs, Json).
+%% A modern result is decorated here rather than in the protocol core,
+%% because this envelope is built by the transport.
+tool_success(Reply, RequestId, Result, Meta) ->
+    barrel_mcp_protocol:finalize(
+        barrel_mcp_protocol:success_response(RequestId, Result, Meta),
+        maps:get(ctx, Reply)
+    ).
 
-send_jsonrpc_error_envelope(Headers, Responder, Config, SessionId, Id, Code, Message) ->
-    Resp = barrel_mcp_protocol:error_response(Id, Code, Message),
-    Json = barrel_mcp_protocol:encode(Resp),
-    Hdrs = add_session_header(
-        cors_headers(
-            Headers,
-            Config,
-            #{<<"content-type">> => <<"application/json">>}
-        ),
-        SessionId
+deliver_tool_outcome(Headers, Responder, Config, Reply, _RequestId, cancelled) ->
+    Hdrs = reply_headers(Headers, Config, Reply, #{}),
+    reply(Responder, 200, Hdrs, <<>>);
+deliver_tool_outcome(Headers, Responder, Config, Reply, RequestId, Outcome) ->
+    Envelope = tool_outcome_envelope(Reply, RequestId, Outcome),
+    Hdrs = reply_headers(
+        Headers,
+        Config,
+        Reply,
+        #{<<"content-type">> => <<"application/json">>}
     ),
-    reply(Responder, 200, Hdrs, Json).
+    %% A tool call can end in one of the errors the transport binding
+    %% pins to a status, notably -32021 when a handler asks for a
+    %% capability the client never declared. Ordinary tool failures are
+    %% not in that table and stay 200, as before.
+    reply(
+        Responder,
+        modern_status(Envelope),
+        Hdrs,
+        barrel_mcp_protocol:encode(Envelope)
+    ).
+
+%% CORS plus the session echo, which a modern reply never carries.
+reply_headers(Headers, Config, Reply, Extra) ->
+    add_session_header(
+        cors_headers(Headers, Config, Extra),
+        maps:get(session_id, Reply)
+    ).
 
 reply_jsonrpc_error(Headers, Responder, Config, SessionId, Status, Id, Code, Message) ->
     Resp = barrel_mcp_protocol:error_response(Id, Code, Message),
@@ -767,57 +1492,86 @@ reply_jsonrpc_error(Headers, Responder, Config, SessionId, Status, Id, Code, Mes
 %% Session resolution / protocol version
 %%====================================================================
 
-lookup_session(_Headers, _Config, false, _Method) ->
+lookup_session(_Headers, _Config, false, _Method, _AuthInfo) ->
     {ok, undefined};
-lookup_session(Headers, Config, true, Method) ->
+%% Discovery must be reachable before anything else, so it neither
+%% requires a session nor mints one. That is what lets a dual-era
+%% client probe with `server/discover' the way the stdio binding
+%% describes, over HTTP too.
+lookup_session(_Headers, _Config, true, <<"server/discover">>, _AuthInfo) ->
+    {ok, undefined};
+lookup_session(Headers, Config, true, Method, AuthInfo) ->
     case {Method, session_header(Headers)} of
         {<<"initialize">>, undefined} ->
             {ok, SessionId} = barrel_mcp_session:create(#{}),
+            _ = barrel_mcp_session:set_principal(SessionId, principal_of(AuthInfo)),
             BufMax = maps:get(sse_buffer_size, Config, 256),
             _ = barrel_mcp_session:set_sse_buffer_max(SessionId, BufMax),
             {ok, SessionId};
-        {<<"initialize">>, SessionId} ->
-            case barrel_mcp_session:get(SessionId) of
-                {ok, _} -> {ok, SessionId};
-                {error, not_found} -> {error, unknown_session}
-            end;
         {_, undefined} ->
             {error, missing_session_id};
         {_, SessionId} ->
-            case barrel_mcp_session:get(SessionId) of
-                {ok, _} -> {ok, SessionId};
-                {error, not_found} -> {error, unknown_session}
+            owned_session(SessionId, AuthInfo)
+    end.
+
+%% A session belongs to the principal that initialized it. Another
+%% principal holding its id gets the unknown-session answer, so the id
+%% is neither an oracle nor a capability on its own.
+owned_session(SessionId, AuthInfo) ->
+    case barrel_mcp_session:get_principal(SessionId) of
+        {error, not_found} ->
+            {error, unknown_session};
+        {ok, Principal} ->
+            case Principal =:= principal_of(AuthInfo) of
+                true -> {ok, SessionId};
+                false -> {error, unknown_session}
             end
+    end.
+
+%% What this connection settled on, preferring the header the client
+%% sends on every post-initialize request and falling back to what the
+%% session recorded at the handshake.
+negotiated_version(Headers, SessionId) ->
+    case header(<<"mcp-protocol-version">>, Headers, undefined) of
+        Version when is_binary(Version) ->
+            Version;
+        undefined when is_binary(SessionId) ->
+            case barrel_mcp_session:get_protocol_version(SessionId) of
+                {ok, Version} -> Version;
+                _ -> undefined
+            end;
+        _ ->
+            undefined
     end.
 
 validate_protocol_version(_Headers, _Sid, <<"initialize">>) ->
     ok;
 validate_protocol_version(Headers, SessionId, _Method) ->
-    case header(<<"mcp-protocol-version">>, Headers, undefined) of
-        undefined ->
-            ok;
-        Version ->
-            case lists:member(Version, ?MCP_SUPPORTED_VERSIONS) of
-                true ->
-                    case SessionId of
-                        undefined ->
-                            ok;
-                        _ ->
-                            _ = barrel_mcp_session:set_protocol_version(
-                                SessionId, Version
-                            ),
-                            ok
-                    end;
-                false ->
-                    {error,
-                        iolist_to_binary([
-                            <<"Bad MCP-Protocol-Version: ">>,
-                            Version,
-                            <<". Supported: ">>,
-                            lists:join(<<", ">>, ?MCP_SUPPORTED_VERSIONS)
-                        ])}
-            end
+    supported_version(header(<<"mcp-protocol-version">>, Headers, undefined), SessionId).
+
+supported_version(undefined, _SessionId) ->
+    ok;
+supported_version(Version, SessionId) ->
+    case lists:member(Version, ?MCP_SUPPORTED_VERSIONS) of
+        false -> {error, unsupported_version_message(Version)};
+        true -> remember_version(SessionId, Version)
     end.
+
+%% A version arriving on a request outlives it: later requests on the
+%% same session may omit the header.
+remember_version(undefined, _Version) ->
+    ok;
+remember_version(SessionId, Version) ->
+    _ = barrel_mcp_session:set_protocol_version(SessionId, Version),
+    ok.
+
+unsupported_version_message(Version) ->
+    iolist_to_binary([
+        <<"Bad MCP-Protocol-Version: ">>,
+        Version,
+        <<". Supported: ">>,
+        lists:join(<<", ">>, ?MCP_SUPPORTED_VERSIONS)
+    ]).
 
 maybe_capture_initialize_version(
     SessionId,
@@ -839,42 +1593,30 @@ maybe_capture_initialize_version(_, _, _) ->
 %%====================================================================
 
 stream_get_sse(Headers, Responder, Config) ->
-    with_authenticated(
+    with_auth_info(
         Headers,
         Responder,
         Config,
-        fun() -> stream_get_sse_authed(Headers, Responder, Config) end
+        fun(AuthInfo) -> stream_get_sse_authed(Headers, Responder, Config, AuthInfo) end
     ).
 
-stream_get_sse_authed(Headers, Responder, Config) ->
-    case maps:get(session_enabled, Config, true) of
-        false ->
+%% Only reached with sessions on: `dispatch/6' answers 405 otherwise.
+stream_get_sse_authed(Headers, Responder, Config, AuthInfo) ->
+    case session_header(Headers) of
+        undefined ->
             reply(
                 Responder,
                 400,
                 cors_headers(Headers, Config, #{}),
-                json_encode(#{<<"error">> => <<"Sessions not enabled">>})
+                json_encode(#{<<"error">> => <<"Mcp-Session-Id header required">>})
             );
-        true ->
-            case session_header(Headers) of
-                undefined ->
-                    reply(
-                        Responder,
-                        400,
-                        cors_headers(Headers, Config, #{}),
-                        json_encode(#{
-                            <<"error">> =>
-                                <<"Mcp-Session-Id header required">>
-                        })
-                    );
-                SessionId ->
-                    stream_get_sse_session(Headers, Responder, Config, SessionId)
-            end
+        SessionId ->
+            stream_get_sse_session(Headers, Responder, Config, SessionId, AuthInfo)
     end.
 
-stream_get_sse_session(Headers, Responder, Config, SessionId) ->
-    case barrel_mcp_session:get(SessionId) of
-        {ok, _Session} ->
+stream_get_sse_session(Headers, Responder, Config, SessionId, AuthInfo) ->
+    case owned_session(SessionId, AuthInfo) of
+        {ok, _} ->
             Hdrs = add_session_header(
                 cors_headers(
                     Headers,
@@ -895,7 +1637,7 @@ stream_get_sse_session(Headers, Responder, Config, SessionId) ->
             ),
             _ = barrel_mcp_session:set_sse_pid(SessionId, self()),
             sse_loop(Responder, SessionId);
-        {error, not_found} ->
+        {error, unknown_session} ->
             reply(
                 Responder,
                 404,
@@ -912,6 +1654,8 @@ sse_loop(Responder, SessionId) ->
         session_terminated ->
             sse_cleanup(Responder, SessionId);
         mcp_disconnect ->
+            sse_cleanup(Responder, SessionId);
+        {'EXIT', _Conn, _Reason} ->
             sse_cleanup(Responder, SessionId);
         {sse_event, EventId, Data} ->
             case push_sse_event(Responder, EventId, Data) of
@@ -945,14 +1689,14 @@ sse_cleanup(Responder, SessionId) ->
     ok.
 
 stream_delete(Headers, Responder, Config) ->
-    with_authenticated(
+    with_auth_info(
         Headers,
         Responder,
         Config,
-        fun() -> stream_delete_authed(Headers, Responder, Config) end
+        fun(AuthInfo) -> stream_delete_authed(Headers, Responder, Config, AuthInfo) end
     ).
 
-stream_delete_authed(Headers, Responder, Config) ->
+stream_delete_authed(Headers, Responder, Config, AuthInfo) ->
     case session_header(Headers) of
         undefined ->
             reply(
@@ -962,11 +1706,11 @@ stream_delete_authed(Headers, Responder, Config) ->
                 json_encode(#{<<"error">> => <<"Mcp-Session-Id header required">>})
             );
         SessionId ->
-            case barrel_mcp_session:get(SessionId) of
+            case owned_session(SessionId, AuthInfo) of
                 {ok, _} ->
                     barrel_mcp_session:delete(SessionId),
                     reply(Responder, 204, cors_headers(Headers, Config, #{}), <<>>);
-                {error, not_found} ->
+                {error, unknown_session} ->
                     reply(
                         Responder,
                         404,
@@ -974,6 +1718,274 @@ stream_delete_authed(Headers, Responder, Config) ->
                         json_encode(#{<<"error">> => <<"Unknown Mcp-Session-Id">>})
                     )
             end
+    end.
+
+%%====================================================================
+%% HTTP+SSE transport (2024-11-05)
+%%====================================================================
+
+%% "When a client connects, the server MUST send an `endpoint' event
+%% containing a URI for the client to use for sending messages"
+%% (2024-11-05/basic/transports.mdx:67).
+%%
+%% The URI carries the session id, which is crypto-random and so the
+%% capability for this connection. It is bound to the principal that
+%% opened it, so holding the URL is not on its own enough to post.
+legacy_sse_open(Headers, Responder, Config) ->
+    with_auth_info(Headers, Responder, Config, fun(AuthInfo) ->
+        {ok, SessionId} = barrel_mcp_session:create(#{}),
+        _ = barrel_mcp_session:set_principal(SessionId, principal_of(AuthInfo)),
+        Hdrs = cors_headers(Headers, Config, #{
+            <<"content-type">> => <<"text/event-stream">>,
+            <<"cache-control">> => <<"no-cache">>,
+            <<"connection">> => <<"keep-alive">>,
+            <<"x-accel-buffering">> => <<"no">>
+        }),
+        stream_start(Responder, 200, Hdrs),
+        _ = stream_chunk(Responder, endpoint_event(SessionId, Config)),
+        _ = barrel_mcp_session:set_sse_pid(SessionId, self()),
+        try
+            sse_loop(Responder, SessionId)
+        after
+            %% The stream is the session, and the last write on the way
+            %% out goes to a socket the peer has already closed. Letting
+            %% that raise past here would leak the session and leave its
+            %% endpoint answering.
+            barrel_mcp_session:delete(SessionId)
+        end
+    end).
+
+endpoint_event(SessionId, Config) ->
+    Path = maps:get(sse_message_path, Config),
+    iolist_to_binary([
+        <<"event: endpoint\ndata: ">>,
+        Path,
+        <<"?sessionId=">>,
+        SessionId,
+        <<"\n\n">>
+    ]).
+
+%% "All subsequent client messages MUST be sent as HTTP POST requests to
+%% this endpoint" (transports.mdx:67), and the answer goes back on the
+%% stream rather than in this response.
+legacy_sse_post(RawPath, Headers, Body, Responder, Config) ->
+    with_auth_info(Headers, Responder, Config, fun(AuthInfo) ->
+        case legacy_session_of(RawPath, AuthInfo) of
+            {error, Status, Message} ->
+                reply(
+                    Responder,
+                    Status,
+                    cors_headers(Headers, Config, #{}),
+                    json_encode(#{<<"error">> => Message})
+                );
+            {ok, SessionId} ->
+                legacy_dispatch(SessionId, Headers, Body, Responder, Config, AuthInfo)
+        end
+    end).
+
+legacy_session_of(RawPath, AuthInfo) ->
+    case query_param(<<"sessionId">>, RawPath) of
+        undefined ->
+            {error, 400, <<"sessionId required">>};
+        SessionId ->
+            case barrel_mcp_session:get_principal(SessionId) of
+                {error, not_found} ->
+                    {error, 404, <<"Unknown sessionId">>};
+                {ok, Principal} ->
+                    case Principal =:= principal_of(AuthInfo) of
+                        %% Same answer as an unknown id: whoever holds
+                        %% the URL learns nothing about whose it is.
+                        false -> {error, 404, <<"Unknown sessionId">>};
+                        true -> {ok, SessionId}
+                    end
+            end
+    end.
+
+legacy_dispatch(SessionId, Headers, Body, Responder, Config, AuthInfo) ->
+    case barrel_mcp_protocol:decode(Body) of
+        {error, _} ->
+            push_legacy(
+                SessionId,
+                barrel_mcp_protocol:error_response(
+                    null, ?JSONRPC_PARSE_ERROR, <<"Parse error">>
+                )
+            ),
+            reply(Responder, 202, cors_headers(Headers, Config, #{}), <<>>);
+        {ok, Request} ->
+            %% This pair predates the modern era, so a client on it is
+            %% in the handshake era whatever revision its header names.
+            %% Pinning the transport version to a legacy revision keeps
+            %% the header-aware era selection from routing its probe
+            %% into a stateless path the pair cannot serve.
+            ProtocolState = #{
+                auth_info => AuthInfo,
+                protocol_version => negotiated_version(Headers, SessionId),
+                transport_version => legacy_transport_version(Headers, SessionId),
+                session_id => SessionId
+            },
+            Message =
+                case Request of
+                    M when is_map(M) -> with_auth(M, AuthInfo);
+                    Other -> Other
+                end,
+            _ = legacy_answer(SessionId, Message, ProtocolState),
+            reply(Responder, 202, cors_headers(Headers, Config, #{}), <<>>)
+    end.
+
+%% `server/discover' is answered in both eras elsewhere, so a dual-era
+%% client can probe before choosing. This pair cannot serve the modern
+%% era at all, so a probe answered here would advertise a revision the
+%% transport does not have. Refusing it as method-not-found is what a
+%% client falls back from into the handshake the pair belongs to.
+legacy_answer(SessionId, #{<<"method">> := <<"server/discover">>, <<"id">> := Id}, _State) ->
+    push_legacy(
+        SessionId,
+        barrel_mcp_protocol:error_response(
+            Id, ?JSONRPC_METHOD_NOT_FOUND, <<"Method not found: server/discover">>
+        )
+    );
+legacy_answer(SessionId, Message, ProtocolState) ->
+    case barrel_mcp_protocol:handle(Message, ProtocolState) of
+        no_response ->
+            ok;
+        {async, Plan} ->
+            %% Off this request: the POST answers 202 straight away and
+            %% the result goes out on the stream whenever it is ready.
+            AuthInfo = maps:get(auth_info, ProtocolState),
+            _ = spawn(fun() -> answer_on_stream(SessionId, Plan, AuthInfo) end),
+            ok;
+        {subscribe, _Sub} ->
+            %% Modern-only, and this transport predates it.
+            ok;
+        Response ->
+            _ = maybe_capture_initialize_version(
+                SessionId, method_of(Message), Response
+            ),
+            push_legacy(SessionId, Response)
+    end.
+
+%% 2025-11-25/basic/transports.mdx:145 says a server request on a
+%% POST's response stream SHOULD be unrelated to the running request.
+%% It is a SHOULD; both reference SDKs read one off exactly that stream
+%% and answer on a new POST, and the reference server sends it there.
+%% The legacy log filter, delivered on the request's own stream rather
+%% than the session channel.
+session_log_on_stream_fun(_Self, _RequestId, undefined) ->
+    fun(_, _, _) -> ok end;
+session_log_on_stream_fun(Self, RequestId, SessionId) ->
+    fun(Level, Logger, Data) ->
+        case barrel_mcp_session:log_level_priority(Level) of
+            error ->
+                ok;
+            Prio ->
+                Floor =
+                    case barrel_mcp_session:get_log_level(SessionId) of
+                        {ok, L} -> barrel_mcp_session:log_level_priority(L);
+                        _ -> barrel_mcp_session:log_level_priority(<<"info">>)
+                    end,
+                _ =
+                    case Prio >= Floor of
+                        true -> Self ! {tool_log, RequestId, log_params(Level, Logger, Data)};
+                        false -> ok
+                    end,
+                ok
+        end
+    end.
+
+channel_of(true, Self) -> Self;
+channel_of(false, _Self) -> undefined.
+
+%% The stream is the session, and the answer has nowhere to go once it
+%% closes, so the tool it was waiting on must not keep running. The
+%% wait inside drive_async_plan is blocking and knows nothing of the
+%% stream, so a watcher kills the worker the moment the stream goes.
+%%
+%% Watched by monitor rather than link: the stream process traps exits
+%% and reads any EXIT as its peer leaving, so a link would turn a
+%% normal finish here into a spurious close.
+answer_on_stream(SessionId, Plan, AuthInfo) ->
+    Watcher = spawn_link(fun() -> watch_stream(SessionId) end),
+    Response = barrel_mcp_protocol:drive_async_plan(
+        Plan,
+        60000,
+        AuthInfo,
+        fun(Worker) -> Watcher ! {worker, Worker} end
+    ),
+    Watcher ! done,
+    push_legacy(SessionId, Response).
+
+watch_stream(SessionId) ->
+    Stream =
+        case barrel_mcp_session:get_sse_pid(SessionId) of
+            {ok, Pid} -> Pid;
+            _ -> undefined
+        end,
+    Ref =
+        case Stream of
+            undefined -> undefined;
+            _ -> monitor(process, Stream)
+        end,
+    watch_stream_loop(Ref, Stream, undefined).
+
+%% Holds the worker pid once it exists. A DOWN before the worker is
+%% known is remembered as a pending kill.
+watch_stream_loop(Ref, Stream, Worker) ->
+    receive
+        {worker, W} when Ref =:= undefined ->
+            %% No stream to watch means the peer is already gone.
+            _ = settle_disconnect(disconnected, W),
+            ok;
+        {worker, W} ->
+            watch_stream_loop(Ref, Stream, W);
+        {'DOWN', Ref, process, Stream, _} ->
+            _ = settle_disconnect(disconnected, Worker),
+            ok;
+        done ->
+            ok
+    end.
+
+%% The revision the SSE pair runs at: what the session negotiated, or
+%% the newest legacy revision before it has. Never a modern one.
+legacy_transport_version(Headers, SessionId) ->
+    case negotiated_version(Headers, SessionId) of
+        V when is_binary(V) ->
+            case barrel_mcp_version:era(V) of
+                legacy -> V;
+                _ -> ?MCP_LATEST_LEGACY_VERSION
+            end;
+        _ ->
+            ?MCP_LATEST_LEGACY_VERSION
+    end.
+
+method_of(Message) when is_map(Message) -> maps:get(<<"method">>, Message, <<>>);
+method_of(_Message) -> <<>>.
+
+push_legacy(SessionId, Response) ->
+    case barrel_mcp_session:get_sse_pid(SessionId) of
+        {ok, Pid} when is_pid(Pid) ->
+            Pid ! {sse_send_message, Response},
+            ok;
+        _ ->
+            ok
+    end.
+
+principal_of(AuthInfo) when is_map(AuthInfo) ->
+    maps:get(principal, AuthInfo, anonymous);
+principal_of(_AuthInfo) ->
+    anonymous.
+
+query_param(Name, RawPath) ->
+    case binary:split(RawPath, <<"?">>) of
+        [_Path, Query] -> find_param(Name, binary:split(Query, <<"&">>, [global]));
+        _ -> undefined
+    end.
+
+find_param(_Name, []) ->
+    undefined;
+find_param(Name, [Pair | Rest]) ->
+    case binary:split(Pair, <<"=">>) of
+        [Name, Value] -> Value;
+        _ -> find_param(Name, Rest)
     end.
 
 %%====================================================================
@@ -994,8 +2006,22 @@ stream_sse_response(Headers, Responder, Config, SessionId, Result) ->
         SessionId
     ),
     stream_start(Responder, 200, Hdrs),
-    _ = push_sse_event(Responder, generate_event_id(), Result),
+    %% `SessionId' is `undefined' on the modern path and only there, and
+    %% 2026-07-28 has no resumability to carry an `id:' for.
+    _ =
+        case SessionId of
+            undefined -> push_sse_data(Responder, Result);
+            _ -> push_sse_event(Responder, generate_event_id(), Result)
+        end,
     stream_end(Responder).
+
+%% Modern streams carry no event ids: 2026-07-28 removed SSE
+%% resumability, so there is nothing for a client to resume from.
+push_sse_data(Responder, Data) ->
+    stream_chunk(
+        Responder,
+        iolist_to_binary([<<"data: ">>, json_encode(Data), <<"\n\n">>])
+    ).
 
 push_sse_event(Responder, EventId, Data) ->
     Json = json_encode(Data),
@@ -1083,19 +2109,22 @@ match_pos(Bin, Needle) ->
 %% Authentication
 %%====================================================================
 
+%% A provider that refuses its options fails the listener here, at
+%% start, rather than every request later.
+-spec init_auth(map()) -> {ok, map()} | {error, {auth_provider, module(), term()}}.
 init_auth(#{provider := Provider} = AuthOpts) ->
+    _ = code:ensure_loaded(Provider),
     ProviderOpts = maps:get(provider_opts, AuthOpts, #{}),
-    ProviderState =
-        case erlang:function_exported(Provider, init, 1) of
-            true ->
-                case Provider:init(ProviderOpts) of
-                    {ok, S} -> S;
-                    _ -> undefined
-                end;
-            false ->
-                undefined
-        end,
-    AuthOpts#{provider_state => ProviderState};
+    case erlang:function_exported(Provider, init, 1) of
+        true ->
+            case Provider:init(ProviderOpts) of
+                {ok, S} -> {ok, AuthOpts#{provider_state => S}};
+                {error, Reason} -> {error, {auth_provider, Provider, Reason}};
+                Other -> {error, {auth_provider, Provider, {bad_return, Other}}}
+            end;
+        false ->
+            {ok, AuthOpts#{provider_state => undefined}}
+    end;
 init_auth(AuthOpts) ->
     init_auth(AuthOpts#{provider => barrel_mcp_auth_none}).
 
@@ -1104,22 +2133,16 @@ authenticate(#{provider := barrel_mcp_auth_none}, _Request) ->
 authenticate(AuthConfig, Request) ->
     barrel_mcp_auth:authenticate(AuthConfig, Request, AuthConfig).
 
-%% Run `Fun' only if the request passes the configured auth provider.
-%% Used by the GET (SSE) and DELETE verbs so they enforce the same
-%% credential as POST instead of trusting the session id alone. With
-%% `barrel_mcp_auth_none' this admits every request unchanged.
-with_authenticated(Headers, Responder, Config, Fun) ->
-    AuthConfig = maps:get(
-        auth_config,
-        Config,
-        #{provider => barrel_mcp_auth_none}
-    ),
+%% Run `Fun' with what the request authenticated as. Every verb goes
+%% through here, so GET and DELETE enforce the same credential as POST
+%% and every session path can check ownership. With
+%% `barrel_mcp_auth_none' this admits every request as `anonymous'.
+with_auth_info(Headers, Responder, Config, Fun) ->
+    AuthConfig = maps:get(auth_config, Config, #{provider => barrel_mcp_auth_none}),
     AuthRequest = #{headers => extract_headers(Headers, AuthConfig)},
     case authenticate(AuthConfig, AuthRequest) of
-        {ok, _AuthInfo} ->
-            Fun();
-        {error, Reason} ->
-            auth_error(Headers, Responder, AuthConfig, Reason)
+        {ok, AuthInfo} -> Fun(AuthInfo);
+        {error, Reason} -> auth_error(Headers, Responder, AuthConfig, Reason)
     end.
 
 auth_error(Headers, Responder, AuthConfig, Reason) ->
@@ -1155,6 +2178,7 @@ extract_headers(Headers, AuthConfig) ->
     ).
 
 %% The user-facing `resource_metadata' option processing.
+-spec normalize_resource_metadata(map() | undefined) -> map() | undefined.
 normalize_resource_metadata(undefined) ->
     undefined;
 normalize_resource_metadata(#{resource := ResourceUrl} = M) ->
@@ -1185,6 +2209,7 @@ derive_prm_url(Resource) when is_binary(Resource) ->
             <<Resource/binary, "/.well-known/oauth-protected-resource">>
     end.
 
+-spec inject_resource_metadata_url(map(), map() | undefined) -> map().
 inject_resource_metadata_url(AuthConfig, undefined) ->
     AuthConfig;
 inject_resource_metadata_url(#{provider_state := State} = AuthConfig, #{url := Url}) when
@@ -1199,13 +2224,21 @@ inject_resource_metadata_url(AuthConfig, _) ->
 %%====================================================================
 
 cors_headers(Headers, Config, Extra) ->
-    BaseAllowHeaders = [
-        <<"content-type">>,
-        <<"accept">>,
-        <<"mcp-session-id">>,
-        <<"mcp-protocol-version">>,
-        <<"last-event-id">>
-    ],
+    BaseAllowHeaders =
+        [
+            <<"content-type">>,
+            <<"accept">>,
+            <<"mcp-session-id">>,
+            <<"mcp-protocol-version">>,
+            <<"last-event-id">>,
+            <<"mcp-method">>,
+            <<"mcp-name">>
+        ] ++
+            %% `Access-Control-Allow-Headers' has no prefix form, so
+            %% every mirrored parameter has to be named. A browser
+            %% client would otherwise fail preflight on any tool using
+            %% `x-mcp-header'.
+            barrel_mcp_registry:param_header_names(),
     AuthHeaders =
         case maps:get(auth_config, Config, undefined) of
             undefined -> [];
@@ -1234,6 +2267,8 @@ cors_headers(Headers, Config, Extra) ->
 %% Origin validation + bind helpers
 %%====================================================================
 
+-spec resolve_allowed_origins(boolean(), any | undefined | [binary()]) ->
+    {ok, any | [term()]} | {error, allowed_origins_required}.
 resolve_allowed_origins(_Loopback, any) ->
     {ok, any};
 resolve_allowed_origins(true, undefined) ->
@@ -1264,6 +2299,7 @@ parse_origin(Bin) when is_binary(Bin) ->
             #{scheme => undefined, host => Bin, port => any}
     end.
 
+-spec is_loopback(inet:ip_address() | string() | binary()) -> boolean().
 is_loopback({127, _, _, _}) -> true;
 is_loopback({0, 0, 0, 0, 0, 0, 0, 1}) -> true;
 is_loopback("localhost") -> true;
@@ -1307,6 +2343,7 @@ origin_matches(_, _) ->
 %% Session manager bootstrap
 %%====================================================================
 
+-spec ensure_session_manager() -> ok | {ok, pid()} | {error, term()}.
 ensure_session_manager() ->
     case whereis(barrel_mcp_session) of
         undefined ->

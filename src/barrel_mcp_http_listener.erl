@@ -22,11 +22,11 @@
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_http_listener).
 
--export([start/3, stop/1]).
+-export([start/3, start_link/3, stop/1, acceptors/1]).
 
 %% Spawned entry points (must be exported for `spawn/3`-style traces
 %% and for clarity; called via funs internally).
--export([connection_init/3]).
+-export([connection_init/3, listener_init/4]).
 
 -define(MAX_BODY_BYTES, 16 * 1024 * 1024).
 -define(BODY_TIMEOUT, 60000).
@@ -47,7 +47,12 @@
 %% API
 %%====================================================================
 
-%% @doc Start a listener registered as `Name'.
+%% @doc Start an unsupervised listener registered as `Name'.
+%%
+%% For use without the `barrel_mcp' application, where the caller owns
+%% the lifecycle. Under the application, listeners go through
+%% {@link barrel_mcp_listener_sup:start_listener/3} instead, which
+%% restarts them on a crash and stops them with the application.
 %%
 %% `ListenOpts': `#{port, ip, ssl, acceptors, max_connections}'.
 %% `ssl' is `undefined' (cleartext) or
@@ -56,22 +61,18 @@
 -spec start(atom(), map(), barrel_mcp_http_engine:config()) ->
     {ok, pid()} | {error, term()}.
 start(Name, ListenOpts, EngineConfig) ->
+    %% No parent: nothing above this listener owns it, so a caller
+    %% going away must not take it down.
+    proc_lib:start(?MODULE, listener_init, [undefined, Name, ListenOpts, EngineConfig]).
+
+%% @doc Start a listener linked to the caller, for use as a supervised
+%% child. A shutdown from the parent closes the listen socket and takes
+%% every connection with it.
+-spec start_link(atom(), map(), barrel_mcp_http_engine:config()) ->
+    {ok, pid()} | {error, term()}.
+start_link(Name, ListenOpts, EngineConfig) ->
     Parent = self(),
-    Pid = spawn(fun() -> listener_init(Parent, Name, ListenOpts, EngineConfig) end),
-    MRef = monitor(process, Pid),
-    receive
-        {Pid, {ok, Pid}} ->
-            demonitor(MRef, [flush]),
-            {ok, Pid};
-        {Pid, {error, Reason}} ->
-            demonitor(MRef, [flush]),
-            {error, Reason};
-        {'DOWN', MRef, process, Pid, Reason} ->
-            {error, Reason}
-    after 5000 ->
-        demonitor(MRef, [flush]),
-        {error, listener_start_timeout}
-    end.
+    proc_lib:start_link(?MODULE, listener_init, [Parent, Name, ListenOpts, EngineConfig]).
 
 %% @doc Stop a listener by registered name.
 -spec stop(atom()) -> ok | {error, not_found}.
@@ -93,6 +94,9 @@ stop(Name) ->
 %% Listener process
 %%====================================================================
 
+%% @private Shared by the supervised and standalone entry points.
+%% `Parent' is `undefined' when standalone, so the shutdown clause in
+%% the loop below can never match.
 listener_init(Parent, Name, ListenOpts, EngineConfig) ->
     process_flag(trap_exit, true),
     case listen(ListenOpts) of
@@ -118,7 +122,7 @@ listener_init(Parent, Name, ListenOpts, EngineConfig) ->
                     ),
                     Counter = atomics:new(1, [{signed, false}]),
                     Listener = self(),
-                    _ = [
+                    Spawn = fun() ->
                         spawn_link(fun() ->
                             acceptor_loop(
                                 LSock,
@@ -129,20 +133,28 @@ listener_init(Parent, Name, ListenOpts, EngineConfig) ->
                                 Max
                             )
                         end)
-                     || _ <- lists:seq(1, N)
-                    ],
-                    Parent ! {self(), {ok, self()}},
-                    listener_loop(LSock, Transport, Counter);
+                    end,
+                    Acceptors = maps:from_list([{Spawn(), true} || _ <- lists:seq(1, N)]),
+                    proc_lib:init_ack({ok, self()}),
+                    listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors);
                 _ ->
                     close_listen(Transport, LSock),
-                    Parent ! {self(), {error, {already_started, Name}}}
+                    proc_lib:init_ack({error, {already_started, Name}}),
+                    exit(normal)
             end;
         {error, Reason} ->
-            Parent ! {self(), {error, Reason}}
+            proc_lib:init_ack({error, Reason}),
+            exit(normal)
     end.
 
-listener_loop(LSock, Transport, Counter) ->
+listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors) ->
     receive
+        {'EXIT', Parent, _Reason} ->
+            %% The supervisor is taking us down. Same teardown as an
+            %% explicit stop: close the socket and exit `shutdown', so
+            %% the linked connections go too.
+            close_listen(Transport, LSock),
+            exit(shutdown);
         {stop, From, Ref} ->
             %% Close the listen socket (unblocks acceptors) and exit
             %% with `shutdown', which propagates to the linked
@@ -157,16 +169,46 @@ listener_loop(LSock, Transport, Counter) ->
             %% stopping with `{shutdown, _}' would kill it), so it
             %% cannot reliably release the slot itself.
             _ = monitor(process, Pid),
-            listener_loop(LSock, Transport, Counter);
+            listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors);
         {'DOWN', _Ref, process, _Pid, _Reason} ->
             atomics:sub(Counter, 1, 1),
-            listener_loop(LSock, Transport, Counter);
+            listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors);
+        {acceptors, From, Ref} ->
+            From ! {Ref, maps:keys(Acceptors)},
+            listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors);
+        {'EXIT', Pid, Reason} when is_map_key(Pid, Acceptors) ->
+            %% An acceptor ends normally only when the listen socket is
+            %% gone; anything else leaves the pool short, so refill it.
+            Acceptors1 =
+                case Reason of
+                    normal ->
+                        maps:remove(Pid, Acceptors);
+                    shutdown ->
+                        maps:remove(Pid, Acceptors);
+                    _ ->
+                        logger:warning("mcp http acceptor exited: ~p; replacing", [Reason]),
+                        %% A replacement that dies at once must not spin.
+                        timer:sleep(?ACCEPT_ERROR_BACKOFF),
+                        (maps:remove(Pid, Acceptors))#{Spawn() => true}
+                end,
+            listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors1);
         {'EXIT', _Pid, _Reason} ->
-            %% A connection or acceptor process exited; ignore (the
-            %% slot is released by the matching `DOWN' above).
-            listener_loop(LSock, Transport, Counter);
+            %% A connection process exited; the slot is released by the
+            %% matching `DOWN' above.
+            listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors);
         _Other ->
-            listener_loop(LSock, Transport, Counter)
+            listener_loop(Parent, LSock, Transport, Counter, Spawn, Acceptors)
+    end.
+
+%% @doc The live acceptor pids of a listener. For tests.
+-spec acceptors(atom()) -> [pid()].
+acceptors(Name) ->
+    Ref = make_ref(),
+    Name ! {acceptors, self(), Ref},
+    receive
+        {Ref, Pids} -> Pids
+    after 5000 ->
+        error({no_listener, Name})
     end.
 
 listen(ListenOpts) ->
@@ -475,40 +517,65 @@ broadcast_disconnect(Streams) ->
 %%====================================================================
 
 spawn_handler(Proto, Conn, StreamId, Method, Path, Headers, Handler) ->
-    spawn_monitor(fun() ->
-        try
-            Handler(Proto, Conn, StreamId, Method, Path, Headers)
-        catch
-            Class:Reason:Stack ->
-                logger:error(
-                    "mcp http handler crash: ~p:~p~n~p",
-                    [Class, Reason, Stack]
-                ),
-                try
-                    Proto:send_response(
-                        Conn,
-                        StreamId,
-                        500,
-                        [
-                            {<<"content-type">>, <<"text/plain">>},
-                            {<<"content-length">>, <<"21">>}
-                        ]
-                    )
-                catch
-                    _:_ -> ok
-                end,
-                try
-                    Proto:send_data(
-                        Conn,
-                        StreamId,
-                        <<"Internal Server Error">>,
-                        true
-                    )
-                catch
-                    _:_ -> ok
-                end
-        end
-    end).
+    %% Linked as well as monitored. A handler serving a long-lived
+    %% stream blocks until its connection tells it to stop, so if the
+    %% connection is killed outright (a listener `stop', say) there is
+    %% no code left to send that signal and the handler would be
+    %% orphaned, holding its subscription forever.
+    spawn_opt(
+        fun() ->
+            %% Trapping turns that link into a message. What a lost
+            %% connection means is revision-dependent, and only the
+            %% engine knows which revision is being served.
+            process_flag(trap_exit, true),
+            try
+                Handler(Proto, Conn, StreamId, Method, Path, Headers)
+            catch
+                Class:Reason:Stack ->
+                    %% A connection that went away mid-handler is not a
+                    %% crash: the exit is the listener's shutdown or the
+                    %% connection statem already gone.
+                    _ =
+                        case {Class, Reason} of
+                            {exit, shutdown} ->
+                                ok;
+                            {exit, {shutdown, _}} ->
+                                ok;
+                            {exit, {noproc, {gen_statem, call, _}}} ->
+                                ok;
+                            _ ->
+                                logger:error(
+                                    "mcp http handler crash: ~p:~p~n~p",
+                                    [Class, Reason, Stack]
+                                )
+                        end,
+                    try
+                        Proto:send_response(
+                            Conn,
+                            StreamId,
+                            500,
+                            [
+                                {<<"content-type">>, <<"text/plain">>},
+                                {<<"content-length">>, <<"21">>}
+                            ]
+                        )
+                    catch
+                        _:_ -> ok
+                    end,
+                    try
+                        Proto:send_data(
+                            Conn,
+                            StreamId,
+                            <<"Internal Server Error">>,
+                            true
+                        )
+                    catch
+                        _:_ -> ok
+                    end
+            end
+        end,
+        [link, monitor]
+    ).
 
 %% Build the engine handler fun (closes over the engine config).
 make_handler(EngineConfig) ->
@@ -551,6 +618,8 @@ read_body(StreamId, Acc) ->
         {mcp_body, StreamId, eof} ->
             {ok, Acc};
         mcp_disconnect ->
+            {error, closed};
+        {'EXIT', _Conn, _Reason} ->
             {error, closed}
     after ?BODY_TIMEOUT ->
         {error, timeout}

@@ -136,11 +136,25 @@ Each message is a single line of JSON (newline-delimited):
 
 The stdio transport supports all MCP methods:
 
-- `initialize` / `initialized` - Connection lifecycle
+- `server/discover` - Capability and version discovery
+- `initialize` / `initialized` - Connection lifecycle (legacy era)
 - `tools/list` / `tools/call` - Tool operations
 - `resources/list` / `resources/read` - Resource operations
 - `prompts/list` / `prompts/get` - Prompt operations
-- `ping` - Keep-alive
+- `ping` - Keep-alive (legacy era)
+
+### Protocol eras
+
+stdio serves both eras, decided per request exactly as HTTP does: a
+request is modern when its `params._meta` carries
+`io.modelcontextprotocol/protocolVersion`. A modern client opens with
+`server/discover` instead of `initialize`, and a client probing with
+`auto` sends it here too, then falls back to the handshake if nothing
+answers. See the [Protocol Versions guide](protocol-versions.md).
+
+`subscriptions/listen` is HTTP-only. There is no second stream to hold
+open on stdio, and a long-lived response would block the single output
+channel.
 
 ### Notifications
 

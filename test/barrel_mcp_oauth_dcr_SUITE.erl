@@ -26,10 +26,13 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
+-import(barrel_mcp_test_helpers, [wait_ready/2]).
+
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([
     dcr_then_client_credentials_unlocks_server/1,
-    registration_error_surfaces/1
+    registration_error_surfaces/1,
+    registration_names_an_application_type/1
 ]).
 
 -export([echo_tool/1]).
@@ -42,7 +45,8 @@
 all() ->
     [
         dcr_then_client_credentials_unlocks_server,
-        registration_error_surfaces
+        registration_error_surfaces,
+        registration_names_an_application_type
     ].
 
 init_per_suite(Config) ->
@@ -75,7 +79,7 @@ init_per_suite(Config) ->
         session_enabled => true,
         auth => #{
             provider => barrel_mcp_auth_bearer,
-            provider_opts => #{verifier => Verifier}
+            provider_opts => #{verifier => Verifier, audience => any}
         }
     }),
     Config.
@@ -124,7 +128,8 @@ dcr_then_client_credentials_unlocks_server(_Config) ->
             <<"client_name">> => <<"e2e-host">>,
             <<"grant_types">> => [<<"client_credentials">>],
             <<"token_endpoint_auth_method">> => <<"client_secret_basic">>
-        }
+        },
+        #{allow_insecure_oauth => true}
     ),
     ClientId = maps:get(<<"client_id">>, Info),
     ClientSecret = maps:get(<<"client_secret">>, Info),
@@ -137,6 +142,7 @@ dcr_then_client_credentials_unlocks_server(_Config) ->
         transport => {http, McpUrl},
         auth =>
             {oauth_client_credentials, #{
+                allow_insecure_oauth => true,
                 token_endpoint => <<AsBase/binary, "/oauth/token">>,
                 client_id => ClientId,
                 client_secret => ClientSecret,
@@ -172,7 +178,8 @@ registration_error_surfaces(_Config) ->
     ),
     Result = barrel_mcp_client_auth_oauth:register_client(
         <<AsBase/binary, "/oauth/register">>,
-        #{<<"client_name">> => <<"reject-me">>}
+        #{<<"client_name">> => <<"reject-me">>},
+        #{allow_insecure_oauth => true}
     ),
     ?assertMatch({error, {http_error, 400, _}}, Result),
     ok.
@@ -183,12 +190,78 @@ registration_error_surfaces(_Config) ->
 
 echo_tool(#{<<"text">> := T}) -> T.
 
+%% An OIDC server doing dynamic registration applies redirect-URI
+%% rules by application_type, and omitting it defaults to web, which
+%% rejects the loopback URIs a local client needs. So it is always
+%% sent, inferred from the redirect URIs when the caller says nothing.
+registration_names_an_application_type(_Config) ->
+    AsBase = list_to_binary(io_lib:format("http://127.0.0.1:~B", [?AS_PORT])),
+    Endpoint = <<AsBase/binary, "/oauth/register">>,
+
+    {ok, _} = barrel_mcp_client_auth_oauth:register_client(
+        Endpoint,
+        #{
+            <<"client_name">> => <<"local-cli">>,
+            <<"redirect_uris">> => [<<"http://127.0.0.1:3000/callback">>]
+        },
+        #{allow_insecure_oauth => true}
+    ),
+    ?assertEqual(
+        <<"native">>,
+        maps:get(<<"application_type">>, persistent_term:get(dcr_last_registration))
+    ),
+
+    {ok, _} = barrel_mcp_client_auth_oauth:register_client(
+        Endpoint,
+        #{
+            <<"client_name">> => <<"hosted">>,
+            <<"redirect_uris">> => [<<"https://app.example/callback">>]
+        },
+        #{allow_insecure_oauth => true}
+    ),
+    ?assertEqual(
+        <<"web">>,
+        maps:get(<<"application_type">>, persistent_term:get(dcr_last_registration))
+    ),
+
+    %% An https loopback URI is still a local client.
+    {ok, _} = barrel_mcp_client_auth_oauth:register_client(
+        Endpoint,
+        #{
+            <<"client_name">> => <<"tls-loopback">>,
+            <<"redirect_uris">> => [<<"https://localhost:3000/callback">>]
+        },
+        #{allow_insecure_oauth => true}
+    ),
+    ?assertEqual(
+        <<"native">>,
+        maps:get(<<"application_type">>, persistent_term:get(dcr_last_registration))
+    ),
+
+    %% A caller that knows better is never overridden.
+    {ok, _} = barrel_mcp_client_auth_oauth:register_client(
+        Endpoint,
+        #{
+            <<"client_name">> => <<"explicit">>,
+            <<"redirect_uris">> => [<<"http://127.0.0.1:3000/callback">>],
+            <<"application_type">> => <<"web">>
+        },
+        #{allow_insecure_oauth => true}
+    ),
+    ?assertEqual(
+        <<"web">>,
+        maps:get(<<"application_type">>, persistent_term:get(dcr_last_registration))
+    ),
+    ok.
+
 %%====================================================================
 %% Mock: registration + token endpoints
 %%====================================================================
 
 handle(#{path := <<"/oauth/register">>, body := Body}) ->
     Metadata = json:decode(Body),
+    %% Echoed back so a test can see what the client actually sent.
+    _ = persistent_term:put(dcr_last_registration, Metadata),
     case maps:get(<<"client_name">>, Metadata, <<>>) of
         <<"reject-me">> ->
             {400, json_ct(), json_encode(#{<<"error">> => <<"invalid_redirect_uri">>})};
@@ -224,20 +297,3 @@ json_encode(M) -> iolist_to_binary(json:encode(M)).
 %%====================================================================
 %% Helpers
 %%====================================================================
-
-wait_ready(_Pid, 0) ->
-    {error, not_ready};
-wait_ready(Pid, N) ->
-    case
-        (try
-            barrel_mcp_client:server_capabilities(Pid)
-        catch
-            _:_ -> error
-        end)
-    of
-        {ok, _} ->
-            ok;
-        _ ->
-            timer:sleep(100),
-            wait_ready(Pid, N - 1)
-    end.

@@ -6,6 +6,8 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
+-import(barrel_mcp_test_helpers, [wait_ready/2]).
+
 -export([slow_handler/1]).
 
 -define(PORT, 19393).
@@ -84,6 +86,9 @@ start_client(Extras) ->
     Spec = maps:merge(
         #{
             transport => {http, ?URL},
+            %% ping is a handshake-era method, so pin the era it
+            %% belongs to rather than probing into one without it.
+            protocol_version => <<"2025-11-25">>,
             handler => {barrel_mcp_client_handler_default, []}
         },
         Extras
@@ -91,23 +96,6 @@ start_client(Extras) ->
     {ok, Pid} = barrel_mcp_client:start(Spec),
     wait_ready(Pid, 30),
     {ok, Pid}.
-
-wait_ready(_Pid, 0) ->
-    error(client_not_ready);
-wait_ready(Pid, N) ->
-    case
-        (try
-            barrel_mcp_client:server_capabilities(Pid)
-        catch
-            _:_ -> error
-        end)
-    of
-        {ok, _} ->
-            ok;
-        _ ->
-            timer:sleep(100),
-            wait_ready(Pid, N - 1)
-    end.
 
 %% slow tool handler — gives the test time to inspect the progress
 %% map before the response settles.
@@ -139,7 +127,9 @@ wait_progress_absent(Pid, Tok, N) ->
 
 progress_map(Pid) ->
     {_State, Data} = sys:get_state(Pid),
-    %% data record: progress is the 9th field (1-based: 1=record_tag,
+    %% data record: progress is the 10th element (1-based: 1=record_tag,
     %% 2=spec, 3=transport, 4=request_id, 5=pending, 6=handler_mod,
     %% 7=handler_state, 8=async_replies, 9=subscriptions, 10=progress).
+    %% This layout is load-bearing: new fields go at the end of the
+    %% record, or this reads the wrong one.
     element(10, Data).

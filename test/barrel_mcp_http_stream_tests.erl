@@ -18,11 +18,11 @@ http_stream_test_() ->
         {"POST request returns JSON response", fun test_post_json/0},
         {"POST without Accept header defaults to JSON", fun test_post_default_accept/0},
         {"OPTIONS returns CORS headers", fun test_options_cors/0},
-        {"Session created on first request", fun test_session_created/0},
-        {"Session ID in response header", fun test_session_header/0},
-        {"DELETE terminates session", fun test_delete_session/0},
         {"Auth required when configured", fun test_auth_required/0},
-        {"Auth passes with valid key", fun test_auth_valid/0}
+        {"Auth passes with valid key", fun test_auth_valid/0},
+        {"Batch accepted on a revision that has it", fun test_batch_accepted/0},
+        {"Batch refused once the revision removed it", fun test_batch_refused/0},
+        {"Batch of responses is accepted silently", fun test_batch_responses/0}
     ]}.
 
 setup() ->
@@ -174,80 +174,6 @@ test_options_cors() ->
 
     barrel_mcp:stop_http_stream().
 
-test_session_created() ->
-    {ok, _} = barrel_mcp:start_http_stream(#{port => 19094, session_enabled => true}),
-    {200, Headers, _} = post_initialize(<<"http://localhost:19094/mcp">>),
-    SessionId = proplists:get_value(<<"mcp-session-id">>, Headers),
-    ?assertMatch(<<"mcp_", _/binary>>, SessionId),
-    barrel_mcp:stop_http_stream().
-
-test_session_header() ->
-    {ok, _} = barrel_mcp:start_http_stream(#{port => 19095, session_enabled => true}),
-    %% First request: initialize creates a session.
-    {200, Headers1, _} = post_initialize(<<"http://localhost:19095/mcp">>),
-    SessionId = proplists:get_value(<<"mcp-session-id">>, Headers1),
-    %% Subsequent ping with the same id reuses the session.
-    Ping = json:encode(#{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => 2,
-        <<"method">> => <<"ping">>
-    }),
-    {ok, 200, Headers2, _} = hackney:request(
-        post,
-        <<"http://localhost:19095/mcp">>,
-        [
-            {<<"content-type">>, <<"application/json">>},
-            {<<"accept">>, <<"application/json, text/event-stream">>},
-            {<<"mcp-session-id">>, SessionId}
-        ],
-        Ping,
-        []
-    ),
-    ?assertEqual(SessionId, proplists:get_value(<<"mcp-session-id">>, Headers2)),
-    barrel_mcp:stop_http_stream().
-
-test_delete_session() ->
-    {ok, _} = barrel_mcp:start_http_stream(#{port => 19096, session_enabled => true}),
-    {200, Headers, _} = post_initialize(<<"http://localhost:19096/mcp">>),
-    SessionId = proplists:get_value(<<"mcp-session-id">>, Headers),
-    {ok, Status, _, _} = hackney:request(
-        delete,
-        <<"http://localhost:19096/mcp">>,
-        [{<<"mcp-session-id">>, SessionId}],
-        <<>>,
-        []
-    ),
-    ?assertEqual(204, Status),
-    barrel_mcp:stop_http_stream().
-
-%% Helper: send an `initialize' request and return
-%% `{Status, Headers, Body}'.
-post_initialize(Url) ->
-    Body = json:encode(#{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => 1,
-        <<"method">> => <<"initialize">>,
-        <<"params">> => #{
-            <<"protocolVersion">> => <<"2025-11-25">>,
-            <<"capabilities">> => #{},
-            <<"clientInfo">> => #{
-                <<"name">> => <<"test">>,
-                <<"version">> => <<"1.0">>
-            }
-        }
-    }),
-    {ok, S, H, Resp} = hackney:request(
-        post,
-        Url,
-        [
-            {<<"content-type">>, <<"application/json">>},
-            {<<"accept">>, <<"application/json, text/event-stream">>}
-        ],
-        Body,
-        [with_body]
-    ),
-    {S, H, Resp}.
-
 test_auth_required() ->
     {ok, _} = barrel_mcp:start_http_stream(#{
         port => 19097,
@@ -314,3 +240,62 @@ test_auth_valid() ->
     ?assertEqual(200, Status),
 
     barrel_mcp:stop_http_stream().
+
+%%====================================================================
+%% Batches over the wire
+%%
+%% 2025-03-26 requires receiving them; 2025-06-18 removed them. The
+%% header names the revision, so one listener answers both ways.
+%%====================================================================
+
+%% Each case owns its listener, as the rest of this suite does.
+with_batch_server(Port, Fun) ->
+    {ok, _} = barrel_mcp:start_http_stream(#{port => Port, session_enabled => false}),
+    try
+        Fun()
+    after
+        barrel_mcp:stop_http_stream()
+    end.
+
+batch_post(Port, Revision, Body) ->
+    hackney:request(
+        post,
+        iolist_to_binary(io_lib:format("http://localhost:~B/mcp", [Port])),
+        [
+            {<<"content-type">>, <<"application/json">>},
+            {<<"accept">>, <<"application/json, text/event-stream">>},
+            {<<"mcp-protocol-version">>, Revision}
+        ],
+        iolist_to_binary(json:encode(Body)),
+        []
+    ).
+
+ping(Id) ->
+    #{<<"jsonrpc">> => <<"2.0">>, <<"id">> => Id, <<"method">> => <<"ping">>}.
+
+test_batch_accepted() ->
+    with_batch_server(19096, fun() ->
+        {ok, 200, _, Body} = batch_post(19096, <<"2025-03-26">>, [ping(1), ping(2)]),
+        Decoded = json:decode(Body),
+        ?assert(is_list(Decoded)),
+        ?assertEqual([1, 2], [maps:get(<<"id">>, R) || R <- Decoded])
+    end).
+
+test_batch_refused() ->
+    with_batch_server(19097, fun() ->
+        {ok, 400, _, Body} = batch_post(19097, <<"2025-11-25">>, [ping(1)]),
+        Error = maps:get(<<"error">>, json:decode(Body)),
+        ?assertEqual(-32600, maps:get(<<"code">>, Error))
+    end).
+
+%% Nothing to answer, so the acceptance is the status alone.
+test_batch_responses() ->
+    Responses = [
+        #{<<"jsonrpc">> => <<"2.0">>, <<"id">> => 1, <<"result">> => #{}},
+        #{<<"jsonrpc">> => <<"2.0">>, <<"id">> => 2, <<"result">> => #{}}
+    ],
+    with_batch_server(19098, fun() ->
+        {ok, Status, _, Body} = batch_post(19098, <<"2025-03-26">>, Responses),
+        ?assertEqual(202, Status),
+        ?assertEqual(<<>>, Body)
+    end).

@@ -8,6 +8,8 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
+-import(barrel_mcp_test_helpers, [url/1]).
+
 -export([
     all/0,
     init_per_suite/1,
@@ -19,7 +21,8 @@
     cancel_returns_empty_body/1,
     progress_emits_events/1,
     tool_error_returns_isError/1,
-    auth_info_passed_to_tool/1
+    auth_info_passed_to_tool/1,
+    unknown_tool_leaves_the_session_usable/1
 ]).
 
 %% Tool handlers used by the suite.
@@ -32,7 +35,8 @@ all() ->
         cancel_returns_empty_body,
         progress_emits_events,
         tool_error_returns_isError,
-        auth_info_passed_to_tool
+        auth_info_passed_to_tool,
+        unknown_tool_leaves_the_session_usable
     ].
 
 init_per_suite(Config) ->
@@ -172,14 +176,20 @@ progress_emits_events(Config) ->
         Body,
         [with_body]
     ),
-    Resp = json:decode(RespBody),
+    Resp = final_envelope(RespBody),
     ?assertEqual(11, maps:get(<<"id">>, Resp)),
     ?assert(maps:is_key(<<"result">>, Resp)),
 
-    %% Drain progress events from the SSE collector. Three are
-    %% expected before the run completes; the response above already
-    %% returned, so the events are buffered in the collector mailbox.
-    Events = collect_progress(3, []),
+    %% Progress rides the call's own response stream, as the reference
+    %% server routes it (related_request_id): three events precede the
+    %% result there, and none reach the standalone GET stream.
+    {Datas, _} = split_sse(<<RespBody/binary, "\n\n">>),
+    Events = [
+        E
+     || D <- Datas,
+        E <- [json:decode(D)],
+        maps:get(<<"method">>, E, <<>>) =:= <<"notifications/progress">>
+    ],
     ?assertEqual(3, length(Events)),
     [E1 | _] = Events,
     ?assertEqual(<<"notifications/progress">>, maps:get(<<"method">>, E1)),
@@ -216,7 +226,7 @@ tool_error_returns_isError(Config) ->
         Body,
         [with_body]
     ),
-    Resp = json:decode(RB),
+    Resp = final_envelope(RB),
     Result = maps:get(<<"result">>, Resp),
     ?assertEqual(true, maps:get(<<"isError">>, Result)),
     [Block | _] = maps:get(<<"content">>, Result),
@@ -264,7 +274,7 @@ auth_info_passed_to_tool(Config) ->
         Body,
         [with_body]
     ),
-    Resp = json:decode(RB),
+    Resp = final_envelope(RB),
     Result = maps:get(<<"result">>, Resp),
     [Block | _] = maps:get(<<"content">>, Result),
     ?assertEqual(<<"user1">>, maps:get(<<"text">>, Block)),
@@ -308,9 +318,6 @@ whoami_tool(_Args, Ctx) ->
 %%====================================================================
 %% Helpers
 %%====================================================================
-
-url(Port) ->
-    iolist_to_binary(io_lib:format("http://127.0.0.1:~B/mcp", [Port])).
 
 post_init(Port) ->
     Body = json:encode(#{
@@ -444,17 +451,53 @@ extract_data(Block) ->
         [D | _] -> D
     end.
 
-collect_progress(0, Acc) ->
-    lists:reverse(Acc);
-collect_progress(N, Acc) ->
-    receive
-        {progress, Msg} ->
-            case maps:get(<<"method">>, Msg, <<>>) of
-                <<"notifications/progress">> ->
-                    collect_progress(N - 1, [Msg | Acc]);
-                _ ->
-                    collect_progress(N, Acc)
-            end
-    after 5000 ->
-        lists:reverse(Acc)
+%%====================================================================
+%% No worker
+%%====================================================================
+
+%% A tool that cannot be started has no pid, so nothing is recorded as
+%% in flight. The error still reaches the caller and the session is
+%% still good for the next call.
+unknown_tool_leaves_the_session_usable(Config) ->
+    Port = ?config(port, Config),
+    {ok, _} = barrel_mcp:start_http_stream(#{
+        port => Port,
+        session_enabled => true
+    }),
+    ok = barrel_mcp_registry:reg(tool, <<"present">>, ?MODULE, error_tool, #{}),
+    {200, IH, _} = post_init(Port),
+    SessionId = proplists:get_value(<<"mcp-session-id">>, IH),
+    Missing = call(Port, SessionId, tool_call_body(<<"absent">>, 31)),
+    %% An error result, as the reference implementation answers, not a
+    %% protocol error.
+    #{<<"result">> := #{<<"isError">> := true, <<"content">> := [Block]}} = Missing,
+    ?assertEqual(<<"Unknown tool: absent">>, maps:get(<<"text">>, Block)),
+    Present = call(Port, SessionId, tool_call_body(<<"present">>, 32)),
+    ?assertMatch(#{<<"result">> := _}, Present),
+    ok = barrel_mcp_registry:unreg(tool, <<"present">>),
+    ok.
+
+%% The final JSON-RPC envelope of a response, whether it came back as a
+%% JSON body or as the last event of an SSE stream.
+final_envelope(RB) ->
+    case binary:match(RB, <<"data: ">>) of
+        nomatch ->
+            final_envelope(RB);
+        _ ->
+            {Events, _} = split_sse(<<RB/binary, "\n\n">>),
+            json:decode(lists:last(Events))
     end.
+
+call(Port, SessionId, Body) ->
+    {ok, 200, _, RB} = hackney:request(
+        post,
+        url(Port),
+        [
+            {<<"content-type">>, <<"application/json">>},
+            {<<"accept">>, <<"application/json, text/event-stream">>},
+            {<<"mcp-session-id">>, SessionId}
+        ],
+        Body,
+        [with_body]
+    ),
+    final_envelope(RB).

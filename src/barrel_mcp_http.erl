@@ -42,34 +42,39 @@ start(Opts) ->
         {error, _} = Err ->
             Err;
         {ok, AllowedOrigins} ->
-            AllowMissing = maps:get(allow_missing_origin, Opts, Loopback),
-            ResourceMetadata = barrel_mcp_http_engine:normalize_resource_metadata(
-                maps:get(resource_metadata, Opts, undefined)
-            ),
-            AuthConfig0 = barrel_mcp_http_engine:init_auth(
-                maps:get(auth, Opts, #{})
-            ),
-            AuthConfig = barrel_mcp_http_engine:inject_resource_metadata_url(
-                AuthConfig0, ResourceMetadata
-            ),
-            EngineConfig = #{
-                mode => simple,
-                auth_config => AuthConfig,
-                allowed_origins => AllowedOrigins,
-                allow_missing_origin => AllowMissing,
-                resource_metadata => ResourceMetadata
-            },
-            ListenOpts = maps:merge(
-                #{port => Port, ip => Ip, ssl => normalize_ssl(Opts)},
-                maps:with([max_connections, acceptors], Opts)
-            ),
-            barrel_mcp_http_listener:start(?HTTP_LISTENER, ListenOpts, EngineConfig)
+            case barrel_mcp_http_engine:init_auth(maps:get(auth, Opts, #{})) of
+                {ok, AuthConfig0} ->
+                    start_listener(Opts, Port, Ip, Loopback, AllowedOrigins, AuthConfig0);
+                {error, _} = Err ->
+                    Err
+            end
     end.
+
+start_listener(Opts, Port, Ip, Loopback, AllowedOrigins, AuthConfig0) ->
+    AllowMissing = maps:get(allow_missing_origin, Opts, Loopback),
+    ResourceMetadata = barrel_mcp_http_engine:normalize_resource_metadata(
+        maps:get(resource_metadata, Opts, undefined)
+    ),
+    AuthConfig = barrel_mcp_http_engine:inject_resource_metadata_url(
+        AuthConfig0, ResourceMetadata
+    ),
+    EngineConfig = #{
+        mode => simple,
+        auth_config => AuthConfig,
+        allowed_origins => AllowedOrigins,
+        allow_missing_origin => AllowMissing,
+        resource_metadata => ResourceMetadata
+    },
+    ListenOpts = maps:merge(
+        #{port => Port, ip => Ip, ssl => normalize_ssl(Opts)},
+        maps:with([max_connections, acceptors], Opts)
+    ),
+    barrel_mcp_listener_sup:start_listener(?HTTP_LISTENER, ListenOpts, EngineConfig).
 
 %% @doc Stop the simple HTTP server.
 -spec stop() -> ok | {error, not_found}.
 stop() ->
-    barrel_mcp_http_listener:stop(?HTTP_LISTENER).
+    barrel_mcp_listener_sup:stop_listener(?HTTP_LISTENER).
 
 normalize_ssl(Opts) ->
     case maps:get(ssl, Opts, undefined) of

@@ -24,6 +24,8 @@
     cleanup_expired/1,
     %% Capability tracking (set during MCP `initialize').
     set_client_capabilities/2,
+    set_principal/2,
+    get_principal/1,
     has_sampling/1,
     list_sampling_capable/0,
     has_elicitation/1,
@@ -49,10 +51,11 @@
     sampling_create_message/3,
     elicit_create/3,
     roots_list/2,
-    deliver_response/2,
+    deliver_response/3,
     %% Server -> client notifications.
     broadcast_list_changed/1,
     notify_progress/4,
+    send_notification/3,
     %% In-flight tool tracking (used by `notifications/cancelled').
     record_in_flight/4,
     cancel_in_flight/2,
@@ -92,7 +95,11 @@
     %% Per-session log level set by `logging/setLevel'. Default
     %% `info' per the MCP spec. Filters `notifications/message' on
     %% emit.
-    log_level = info :: log_level()
+    log_level = info :: log_level(),
+    %% Who opened this session. The 2024-11-05 transport hands out an
+    %% endpoint URL and has to check that whoever posts to it is the
+    %% same caller.
+    principal = anonymous :: term()
 }).
 
 -type log_level() ::
@@ -115,7 +122,7 @@
 
 -record(pending, {
     id :: binary(),
-    session_id :: binary(),
+    session_id :: binary() | undefined,
     caller :: pid(),
     caller_ref :: reference(),
     expires_at :: integer(),
@@ -184,6 +191,19 @@ list() ->
 set_client_capabilities(SessionId, Capabilities) when is_map(Capabilities) ->
     gen_server:call(?MODULE, {set_client_capabilities, SessionId, Capabilities}).
 
+%% @doc Record who opened a session.
+-spec set_principal(binary(), term()) -> ok | {error, not_found}.
+set_principal(SessionId, Principal) ->
+    gen_server:call(?MODULE, {set_principal, SessionId, Principal}).
+
+%% @doc Who opened a session.
+-spec get_principal(binary()) -> {ok, term()} | {error, not_found}.
+get_principal(SessionId) ->
+    case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, #mcp_session{principal = P}}] -> {ok, P};
+        [] -> {error, not_found}
+    end.
+
 %% @doc Record the negotiated protocol version on a session. Called
 %% by the HTTP transport after a successful `initialize' so later
 %% requests on the same session can fall back to it when the client
@@ -199,7 +219,7 @@ get_protocol_version(SessionId) ->
         [{_, #mcp_session{protocol_version = V}}] when is_binary(V) ->
             {ok, V};
         [{_, _}] ->
-            {ok, ?MCP_PROTOCOL_VERSION};
+            {ok, ?MCP_LATEST_LEGACY_VERSION};
         [] ->
             {error, not_found}
     end.
@@ -399,7 +419,7 @@ sampling_create_message(SessionId, Params, Opts) ->
         false ->
             {error, not_supported};
         true ->
-            case get_sse_pid(SessionId) of
+            case channel(SessionId, Opts) of
                 {error, _} = E -> E;
                 {ok, Pid} -> do_sampling(SessionId, Pid, Params, Opts)
             end
@@ -416,7 +436,7 @@ elicit_create(SessionId, Params, Opts) ->
         false ->
             {error, not_supported};
         true ->
-            case get_sse_pid(SessionId) of
+            case channel(SessionId, Opts) of
                 {error, _} = E -> E;
                 {ok, Pid} -> do_elicit(SessionId, Pid, Params, Opts)
             end
@@ -433,18 +453,31 @@ roots_list(SessionId, Opts) ->
         false ->
             {error, not_supported};
         true ->
-            case get_sse_pid(SessionId) of
+            case channel(SessionId, Opts) of
                 {error, _} = E -> E;
                 {ok, Pid} -> do_roots_list(SessionId, Pid, Opts)
             end
     end.
 
+%% The channel a server request goes out on: the originating request's
+%% own stream when the caller names one in `Opts', the session's
+%% standalone GET stream otherwise. That is the reference server's
+%% related_request_id routing (mcp/server/streamable_http.py:1009).
+channel(SessionId, Opts) ->
+    case maps:get(channel, Opts, undefined) of
+        Pid when is_pid(Pid) -> {ok, Pid};
+        _ -> get_sse_pid(SessionId)
+    end.
+
 %% @doc Deliver a JSON-RPC response from the client back to the waiting
 %% caller. Called by the HTTP handler when an inbound POST contains a
 %% `result' or `error' for a server-initiated id.
--spec deliver_response(binary() | integer(), map()) -> ok | {error, unknown_id}.
-deliver_response(Id, Response) ->
-    gen_server:call(?MODULE, {deliver_response, id_to_binary(Id), Response}).
+%% The pending row is matched on the session as well as the id, so a
+%% response posted on another session cannot answer this caller.
+-spec deliver_response(binary() | undefined, binary() | integer(), map()) ->
+    ok | {error, unknown_id}.
+deliver_response(SessionId, Id, Response) ->
+    gen_server:call(?MODULE, {deliver_response, SessionId, id_to_binary(Id), Response}).
 
 %% @doc Push a `notifications/<kind>/list_changed' envelope to every
 %% session that has an active SSE channel. Tolerates a missing
@@ -554,6 +587,23 @@ collect_after(Buf, LastId) ->
 set_sse_buffer_max(SessionId, Max) when is_integer(Max), Max > 0 ->
     gen_server:call(?MODULE, {set_sse_buffer_max, SessionId, Max}).
 
+%% @doc Push one notification to a single session over its SSE channel.
+%% Dropped when that session has no channel open.
+-spec send_notification(binary(), binary(), map()) -> ok.
+send_notification(SessionId, Method, Params) ->
+    case get_sse_pid(SessionId) of
+        {ok, Pid} ->
+            Pid !
+                {sse_send_message, #{
+                    <<"jsonrpc">> => <<"2.0">>,
+                    <<"method">> => Method,
+                    <<"params">> => Params
+                }},
+            ok;
+        _ ->
+            ok
+    end.
+
 %% @doc Push a `notifications/progress' envelope to a specific
 %% session over its SSE channel. `Token' is the progressToken the
 %% client supplied on the originating request.
@@ -592,8 +642,10 @@ cleanup_expired(TTL) ->
 trim(List, Max) when length(List) =< Max -> List;
 trim(List, Max) -> lists:sublist(List, Max).
 
-%% Inline session delete, only called from inside the gen_server.
-delete_inline(SessionId) ->
+%% A session owns rows in three other tables and none of them are keyed
+%% by anything that expires on its own, so everything it owns goes with
+%% it. Only called from inside the gen_server.
+purge_session(SessionId) ->
     case ets:lookup(?SESSION_TABLE, SessionId) of
         [{_, #mcp_session{sse_pid = Pid}}] when is_pid(Pid) ->
             Pid ! session_terminated;
@@ -601,7 +653,49 @@ delete_inline(SessionId) ->
             ok
     end,
     true = ets:delete(?SESSION_TABLE, SessionId),
+    true = ets:match_delete(?SUBSCRIPTIONS_TABLE, {{SessionId, '_'}}),
+    true = ets:match_delete(?INFLIGHT_TABLE, {{SessionId, '_'}, '_'}),
+    ok = fail_pending(SessionId),
+    %% Its elicitations have nowhere left to deliver a completion.
+    _ = barrel_mcp_elicitation:forget_session(SessionId),
     ok.
+
+%% A row is normally removed by the caller's own `after Timeout', which
+%% never runs when the transport killed the caller first. The grace
+%% margin keeps this off that race, so a caller still waiting reports
+%% `timeout' rather than an error it never saw.
+sweep_pending() ->
+    Cutoff = erlang:system_time(millisecond) - ?CLEANUP_INTERVAL,
+    Stale = ets:foldl(
+        fun
+            ({Key, #pending{expires_at = Exp}}, Acc) when Exp < Cutoff -> [Key | Acc];
+            (_, Acc) -> Acc
+        end,
+        [],
+        ?PENDING_TABLE
+    ),
+    lists:foreach(fun(Key) -> ets:delete(?PENDING_TABLE, Key) end, Stale),
+    ok.
+
+%% A caller blocked on `sampling/createMessage' or `elicitation/create'
+%% would otherwise sit out its whole timeout waiting for a client that
+%% is already gone. The shape is the one its own receive expects.
+fail_pending(SessionId) ->
+    Rows = ets:foldl(
+        fun
+            ({_, #pending{session_id = Sid}} = Row, Acc) when Sid =:= SessionId -> [Row | Acc];
+            (_, Acc) -> Acc
+        end,
+        [],
+        ?PENDING_TABLE
+    ),
+    lists:foreach(
+        fun({Key, #pending{caller = Caller, caller_ref = Ref, tag = Tag}}) ->
+            true = ets:delete(?PENDING_TABLE, Key),
+            Caller ! {Tag, Ref, #{<<"error">> => #{<<"message">> => <<"Session closed">>}}}
+        end,
+        Rows
+    ).
 
 %%====================================================================
 %% gen_server callbacks
@@ -644,14 +738,20 @@ handle_call({update_activity, SessionId}, _From, State) ->
         end,
     {reply, Reply, State};
 handle_call({delete, SessionId}, _From, State) ->
-    case ets:lookup(?SESSION_TABLE, SessionId) of
-        [{_, #mcp_session{sse_pid = Pid}}] when is_pid(Pid) ->
-            Pid ! session_terminated;
-        _ ->
-            ok
-    end,
-    true = ets:delete(?SESSION_TABLE, SessionId),
+    ok = purge_session(SessionId),
     {reply, ok, State};
+handle_call({set_principal, SessionId, Principal}, _From, State) ->
+    Reply =
+        case ets:lookup(?SESSION_TABLE, SessionId) of
+            [{_, Session}] ->
+                true = ets:insert(
+                    ?SESSION_TABLE, {SessionId, Session#mcp_session{principal = Principal}}
+                ),
+                ok;
+            [] ->
+                {error, not_found}
+        end,
+    {reply, Reply, State};
 handle_call({set_client_capabilities, SessionId, Caps}, _From, State) ->
     Reply =
         case ets:lookup(?SESSION_TABLE, SessionId) of
@@ -708,14 +808,14 @@ handle_call({register_pending, RequestId, Pending}, _From, State) ->
 handle_call({discard_pending, RequestId}, _From, State) ->
     true = ets:delete(?PENDING_TABLE, RequestId),
     {reply, ok, State};
-handle_call({deliver_response, Key, Response}, _From, State) ->
+handle_call({deliver_response, SessionId, Key, Response}, _From, State) ->
     Reply =
         case ets:lookup(?PENDING_TABLE, Key) of
-            [{_, #pending{caller = Caller, caller_ref = Ref, tag = Tag}}] ->
+            [{_, #pending{session_id = SessionId, caller = Caller, caller_ref = Ref, tag = Tag}}] ->
                 true = ets:delete(?PENDING_TABLE, Key),
                 Caller ! {Tag, Ref, Response},
                 ok;
-            [] ->
+            _ ->
                 {error, unknown_id}
         end,
     {reply, Reply, State};
@@ -796,7 +896,7 @@ handle_call({cleanup_expired, TTL}, _From, State) ->
         [],
         ?SESSION_TABLE
     ),
-    lists:foreach(fun delete_inline/1, Expired),
+    lists:foreach(fun purge_session/1, Expired),
     {reply, length(Expired), State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
@@ -806,8 +906,9 @@ handle_cast(_Msg, State) ->
 
 handle_info(cleanup, State) ->
     %% Inline the cleanup. We can't call the public `cleanup_expired/1'
-    %% because it goes through `gen_server:call(?MODULE, …)' — a
+    %% because it goes through `gen_server:call(?MODULE, ...)', a
     %% self-call that would deadlock.
+    ok = sweep_pending(),
     TTL = application:get_env(barrel_mcp, session_ttl, 1800000),
     Now = erlang:system_time(millisecond),
     Cutoff = Now - TTL,
@@ -823,7 +924,7 @@ handle_info(cleanup, State) ->
         [],
         ?SESSION_TABLE
     ),
-    lists:foreach(fun delete_inline/1, Expired),
+    lists:foreach(fun purge_session/1, Expired),
     case Expired of
         [] ->
             ok;
@@ -922,73 +1023,38 @@ ensure_inflight_table() ->
     end.
 
 do_sampling(SessionId, SsePid, Params, Opts) ->
-    Timeout = maps:get(timeout_ms, Opts, ?DEFAULT_SAMPLING_TIMEOUT),
-    RequestId = generate_request_id(<<"sampling-">>),
-    Ref = make_ref(),
-    ok = gen_server:call(
-        ?MODULE,
-        {register_pending, RequestId, #pending{
-            id = RequestId,
-            session_id = SessionId,
-            caller = self(),
-            caller_ref = Ref,
-            expires_at = erlang:system_time(millisecond) + Timeout,
-            tag = sampling_response
-        }}
-    ),
-    Request = #{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => RequestId,
-        <<"method">> => <<"sampling/createMessage">>,
-        <<"params">> => Params
-    },
-    SsePid ! {sse_send_message, Request},
-    receive
-        {sampling_response, Ref, #{<<"result">> := Result} = R} ->
-            Usage = maps:get(<<"usage">>, Result, maps:get(usage, R, #{})),
+    case ask_client(sampling, SessionId, SsePid, Params, Opts) of
+        {ok, Result, Response} ->
+            Usage = maps:get(<<"usage">>, Result, maps:get(usage, Response, #{})),
             {ok, Result, Usage};
-        {sampling_response, Ref, #{<<"error">> := Err}} ->
-            {error, {client_error, Err}}
-    after Timeout ->
-        _ = gen_server:call(?MODULE, {discard_pending, RequestId}),
-        {error, timeout}
+        {error, _} = Err ->
+            Err
     end.
 
 do_elicit(SessionId, SsePid, Params, Opts) ->
-    Timeout = maps:get(timeout_ms, Opts, ?DEFAULT_SAMPLING_TIMEOUT),
-    RequestId = generate_request_id(<<"elicit-">>),
-    Ref = make_ref(),
-    ok = gen_server:call(
-        ?MODULE,
-        {register_pending, RequestId, #pending{
-            id = RequestId,
-            session_id = SessionId,
-            caller = self(),
-            caller_ref = Ref,
-            expires_at = erlang:system_time(millisecond) + Timeout,
-            tag = elicitation_response
-        }}
-    ),
-    Request = #{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => RequestId,
-        <<"method">> => <<"elicitation/create">>,
-        <<"params">> => Params
-    },
-    SsePid ! {sse_send_message, Request},
-    receive
-        {elicitation_response, Ref, #{<<"result">> := Result}} ->
-            {ok, Result};
-        {elicitation_response, Ref, #{<<"error">> := Err}} ->
-            {error, {client_error, Err}}
-    after Timeout ->
-        _ = gen_server:call(?MODULE, {discard_pending, RequestId}),
-        {error, timeout}
+    case ask_client(elicit, SessionId, SsePid, Params, Opts) of
+        {ok, Result, _Response} -> {ok, Result};
+        {error, _} = Err -> Err
     end.
 
 do_roots_list(SessionId, SsePid, Opts) ->
+    case ask_client(roots, SessionId, SsePid, #{}, Opts) of
+        {ok, Result, _Response} -> {ok, maps:get(<<"roots">>, Result, [])};
+        {error, _} = Err -> Err
+    end.
+
+request_spec(sampling) -> {<<"sampling-">>, <<"sampling/createMessage">>, sampling_response};
+request_spec(elicit) -> {<<"elicit-">>, <<"elicitation/create">>, elicitation_response};
+request_spec(roots) -> {<<"roots-">>, <<"roots/list">>, roots_response}.
+
+%% One server-to-client request and the wait for its answer. The pending
+%% row is what lets a response arriving on another connection find this
+%% caller, and what `purge_session/1' uses to fail it when the client
+%% goes; both depend on the reply shape matched here.
+ask_client(Kind, SessionId, SsePid, Params, Opts) ->
+    {Prefix, Method, Tag} = request_spec(Kind),
     Timeout = maps:get(timeout_ms, Opts, ?DEFAULT_SAMPLING_TIMEOUT),
-    RequestId = generate_request_id(<<"roots-">>),
+    RequestId = generate_request_id(Prefix),
     Ref = make_ref(),
     ok = gen_server:call(
         ?MODULE,
@@ -998,21 +1064,20 @@ do_roots_list(SessionId, SsePid, Opts) ->
             caller = self(),
             caller_ref = Ref,
             expires_at = erlang:system_time(millisecond) + Timeout,
-            tag = roots_response
+            tag = Tag
         }}
     ),
-    Request = #{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => RequestId,
-        <<"method">> => <<"roots/list">>,
-        <<"params">> => #{}
-    },
-    SsePid ! {sse_send_message, Request},
+    SsePid !
+        {sse_send_message, #{
+            <<"jsonrpc">> => <<"2.0">>,
+            <<"id">> => RequestId,
+            <<"method">> => Method,
+            <<"params">> => Params
+        }},
     receive
-        {roots_response, Ref, #{<<"result">> := Result}} ->
-            Roots = maps:get(<<"roots">>, Result, []),
-            {ok, Roots};
-        {roots_response, Ref, #{<<"error">> := Err}} ->
+        {Tag, Ref, #{<<"result">> := Result} = Response} ->
+            {ok, Result, Response};
+        {Tag, Ref, #{<<"error">> := Err}} ->
             {error, {client_error, Err}}
     after Timeout ->
         _ = gen_server:call(?MODULE, {discard_pending, RequestId}),

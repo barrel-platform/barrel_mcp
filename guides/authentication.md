@@ -34,7 +34,9 @@ barrel_mcp:start_http(#{
             %% Optional: Validate issuer claim
             issuer => <<"https://auth.example.com">>,
 
-            %% Optional: Validate audience claim
+            %% Required: the resource this server is. Tokens issued for
+            %% another audience are rejected. `any` opts out (noncompliant)
+            %% for a verifier that checks the recipient itself.
             audience => <<"https://api.example.com">>,
 
             %% Optional: Clock skew tolerance in seconds (default: 60)
@@ -71,7 +73,7 @@ barrel_mcp:start_http(#{
     port => 9090,
     auth => #{
         provider => barrel_mcp_auth_bearer,
-        provider_opts => #{verifier => Verifier}
+        provider_opts => #{verifier => Verifier, audience => any}
     }
 }).
 ```
@@ -104,7 +106,7 @@ barrel_mcp:start_http(#{
     port => 9090,
     auth => #{
         provider => barrel_mcp_auth_bearer,
-        provider_opts => #{verifier => Verifier}
+        provider_opts => #{verifier => Verifier, audience => any}
     }
 }).
 ```
@@ -215,7 +217,7 @@ barrel_mcp:start_http(#{
     port => 9090,
     auth => #{
         provider => barrel_mcp_auth_apikey,
-        provider_opts => #{verifier => Verifier}
+        provider_opts => #{verifier => Verifier, audience => any}
     }
 }).
 ```
@@ -420,6 +422,47 @@ User    Host                   AS                  MCP server
  │   │       (on 401: refresh_token grant)              │
 ```
 
+The handle runs the flow from the first 401. You supply the one step
+only a host can do, sending the person to the authorization URL and
+handing back the URL they were redirected to:
+
+```erlang
+auth => {oauth, #{
+    redirect_uri => <<"http://127.0.0.1:8765/callback">>,
+    authorize => fun(AuthorizationUrl) ->
+        %% Open the URL in a browser, run a listener on the redirect
+        %% URI, and return the full callback URL it received.
+        {ok, my_host:await_callback(AuthorizationUrl)}
+    end,
+    scopes => [<<"mcp.read">>, <<"mcp.write">>],
+    %% Optional. Without a client_id the handle uses a Client ID
+    %% Metadata Document when the server supports it, else dynamic
+    %% registration with `client_metadata`.
+    client_id => <<"...">>,
+    client_secret => <<"...">>,
+    token_endpoint_auth_method => client_secret_basic,
+    %% Optional persistence of the registered client and the tokens.
+    store => {my_token_store, Arg}
+}}
+```
+
+From that 401 the handle discovers the protected resource and its
+authorization server (validating issuer, PKCE support and HTTPS),
+picks the client identity, builds the PKCE authorization URL, calls
+`authorize`, checks the callback (redirect URI, `state`, `iss`),
+exchanges the code, and retries the request. Later 401s refresh; a
+403 `insufficient_scope` re-authorizes with the union of scopes; a
+change of authorization server discards the stored client and
+registers again. The transport runs all of it in a worker, so a
+person taking a minute to consent blocks nothing.
+
+`store` is a module implementing `barrel_mcp_client_auth_store`
+(`get/2`, `put/3`, `delete/2` over the keys `client` and `tokens`).
+Without one, both live in the handle.
+
+With tokens obtained some other way, give them directly and the
+handle only refreshes:
+
 ```erlang
 auth => {oauth, #{
     access_token   => <<"...">>,            % required
@@ -432,8 +475,45 @@ auth => {oauth, #{
 }}
 ```
 
-The host drives the browser dance and feeds the resulting tokens
-in. The library handles the refresh.
+#### Validate the authorization response
+
+Before you send the code to any token endpoint, check what came back
+against what you recorded when you built the authorization URL:
+
+```erlang
+validate(Query, State, Issuer, AsMetadata) ->
+    barrel_mcp_client_auth_oauth:validate_callback(Query, #{
+        state => State,
+        issuer => Issuer,
+        as_metadata => AsMetadata
+    }).
+```
+
+`state` ties the response to the request you started. `iss` (RFC 9207)
+says which authorization server minted the code, and it is the only
+thing that catches a code from one server being replayed at another's
+endpoint, which a client talking to more than one otherwise cannot
+detect.
+
+| AS advertises `iss` | `iss` present | Result |
+|---|---|---|
+| yes | yes | compared |
+| yes | no | rejected |
+| no / unstated | yes | compared |
+| no / unstated | no | accepted |
+
+A present `iss` is compared whatever the metadata says, so a server that
+emits it before advertising it still gets checked. An absent one is only
+fatal when the server said it would send one, where its absence means
+the parameter went missing rather than was never sent.
+
+Comparison is exact. Do not case-fold, drop a default port, add or strip
+a trailing slash, or decode percent-encoding first; each of those merges
+two distinct issuers into one.
+
+Validate error responses too. On a mismatch the `error`,
+`error_description` and `error_uri` are not yours to act on or display,
+since you cannot tell who wrote them.
 
 ### Client Credentials — unattended (M2M)
 
@@ -520,9 +600,10 @@ stays a host concern.
 
 ### Dynamic Client Registration — pre-step
 
-Not a grant. Used **before** any of the others when the host
-doesn't have a `client_id` yet (fresh deployment, distributed
-host, dev sandbox). RFC 7591.
+Not a grant. One of three ways to get a `client_id` before any of the
+others; see [Client registration](#client-registration) for choosing
+between them. RFC 7591, and now deprecated in favour of Client ID
+Metadata Documents.
 
 ```
 Host                                    AS
@@ -556,13 +637,98 @@ the AS-issued initial access token via `register_client/3`:
 Feed the returned credentials into one of the grants above. The
 library does not persist them; that's a host concern.
 
+`application_type` is always sent, inferred from `redirect_uris` unless
+you set one. Omitting it defaults to `web` under OIDC, which rejects the
+loopback URIs a local client needs, and the registration error rarely
+explains why. Loopback or non-https redirects infer `native`; remote
+https infers `web`.
+
+Registration can still be refused over redirect-URI rules. Surface that
+to the user or developer rather than swallowing it; retrying with a
+different `application_type` or a conforming redirect URI is reasonable,
+guessing repeatedly is not.
+
+## Client registration
+
+A client needs a `client_id` before it can start any flow. There are
+three ways to have one, and the choice is not free-form:
+
+```erlang
+choose(AsMetadata) ->
+    barrel_mcp_client_auth_oauth:registration_strategy(AsMetadata, #{
+        client_id              => <<"pre-registered-if-you-have-one">>,
+        client_id_metadata_url => <<"https://app.example/oauth/client.json">>
+    }).
+```
+
+Returns, in the specification's priority order:
+
+| Result | When | Why it ranks there |
+|---|---|---|
+| `{pre_registered, ClientId}` | you already have one | it names a relationship that exists; nothing discovered improves on it |
+| `{client_id_metadata_document, Url}` | the AS advertises `client_id_metadata_document_supported` and you host a document | no credential to store, and none to go stale |
+| `{dynamic_registration, Endpoint}` | the AS has a `registration_endpoint` | deprecated; the only branch that mints a credential you must then keep |
+| `prompt_user` | none of the above | a client cannot invent an identity |
+
+### Client ID Metadata Documents
+
+With CIMD the `client_id` **is** an HTTPS URL, and the authorization
+server fetches your metadata from it at authorization time. That removes
+the registration round trip and the per-server credential with it: the
+same URL works at every authorization server, because whoever needs the
+metadata reads it.
+
+Build the document and serve it at exactly that URL:
+
+```erlang
+document() ->
+    barrel_mcp_client_auth_oauth:client_id_metadata_document(#{
+        <<"client_id">> => <<"https://app.example/oauth/client.json">>,
+        <<"client_name">> => <<"Example MCP Client">>,
+        <<"redirect_uris">> => [<<"http://127.0.0.1:3000/callback">>]
+    }).
+```
+
+`client_id`, `client_name` and `redirect_uris` are required.
+`grant_types`, `response_types` and `token_endpoint_auth_method` default
+to the public-client-with-PKCE shape; set them yourself for anything
+else, including adding `refresh_token` to `grant_types` if you want
+refresh tokens.
+
+The `client_id` must be https and carry a path. A bare origin is not an
+identity, and the value in the document must equal the URL you serve it
+from, because servers compare the two and reject a document naming a
+different client than the one they fetched.
+
+### Binding credentials to an authorization server
+
+A `client_id` from pre-registration or dynamic registration belongs to
+the server that issued it. The authorization server can change under a
+client at any time, since it comes from the resource's metadata and that
+is refetched, so check before reusing anything you stored:
+
+```erlang
+check(Stored, Issuer) ->
+    barrel_mcp_client_auth_oauth:check_issuer_binding(Stored, Issuer).
+```
+
+`ok`, `{error, unbound_credentials}` if what you stored never recorded
+where it came from, or `{error, {issuer_changed, Was, Now}}`. Re-register
+against the new server rather than trying the old credentials there:
+sending them hands a client identity to a party never given it, and
+fails in a way that reads like a bad token.
+
+A CIMD `client_id` passes against any issuer. It is a URL the server
+resolves for itself, so it was never bound to one and needs no
+re-registration when the server changes.
+
 ### Where they overlap on the wire
 
 All grants hit the same OAuth-server token endpoint with
 `application/x-www-form-urlencoded` bodies. Confidential clients
 authenticate with HTTP Basic; `private_key_jwt` clients pass a
 `client_assertion` instead. RFC 8707 `resource` is attached on
-every grant. The MCP `2025-11-25` auth sub-spec layers
+every grant. The MCP auth sub-spec layers
 [RFC 9728 PRM](#oauth-protected-resource-metadata-rfc-9728) on
 top so any of the grants can be auto-discovered from a `401`
 response.
@@ -574,7 +740,59 @@ response.
 | Real user, browser available, host wants their identity | `auth_code` (`{oauth, ...}`) |
 | Background agent / cron / unattended host | `client_credentials` (`{oauth_client_credentials, ...}`) |
 | Enterprise SSO; user identity must flow to MCP | `enterprise_managed` (`{oauth_enterprise, ...}`) |
-| No `client_id` yet | `register_client/2` first, then one of the above |
+| No `client_id` yet | [Client registration](#client-registration) first, then one of the above |
+
+### Endpoints discovered from the challenge
+
+The three non-interactive grants above also work without any endpoint
+in the config. On the first 401 the handle discovers the protected
+resource metadata and the authorization server the way the
+authorization-code flow does, and takes the token endpoint, the
+resource indicator, the ID-JAG audience (the issuer) and the scope
+from there:
+
+```erlang
+auth => {oauth_client_credentials, #{client_id => <<"svc">>, client_secret => <<"...">>}}
+auth => {oauth_client_credentials, #{client_id => <<"svc">>,
+                                     private_key => {PemBinary, <<"ES256">>}}}   % private_key_jwt
+auth => {oauth_enterprise, #{client_id => <<"...">>, client_secret => <<"...">>,
+                             idp_token_endpoint => <<"https://idp/token">>,
+                             subject_token => IdToken,
+                             subject_token_type => <<"urn:ietf:params:oauth:token-type:id_token">>}}
+auth => {oauth_jwt_bearer, #{client_id => <<"workload">>, assertion => SignedJwt}}
+```
+
+`{oauth_jwt_bearer, ...}` is RFC 7523 with an assertion you obtained
+elsewhere, for workload identity federation (SEP-1933).
+
+### DPoP
+
+Add `dpop => true` to any of the OAuth configs to bind tokens to a
+key the handle generates (RFC 9449, SEP-1932). Every token request and
+every MCP request then carries a `DPoP` proof; a token the server
+issues as `token_type: DPoP` is presented with the `DPoP` scheme, and a
+`use_dpop_nonce` challenge from either server is answered with a fresh
+proof carrying the nonce. The key lives in the handle and is never
+stored.
+
+## Plaintext authorization servers
+
+Every authorization-server URL the client uses, configured or
+discovered, must be `https`. The client refuses anything else with
+`{error, {insecure_url, Url}}` before any request is sent. That is
+the specification's rule, and there is no exception for `localhost`.
+
+For a test against a plaintext mock, pass `allow_insecure_oauth =>
+true` in the `{oauth, ...}` config or in the options map of the
+discovery and grant helpers:
+
+```erlang
+{ok, Doc} = barrel_mcp_client_auth_oauth:discover_authorization_server(
+    <<"http://127.0.0.1:8080">>, #{allow_insecure_oauth => true}
+).
+```
+
+The flag is noncompliant. Never set it outside a test.
 
 ## OAuth Protected Resource Metadata (RFC 9728)
 
@@ -597,7 +815,8 @@ option on `barrel_mcp:start_http_stream/1` (and
 {ok, _} = barrel_mcp:start_http_stream(#{
     port => 8080,
     auth => #{provider => barrel_mcp_auth_bearer,
-              provider_opts => #{secret => Secret}},
+              provider_opts => #{secret => Secret,
+                                 audience => <<"http://localhost:8080/mcp">>}},
     resource_metadata => #{
         resource              => <<"http://localhost:8080/mcp">>,
         authorization_servers => [<<"https://idp.example.com">>]

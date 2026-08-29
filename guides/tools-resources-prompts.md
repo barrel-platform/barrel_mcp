@@ -116,6 +116,9 @@ weather(_Args) ->
 recommended shapes. Plain returns still work; raised exceptions are
 caught and surfaced as a JSON-RPC error to the client.
 
+There is one more, for tools that need something from the user before
+they can finish. See [Asking the client for input](#asking-the-client-for-input).
+
 ### Async handlers (`Ctx`-aware)
 
 Tools may be exported as arity 2 instead of arity 1. The second
@@ -136,6 +139,11 @@ download(Args, Ctx) ->
     Emit(1.0, 1.0, undefined),
     Body.
 ```
+
+Resource and prompt handlers may be arity 2 as well. They get the
+request context rather than the progress and cancel hooks, which is what
+lets them ask the client for input; see
+[Asking the client for input](#asking-the-client-for-input).
 
 Arity-2 handlers are needed for tools that:
 
@@ -162,6 +170,100 @@ Empty maps are omitted from the wire. The plain
 `{tool_error, Content}` and `{structured, Data, Content}`
 shapes still work; `_meta` is opt-in.
 
+### Asking the client for input
+
+A tool that needs something from the user (a confirmation, a value, the
+model's help, the client's roots) returns instead of blocking:
+
+```erlang
+{input_required, InputRequests, State}
+```
+
+`InputRequests` is `#{Key => #{method => M, params => P}}`, where `M` is
+`<<"elicitation/create">>`, `<<"sampling/createMessage">>` or
+`<<"roots/list">>`. `State` is any Erlang term. The framework seals it
+and the client echoes it back; handlers never see the blob.
+
+The client answers and re-issues the same call. Your handler runs again
+from the top, so recover what it knew and read the answers:
+
+```erlang
+confirm_delete(Args, Ctx) ->
+    case barrel_mcp:input(Ctx, <<"confirm">>) of
+        none ->
+            %% First attempt: ask.
+            {input_required,
+             #{<<"confirm">> => #{
+                 method => <<"elicitation/create">>,
+                 params => #{
+                     <<"message">> => <<"Delete every matching row?">>,
+                     %% `properties' is required. A client validating
+                     %% against the spec schema rejects the request
+                     %% without it.
+                     <<"requestedSchema">> => #{
+                         <<"type">> => <<"object">>,
+                         <<"properties">> => #{
+                             <<"ok">> => #{<<"type">> => <<"boolean">>}
+                         }
+                     }
+                 }}},
+             maps:get(<<"table">>, Args)};
+        {ok, #{<<"action">> := <<"accept">>}} ->
+            {ok, Table} = barrel_mcp:request_state(Ctx),
+            do_delete(Table);
+        {ok, _Declined} ->
+            {tool_error, [#{<<"type">> => <<"text">>,
+                            <<"text">> => <<"Cancelled">>}]}
+    end.
+```
+
+`barrel_mcp:input/2` unwraps exactly as far as the equivalent blocking
+call does:
+
+| Request method | Returns |
+|---|---|
+| `elicitation/create` | `{ok, ElicitResult}` or `none` |
+| `sampling/createMessage` | `{ok, Result, Usage}` or `none` |
+| `roots/list` | `{ok, [Root]}` or `none` |
+
+A client may retry carrying the state but no answers, which is not an
+error: read `none` and ask again.
+
+Check before you ask, because the framework refuses to emit a request
+for a capability the client never declared and the call fails with
+`-32021`:
+
+```erlang
+case barrel_mcp:client_supports(Ctx, elicitation) of
+    true  -> ask(Args, Ctx);
+    false -> use_a_default(Args)
+end.
+```
+
+This works from a prompt or resource handler too. Register it as arity
+2 and it gets the same `Ctx`:
+
+```erlang
+gated_resource(_Args, Ctx) ->
+    case barrel_mcp:input(Ctx, <<"who">>) of
+        none  -> ask_who();
+        {ok, Response} -> render(Response)
+    end.
+```
+
+Notes:
+
+- Arity-2 handlers only, for any of the three. An arity-1 handler has
+  no `Ctx` to read the answer from.
+- Modern era only. Returning it to a legacy client is a programming
+  error, logged and answered as an internal error; that client has the
+  blocking calls (`barrel_mcp:elicit_create/3` and friends) instead.
+- A state that fails verification is rejected with `-32602` and never
+  re-prompted, so a stale or tampered one cannot drive a loop.
+- Clients bound the number of rounds. `barrel_mcp_client` allows 5 by
+  default (`max_input_rounds`), so a tool that always asks never
+  finishes.
+
 ### Long-running tools (tasks)
 
 Set `long_running => true` on `reg_tool/4` and the tool returns
@@ -169,6 +271,10 @@ immediately to the client with a `taskId`. The handler keeps
 running in the background and the runtime stores its eventual
 outcome on the task. Clients track progress via `tasks/get`,
 `tasks/list`, or `notifications/tasks/status`.
+
+This now applies over stdio too. Before 3.0 only the HTTP transport
+honoured `long_running`; stdio drove every tool synchronously and
+blocked up to 60 seconds.
 
 ```erlang
 barrel_mcp:reg_tool(<<"render_video">>, my_tools, render_video, #{
@@ -509,8 +615,20 @@ as at least one completion handler is registered.
 ## Tasks (long-running operations)
 
 The `barrel_mcp_tasks` module backs the `tasks/list`, `tasks/get`,
-`tasks/cancel`, and `tasks/result` MCP methods, plus the
-`notifications/tasks/status` notifications.
+`tasks/cancel`, `tasks/result` and `tasks/update` MCP methods, plus the
+`notifications/tasks/status` notifications. Which of those a client can
+call depends on its era: `tasks/list` and `tasks/result` are legacy,
+`tasks/update` is modern, and `tasks/get` and `tasks/cancel` are both.
+
+A modern client only gets a task handle if it declared the
+`io.modelcontextprotocol/tasks` extension. One that did not gets the
+same tool run synchronously, since it would otherwise be told to poll a
+method it does not know it can call. Legacy clients negotiated tasks in
+the handshake and are unaffected.
+
+Ownership differs too. A legacy task belongs to its session; a modern
+request has no session, so its tasks belong to the authenticated
+principal. Either way one client cannot read another's task.
 
 You don't usually call this module directly: registering a tool
 with `long_running => true` (see above) wires the lifecycle for
@@ -534,12 +652,13 @@ state (completed / failed / cancelled).
 
 ## Server → client notifications
 
-Every notification the server can emit goes through the session's
-SSE channel:
+The façades below are era-neutral: each fans out to legacy session SSE
+streams and to modern `subscriptions/listen` streams alike, so server
+code does not change between eras.
 
 | Notification | Façade |
 | --- | --- |
-| `notifications/resources/updated` | `barrel_mcp:notify_resource_updated/1,2`. Subscriptions are scoped to the calling `Mcp-Session-Id` — when a client re-initializes (or its session expires) the new session id has no carry-over subscriptions, and the host must subscribe again. This matches the spec's session-lifecycle model. |
+| `notifications/resources/updated` | `barrel_mcp:notify_resource_updated/1,2`. Legacy subscriptions are scoped to the calling `Mcp-Session-Id`: when a client re-initializes (or its session expires) the new session id has no carry-over subscriptions, and the host must subscribe again. This matches the spec's session-lifecycle model. Modern subscriptions live for as long as the `subscriptions/listen` stream is open and end with it. |
 | `notifications/tools/list_changed`<br>`notifications/resources/list_changed`<br>`notifications/prompts/list_changed` | `barrel_mcp:notify_list_changed/1` (tool, resource, prompt). `reg_tool/4`/`unreg_tool/1` and friends emit it automatically; call the façade if you mutate the catalogue out of band. |
 | `notifications/progress` | `barrel_mcp:notify_progress/3,4` (or via `Ctx` from an arity-2 tool handler). |
 | `notifications/tasks/status` | Emitted by `barrel_mcp_tasks` on every status transition. |

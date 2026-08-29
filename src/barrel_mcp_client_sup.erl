@@ -1,8 +1,13 @@
 %%%-------------------------------------------------------------------
-%%% @doc Supervisor for `barrel_mcp_client' workers.
+%%% @doc Supervisor of the client shells.
 %%%
-%%% Each child is one connection to one MCP server. Hosts spawn
-%%% children on demand via `barrel_mcp_clients:start_client/2'.
+%%% Each child is a {@link barrel_mcp_client_shell}, one per
+%%% `ServerId', holding one connection to one MCP server and that
+%%% connection's own restart budget. Shells are temporary here: a
+%%% shell that ends, because its client left normally or exhausted its
+%%% budget, is not restarted and its id becomes free, and the other
+%%% shells never notice. Hosts start them through
+%%% `barrel_mcp_clients:start_client/2'.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_client_sup).
@@ -15,30 +20,23 @@
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
-%% @doc Start a new client worker. `Spec' is the
+%% @doc Start the shell for `ServerId' with `Spec', the
 %% `barrel_mcp_client:connect_spec()'.
 -spec start_child(term(), barrel_mcp_client:connect_spec()) ->
     {ok, pid()} | {error, term()}.
 start_child(ServerId, Spec) ->
     Child = #{
         id => ServerId,
-        start => {barrel_mcp_client, start_link, [Spec]},
-        restart => transient,
-        shutdown => 5000,
-        type => worker,
-        modules => [barrel_mcp_client]
+        start => {barrel_mcp_client_shell, start_link, [ServerId, Spec]},
+        restart => temporary,
+        shutdown => infinity,
+        type => supervisor,
+        modules => [barrel_mcp_client_shell]
     },
-    case supervisor:start_child(?MODULE, Child) of
-        {error, already_present} ->
-            %% A prior transient child exited normally (e.g. the server closed
-            %% the stream) and left its spec behind in a terminated state.
-            %% Drop the dead spec so this id can be reconnected.
-            _ = supervisor:delete_child(?MODULE, ServerId),
-            supervisor:start_child(?MODULE, Child);
-        Other ->
-            Other
-    end.
+    supervisor:start_child(?MODULE, Child).
 
 init([]) ->
-    SupFlags = #{strategy => one_for_one, intensity => 10, period => 60},
+    %% Shells are temporary, so nothing here ever restarts; the
+    %% intensity only bounds a storm of shells dying at once.
+    SupFlags = #{strategy => one_for_one, intensity => 100, period => 60},
     {ok, {SupFlags, []}}.

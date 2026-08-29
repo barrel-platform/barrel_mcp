@@ -150,7 +150,7 @@ test_sampling_round_trip() ->
         maps:get(<<"method">>, Request)
     ),
     %% Deliver a fake response
-    ok = barrel_mcp_session:deliver_response(Id, #{
+    ok = barrel_mcp_session:deliver_response(S1, Id, #{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => Id,
         <<"result">> => #{
@@ -240,7 +240,7 @@ test_elicit_round_trip() ->
         <<"elicitation/create">>,
         maps:get(<<"method">>, Request)
     ),
-    ok = barrel_mcp_session:deliver_response(Id, #{
+    ok = barrel_mcp_session:deliver_response(S1, Id, #{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => Id,
         <<"result">> => #{
@@ -318,7 +318,7 @@ test_roots_round_trip() ->
         end,
     Id = maps:get(<<"id">>, Request),
     ?assertEqual(<<"roots/list">>, maps:get(<<"method">>, Request)),
-    ok = barrel_mcp_session:deliver_response(Id, #{
+    ok = barrel_mcp_session:deliver_response(S1, Id, #{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => Id,
         <<"result">> => #{

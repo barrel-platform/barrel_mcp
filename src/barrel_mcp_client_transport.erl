@@ -19,7 +19,7 @@
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_client_transport).
 
--export([send/2, close/1]).
+-export([send/2, close/1, cancel_request/2]).
 
 -type t() :: {module(), pid()}.
 -export_type([t/0]).
@@ -38,6 +38,16 @@
 %% Close the transport.
 -callback close(TransportPid :: pid()) -> ok.
 
+%% Cancel one in-flight request by tearing down its channel. Streamable
+%% HTTP has one; stdio does not, and sends `notifications/cancelled'
+%% instead (2026-07-28/basic/patterns/cancellation.mdx:38).
+-callback cancel_request(
+    TransportPid :: pid(),
+    RequestId :: integer() | binary()
+) -> ok.
+
+-optional_callbacks([cancel_request/2]).
+
 %%====================================================================
 %% Helpers
 %%====================================================================
@@ -51,3 +61,16 @@ send({Mod, Pid}, Body) ->
 -spec close(t()) -> ok.
 close({Mod, Pid}) ->
     Mod:close(Pid).
+
+%% @doc Ask the transport to cancel one request. `unsupported' when it
+%% has no per-request channel; the caller then sends the notification.
+-spec cancel_request(t(), integer() | binary()) -> ok | unsupported.
+cancel_request({Mod, Pid}, RequestId) ->
+    _ = code:ensure_loaded(Mod),
+    case erlang:function_exported(Mod, cancel_request, 2) of
+        true ->
+            Mod:cancel_request(Pid, RequestId),
+            ok;
+        false ->
+            unsupported
+    end.

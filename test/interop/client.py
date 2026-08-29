@@ -1,10 +1,13 @@
-"""Direction A — Python MCP client against a barrel_mcp server.
+"""Direction A: Python MCP client against a barrel_mcp server.
 
 Invoked by `barrel_mcp_python_interop_SUITE:python_client_against_erlang_server/1`.
 The CT case starts a Streamable HTTP server, registers a known
 fixture (echo tool, sample resource, sample prompt), then runs
 this script with the URL as argv[1]. We exit 0 on success and
 print a single ``FAIL: <reason>`` line + exit non-zero otherwise.
+
+With ``--post-only`` the SDK's standalone GET stream is never opened,
+so every server request has to arrive on a POST's own response stream.
 """
 
 from __future__ import annotations
@@ -14,7 +17,10 @@ import sys
 import traceback
 
 from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
+from mcp.client.streamable_http import (
+    StreamableHTTPTransport,
+    streamable_http_client,
+)
 from mcp.types import (
     CallToolResult,
     CreateMessageResult,
@@ -65,7 +71,16 @@ async def list_roots_callback(_context):
     )
 
 
-async def run(url: str) -> None:
+async def no_get_stream(self, _client, _writer) -> None:
+    """Stand-in for StreamableHTTPTransport.handle_get_stream. The
+    transport starts it right after `notifications/initialized`;
+    returning at once leaves the session without a GET stream."""
+    return None
+
+
+async def run(url: str, post_only: bool) -> None:
+    if post_only:
+        StreamableHTTPTransport.handle_get_stream = no_get_stream
     update_event = asyncio.Event()
     tools_list_changed_event = asyncio.Event()
     task_status_seen: list[str] = []
@@ -167,11 +182,11 @@ async def run(url: str) -> None:
 
             await session.set_logging_level("warning")
 
-            # ping round-trip — trivial but exercises the wire end
+            # ping round-trip: trivial but exercises the wire end
             # to end.
             await session.send_ping()
 
-            # prompts/get with arguments — verifies the prompt
+            # prompts/get with arguments: verifies the prompt
             # template renders and returns the spec-shaped messages
             # array.
             prompt_result = await session.get_prompt(
@@ -185,7 +200,7 @@ async def run(url: str) -> None:
             if getattr(msg.content, "text", None) != "hello, interop":
                 fail(f"prompt message text mismatch: {msg.content!r}")
 
-            # resources/templates/list — registered fixture has one
+            # resources/templates/list: registered fixture has one
             # template (`file:///{path}`).
             templates = await session.list_resource_templates()
             tmpl_by_uri = {
@@ -198,7 +213,7 @@ async def run(url: str) -> None:
                 fail(f"template name wrong: {tmpl.name!r}")
 
             # resources/read against a URI that matches the template
-            # — the server expands the path variable and routes to the
+            # so the server expands the path variable and routes to the
             # template handler.
             tpl_read = await session.read_resource("file:///etc/hosts")
             if not tpl_read.contents:
@@ -207,7 +222,7 @@ async def run(url: str) -> None:
             if getattr(tpl_block, "text", None) != "path=etc/hosts":
                 fail(f"templated read text mismatch: {tpl_block!r}")
 
-            # completion/complete — registered for prompt
+            # completion/complete: registered for prompt
             # `hello_prompt` argument `who`. The Erlang fixture
             # returns ["world", "world!"].
             comp = await session.complete(
@@ -244,13 +259,16 @@ async def run(url: str) -> None:
 
             # Subscribe / notifications/resources/updated round-trip.
             # subscribe -> trigger -> wait for the notification.
-            await session.subscribe_resource(EXPECTED_RESOURCE_URI)
-            await session.call_tool("trigger_update", arguments={})
-            try:
-                await asyncio.wait_for(update_event.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                fail("did not receive notifications/resources/updated")
-            await session.unsubscribe_resource(EXPECTED_RESOURCE_URI)
+            # Unsolicited notifications only travel on the GET stream,
+            # so a POST-only client cannot observe them.
+            if not post_only:
+                await session.subscribe_resource(EXPECTED_RESOURCE_URI)
+                await session.call_tool("trigger_update", arguments={})
+                try:
+                    await asyncio.wait_for(update_event.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    fail("did not receive notifications/resources/updated")
+                await session.unsubscribe_resource(EXPECTED_RESOURCE_URI)
 
             # Server-to-client sampling round-trip. The server's
             # ask_llm tool sends sampling/createMessage to us; our
@@ -297,7 +315,7 @@ async def run(url: str) -> None:
             )
             task_id = create_result.task.taskId
 
-            # Poll until terminal — slow_echo sleeps 100ms server-side.
+            # Poll until terminal; slow_echo sleeps 100ms server-side.
             final = None
             for _ in range(50):
                 final = await session.experimental.get_task(task_id)
@@ -347,12 +365,13 @@ async def run(url: str) -> None:
             # tool registers + unregisters another tool, which the
             # registry auto-broadcasts as list_changed.
             await session.call_tool("churn_registry", arguments={})
-            try:
-                await asyncio.wait_for(
-                    tools_list_changed_event.wait(), timeout=5.0
-                )
-            except asyncio.TimeoutError:
-                fail("did not receive notifications/tools/list_changed")
+            if not post_only:
+                try:
+                    await asyncio.wait_for(
+                        tools_list_changed_event.wait(), timeout=5.0
+                    )
+                except asyncio.TimeoutError:
+                    fail("did not receive notifications/tools/list_changed")
 
             # notifications/cancelled flow. Start a long-running
             # cancellable tool and cancel it mid-flight.
@@ -392,7 +411,7 @@ async def run(url: str) -> None:
 
             # notifications/tasks/status: by now we've run a few
             # tasks; assert at least one transition was observed.
-            if not task_status_seen:
+            if not post_only and not task_status_seen:
                 fail("no notifications/tasks/status observed")
 
             # Pagination: explicitly walk every tool via the cursor.
@@ -430,11 +449,12 @@ async def run(url: str) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        fail("usage: client.py <server-url>")
-    url = sys.argv[1]
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    flags = set(sys.argv[1:]) - set(args)
+    if len(args) != 1 or flags - {"--post-only"}:
+        fail("usage: client.py <server-url> [--post-only]")
     try:
-        asyncio.run(run(url))
+        asyncio.run(run(args[0], "--post-only" in flags))
     except Exception:
         traceback.print_exc()
         fail("unhandled exception")

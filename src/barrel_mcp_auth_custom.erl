@@ -7,7 +7,7 @@
 %%%
 %%% <ul>
 %%%   <li>`init(Opts) -> {ok, State}' - Initialize auth state</li>
-%%%   <li>`authenticate(Token, State) -> {ok, AuthInfo, NewState} | {error, Reason, NewState}'</li>
+%%%   <li>`authenticate(Token, State) -> {ok, AuthInfo, State} | {error, Reason, State}'</li>
 %%% </ul>
 %%%
 %%% == Usage ==
@@ -40,6 +40,11 @@
 %%%     end.
 %%% '''
 %%%
+%%% The state returned by `authenticate/2' is discarded: the provider
+%%% is called with the state `init/1' produced on every request, so
+%%% anything that has to persist across requests belongs in a process
+%%% or table of the module's own.
+%%%
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_auth_custom).
@@ -68,17 +73,19 @@ init(_Opts) ->
 
 %% @doc Authenticate request by extracting token and calling custom module.
 -spec authenticate(map(), map()) -> {ok, map()} | {error, term()}.
-authenticate(Request, #{module := Module, module_state := ModuleState} = State) ->
+authenticate(Request, #{module := Module, module_state := ModuleState}) ->
     Headers = maps:get(headers, Request, #{}),
     case extract_token(Headers) of
         {ok, Token} ->
             case Module:authenticate(Token, ModuleState) of
-                {ok, AuthInfo, NewModuleState} ->
-                    %% Store updated state (though HTTP is stateless per-request)
-                    put(barrel_mcp_auth_custom_state, State#{module_state => NewModuleState}),
+                {ok, AuthInfo, _} when is_map(AuthInfo) ->
                     {ok, normalize_auth_info(AuthInfo)};
-                {error, Reason, _NewModuleState} ->
-                    {error, Reason}
+                {error, Reason, _} ->
+                    {error, Reason};
+                Other ->
+                    %% A shape the contract does not name is a failure,
+                    %% not a pass with an unknown subject.
+                    {error, {invalid_auth_result, Other}}
             end;
         {error, _} ->
             {error, unauthorized}
@@ -108,6 +115,4 @@ normalize_auth_info(AuthInfo) when is_map(AuthInfo) ->
         subject => maps:get(subject, AuthInfo, maps:get(<<"subject">>, AuthInfo, <<"unknown">>)),
         scopes => maps:get(scopes, AuthInfo, maps:get(<<"scopes">>, AuthInfo, [])),
         claims => AuthInfo
-    };
-normalize_auth_info(_) ->
-    #{subject => <<"unknown">>, scopes => [], claims => #{}}.
+    }.
