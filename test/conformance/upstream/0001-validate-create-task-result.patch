@@ -1,9 +1,17 @@
-From df3a0ed8df7cdb49e5929643fc4c843e265ec223 Mon Sep 17 00:00:00 2001
+From 499586361a547256bd9121128d595fa1f519a518 Mon Sep 17 00:00:00 2001
 From: Benoit Chesneau <bchesneau@gmail.com>
 Date: Sat, 29 Aug 2026 17:19:31 +0200
-Subject: [PATCH] Validate a task-augmented result against the tasks extension
- schema
+Subject: [PATCH] fix(validation): accept a task-augmented result at 2026-07-28
 
+A tools/call answered with a CreateTaskResult fails wire-schema-valid
+at 2026-07-28: the result is validated against the core
+CallToolResult, and the core schema no longer defines
+CreateTaskResult since SEP-2663 moved tasks into the extension.
+
+This vendors the tasks extension schema and validates a result with
+resultType "task" against its CreateTaskResult when the core schema
+has none. Versions that still carry it keep using the core
+definition. Tests added.
 ---
  src/spec-types/README.md             |    6 +
  src/spec-types/SOURCE.ext-tasks      |    1 +
