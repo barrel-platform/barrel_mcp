@@ -97,7 +97,7 @@ start_client(Extras) ->
     wait_ready(Pid, 30),
     {ok, Pid}.
 
-%% slow tool handler — gives the test time to inspect the progress
+%% slow tool handler, gives the test time to inspect the progress
 %% map before the response settles.
 slow_handler(_Args) ->
     timer:sleep(200),

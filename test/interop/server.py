@@ -1,4 +1,4 @@
-"""Direction B — Python FastMCP server over stdio.
+"""Direction B: Python FastMCP server over stdio.
 
 Spawned by `barrel_mcp_python_interop_SUITE:erlang_client_against_python_server/1`.
 Exposes a tool, a resource, and a prompt so the Erlang client can

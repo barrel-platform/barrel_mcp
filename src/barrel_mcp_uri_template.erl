@@ -3,7 +3,7 @@
 %%%
 %%% Used by the server's `resources/read' handler to route a
 %%% concrete URI to a registered `resource_template'. We only
-%%% implement Level 1 (`{var}' simple expansion) — that covers
+%%% implement Level 1 (`{var}' simple expansion), that covers
 %%% every template the spec's reference examples use, and it's
 %%% the level the MCP server registry actually accepts.
 %%%
@@ -57,7 +57,7 @@ expand(Template, Vars) when is_binary(Template), is_map(Vars) ->
     end.
 
 %%====================================================================
-%% Internal — template parser
+%% Internal: template parser
 %%====================================================================
 
 %% Parse a template into a list of `{literal, Bin} | {var, Name}'
@@ -85,7 +85,7 @@ template_for_error(Acc, Rest) ->
     <<Acc/binary, Rest/binary>>.
 
 %%====================================================================
-%% Internal — match
+%% Internal: match
 %%====================================================================
 
 do_match(<<>>, [], Vars) ->
@@ -98,7 +98,7 @@ do_match(Uri, [{literal, Lit} | Rest], Vars) ->
         false -> nomatch
     end;
 do_match(Uri, [{var, Name}], Vars) ->
-    %% Trailing variable — consume the rest. Empty value is
+    %% Trailing variable, consume the rest. Empty value is
     %% allowed only if the template clearly expected an empty
     %% suffix; here we require at least one character.
     case Uri of
@@ -119,7 +119,7 @@ do_match(Uri, [{var, Name}, {literal, NextLit} | Rest], Vars) ->
             nomatch
     end;
 do_match(Uri, [{var, Name1}, {var, Name2} | Rest], Vars) ->
-    %% Two variables in a row with no literal between them —
+    %% Two variables in a row with no literal between them,
     %% ambiguous. RFC 6570 doesn't require us to support this; we
     %% treat the first as everything up to the last separator and
     %% the second as the remainder, but most MCP templates avoid
@@ -149,7 +149,7 @@ starts_with(Bin, Prefix) ->
     end.
 
 %%====================================================================
-%% Internal — expand
+%% Internal: expand
 %%====================================================================
 
 do_expand([], _Vars, Acc) ->

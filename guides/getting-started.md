@@ -41,7 +41,7 @@ Tools are functions that can be called by MCP clients (like Claude):
 -module(my_tools).
 -export([greet/1]).
 
-%% Arity-1 handler — gets only the call arguments. The simplest
+%% Arity-1 handler, gets only the call arguments. The simplest
 %% shape; pick this when you don't need progress, cancellation, or
 %% session context. For arity-2 handlers (with a Ctx parameter),
 %% see the Tools guide.
@@ -75,7 +75,7 @@ barrel_mcp:reg_tool(<<"greet">>, my_tools, greet, #{
 
 The Streamable HTTP server binds to `127.0.0.1` by default and
 validates the `Origin` header on every request. Public binds (any
-non-loopback IP) require an explicit `allowed_origins` — see the
+non-loopback IP) require an explicit `allowed_origins`, see the
 [Streamable HTTP guide](http-stream.md) for the security defaults.
 
 The legacy plain-HTTP transport (`start_http/1`, JSON-RPC only,
@@ -123,10 +123,10 @@ For Claude Desktop integration, use the stdio transport:
 
 ## Next Steps
 
-- [Tools, Resources & Prompts](tools-resources-prompts.md) — handler shapes (arity 1 / arity 2 with `Ctx`), tool errors, structured output, long-running tasks, completions, resource templates, server notifications.
-- [Streamable HTTP transport](http-stream.md) — security defaults, CORS, `Origin` validation, response codes, replay.
-- [Authentication](authentication.md) — bearer / API key / basic, modern hash formats.
-- [Features matrix](features.md) — what's supported on the wire.
-- [Building a client](building-a-client.md) — task-oriented walkthrough for hosting MCP clients.
-- [Client internals](internals.md) — architecture and behaviour contracts.
+- [Tools, Resources & Prompts](tools-resources-prompts.md): handler shapes (arity 1 / arity 2 with `Ctx`), tool errors, structured output, long-running tasks, completions, resource templates, server notifications.
+- [Streamable HTTP transport](http-stream.md): security defaults, CORS, `Origin` validation, response codes, replay.
+- [Authentication](authentication.md): bearer / API key / basic, modern hash formats.
+- [Features matrix](features.md): what's supported on the wire.
+- [Building a client](building-a-client.md): task-oriented walkthrough for hosting MCP clients.
+- [Client internals](internals.md): architecture and behaviour contracts.
 - [MCP Client (reference)](client.md) - Older API reference, kept for cross-linking

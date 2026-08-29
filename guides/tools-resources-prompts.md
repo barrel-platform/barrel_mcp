@@ -161,10 +161,10 @@ Arity-1 handlers continue to work; pick whichever arity you need.
 Tool handlers may attach a `_meta` map to the response envelope
 by returning one of the meta-bearing tuples:
 
-- `{result_meta, Result, MetaMap}` — plain result + `_meta`.
-- `{structured_meta, Data, Content, MetaMap}` —
+- `{result_meta, Result, MetaMap}`: plain result + `_meta`.
+- `{structured_meta, Data, Content, MetaMap}`: 
   `structuredContent` + `_meta`.
-- `{tool_error, Content, MetaMap}` — error result + `_meta`.
+- `{tool_error, Content, MetaMap}`: error result + `_meta`.
 
 Empty maps are omitted from the wire. The plain
 `{tool_error, Content}` and `{structured, Data, Content}`
@@ -573,7 +573,7 @@ barrel_mcp:reg_resource_template(<<"file">>, my_resources, read_file_uri, #{
 ```
 
 `resources/read` against a templated URI is matched and routed
-to the template handler automatically — RFC 6570 Level 1
+to the template handler automatically, RFC 6570 Level 1
 substitutions (simple `{var}` expansion) cover what the spec's
 reference examples use. The substituted variables are merged
 into the handler's `Args` map under their template names:
@@ -605,8 +605,8 @@ barrel_mcp:reg_completion(
 
 Handlers are arity 2: `(PartialValue, Ctx)`. Return one of:
 
-- `{ok, [Suggestion]}` — full list.
-- `{ok, [Suggestion], #{has_more => true}}` — more available; the
+- `{ok, [Suggestion]}`: full list.
+- `{ok, [Suggestion], #{has_more => true}}`: more available; the
   client can issue another `completion/complete` to drill in.
 
 The `completions` capability is advertised in `initialize` as soon

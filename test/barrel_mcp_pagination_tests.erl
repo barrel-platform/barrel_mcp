@@ -39,6 +39,6 @@ error_propagates_test() ->
     ?assertEqual({error, boom}, barrel_mcp_pagination:walk(Fetch)).
 
 max_pages_guard_test() ->
-    %% Always returns a cursor — would loop forever without the cap.
+    %% Always returns a cursor, would loop forever without the cap.
     Fetch = fun(_) -> {ok, [x], <<"more">>} end,
     ?assertEqual({error, max_pages}, barrel_mcp_pagination:walk(Fetch, 3)).

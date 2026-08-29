@@ -174,9 +174,9 @@ hash_password(Password) ->
 %%
 %% `Opts' may contain:
 %% <ul>
-%%   <li>`algorithm' — `pbkdf2-sha256' (default) or `sha256-hex'
+%%   <li>`algorithm': `pbkdf2-sha256' (default) or `sha256-hex'
 %%       (deprecated; kept for migration only).</li>
-%%   <li>`iterations' — PBKDF2 iteration count (default 100000).</li>
+%%   <li>`iterations': PBKDF2 iteration count (default 100000).</li>
 %% </ul>
 %%
 %% Stored format for the modern hash:

@@ -92,7 +92,7 @@ otherwise. This avoids accidental exposure to DNS-rebinding and
 CORS-style attacks.
 
 ```erlang
-%% Public bind — must list allowed origins explicitly.
+%% Public bind, must list allowed origins explicitly.
 {ok, _} = barrel_mcp:start_http_stream(#{
     port => 9090,
     ip => {0, 0, 0, 0},

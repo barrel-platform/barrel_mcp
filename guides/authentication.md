@@ -172,7 +172,7 @@ Stored values look like
 `<<"hmac-sha256$<base64-encoded-hash>">>`.
 
 For verification outside the auth pipeline (config tooling,
-tests), use `barrel_mcp_auth_apikey:verify_key/2` — it does a
+tests), use `barrel_mcp_auth_apikey:verify_key/2`, it does a
 constant-time comparison and accepts both the new format and
 legacy unsalted hex SHA-256 digests for one release.
 
@@ -273,9 +273,9 @@ barrel_mcp:start_http(#{
 
 `hash_password/2` accepts an options map:
 
-- `algorithm` — `pbkdf2-sha256` (default) or `sha256-hex` (legacy,
+- `algorithm`: `pbkdf2-sha256` (default) or `sha256-hex` (legacy,
   for migration only).
-- `iterations` — PBKDF2 iteration count (default 100000).
+- `iterations`: PBKDF2 iteration count (default 100000).
 
 The verification path is the public `verify_password/2`. It
 accepts the modern format and legacy hex SHA-256 digests for one
@@ -399,7 +399,7 @@ Authentication failures return proper HTTP status codes and WWW-Authenticate hea
 `barrel_mcp_client` ships three grants plus a registration
 pre-step. Pick by **who is in the loop and when**:
 
-### Authorization Code + PKCE — interactive
+### Authorization Code + PKCE: interactive
 
 For flows where a real user authorises the host. Browser
 redirect, PKCE prevents code interception, refresh on 401.
@@ -515,7 +515,7 @@ Validate error responses too. On a mismatch the `error`,
 `error_description` and `error_uri` are not yours to act on or display,
 since you cannot tell who wrote them.
 
-### Client Credentials — unattended (M2M)
+### Client Credentials: unattended (M2M)
 
 For agent hosts running without a human. The host already has
 its own credentials.
@@ -543,11 +543,11 @@ auth => {oauth_client_credentials, #{
 }}
 ```
 
-Eager fetch on init — a misconfigured client fails up front.
+Eager fetch on init, a misconfigured client fails up front.
 Re-acquires via the same grant on 401. No `refresh_token` is
 involved.
 
-### Enterprise-Managed Authorization — SSO chain
+### Enterprise-Managed Authorization: SSO chain
 
 For SSO-driven hosts. The user already has a session at the org
 IdP; their identity flows into a short-lived MCP access token
@@ -594,11 +594,11 @@ auth => {oauth_enterprise, #{
 }}
 ```
 
-The library treats `subject_token` as opaque — both OIDC and
+The library treats `subject_token` as opaque, both OIDC and
 SAML modes hit the same code path. The browser flow at the IdP
 stays a host concern.
 
-### Dynamic Client Registration — pre-step
+### Dynamic Client Registration: pre-step
 
 Not a grant. One of three ways to get a `client_id` before any of the
 others; see [Client registration](#client-registration) for choosing
@@ -840,7 +840,7 @@ the wire emission of `WWW-Authenticate` changed.
 
 The client side is implemented by
 `barrel_mcp_client_auth_oauth:parse_www_authenticate/1` and
-`discover_protected_resource/1` — together with the server side
+`discover_protected_resource/1`: together with the server side
 above, the MCP authorization sub-spec discovery flow works
 end-to-end.
 
@@ -870,7 +870,7 @@ metadata document advertises the endpoint via
 
 Feed the returned credentials into a subsequent
 `{oauth, ...}` / `{oauth_client_credentials, ...}` connect spec.
-This stays a standalone exchanger — the library doesn't persist
+This stays a standalone exchanger, the library doesn't persist
 the issued credentials. That's a host concern (file, DB, secret
 manager).
 

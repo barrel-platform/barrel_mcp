@@ -6,7 +6,7 @@
 %%% A small acceptor pool on a single port, built on the `h1' and
 %%% `h2' protocol libraries (no cowboy). Cleartext binds speak
 %%% HTTP/1.1; TLS binds advertise ALPN `[h2, http/1.1]' and dispatch
-%%% each connection to the negotiated protocol — so one URL serves
+%%% each connection to the negotiated protocol, so one URL serves
 %%% both, like the cowboy listener it replaces.
 %%%
 %%% Per accepted connection a process owns the socket, performs the
@@ -38,8 +38,8 @@
 %% Default cap on concurrently-established connections per listener.
 %% `idle_timeout' is `infinity' (so long-lived SSE GETs are never
 %% reaped), which means a connection lives until the peer closes it.
-%% Without a cap a flood of connections — or slow/idle keep-alive
-%% clients — could exhaust file descriptors and memory. Override with
+%% Without a cap a flood of connections (or slow/idle keep-alive
+%% clients) could exhaust file descriptors and memory. Override with
 %% the `max_connections' listen option.
 -define(DEFAULT_MAX_CONNECTIONS, 16384).
 

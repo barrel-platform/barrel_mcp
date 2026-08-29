@@ -30,7 +30,7 @@
 %% @doc Start a mock server registered as `Name' on `Port'.
 %%
 %% h1 links the listener to whoever calls `h1:start_server', so a
-%% long-lived owner process (registered as `Name') holds it open —
+%% long-lived owner process (registered as `Name') holds it open,
 %% otherwise it would die with the transient caller (e.g. a CT
 %% `init_per_suite' process).
 start(Name, Port, Handler) when is_function(Handler, 1) ->

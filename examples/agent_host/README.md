@@ -34,7 +34,7 @@ For a self-contained example we boot one in-process Streamable
 HTTP server with a single `echo` tool and connect both clients
 to it. The aggregator surfaces `echo` twice (`alpha:echo` and
 `beta:echo`) and routing still dispatches deterministically by
-prefix — so the round-trip exercises the same code paths a real
+prefix, so the round-trip exercises the same code paths a real
 multi-server setup would use.
 
 ## Run it
@@ -54,11 +54,11 @@ rebar3 shell --eval 'agent_host:run().'
 
 ## Companion modules
 
-- `barrel_mcp_agent` — the aggregator and router this example
+- `barrel_mcp_agent`: the aggregator and router this example
   showcases. See `guides/features.md` and the module's edoc.
-- `barrel_mcp_tool_format` — translate the namespaced catalog
+- `barrel_mcp_tool_format`: translate the namespaced catalog
   to the Anthropic Messages API or OpenAI Chat Completions tool
   shape, and translate a model's tool-call back to
   `(Name, Args)`.
-- `barrel_mcp_clients` — the federation registry that backs
+- `barrel_mcp_clients`: the federation registry that backs
   `barrel_mcp:start_client/2`.

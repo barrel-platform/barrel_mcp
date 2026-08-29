@@ -13,14 +13,14 @@
 %%% or an external adapter such as Livery's) reads the request line
 %%% and body, then calls {@link handle/6} with:
 %%% <ul>
-%%%   <li>`Method' — the request method binary (`<<"POST">>' …).</li>
-%%%   <li>`Path' — the request target (query string allowed; it is
+%%%   <li>`Method': the request method binary (`<<"POST">>' …).</li>
+%%%   <li>`Path': the request target (query string allowed; it is
 %%%       stripped here).</li>
-%%%   <li>`Headers' — a `[{binary(), binary()}]' proplist.
+%%%   <li>`Headers': a `[{binary(), binary()}]' proplist.
 %%%       Lookups are case-insensitive.</li>
-%%%   <li>`Body' — the full request body (`<<>>' when none).</li>
-%%%   <li>`Responder' — a map of I/O closures (see below).</li>
-%%%   <li>`Config' — the engine configuration (see the `config()' type).</li>
+%%%   <li>`Body': the full request body (`<<>>' when none).</li>
+%%%   <li>`Responder': a map of I/O closures (see below).</li>
+%%%   <li>`Config': the engine configuration (see the `config()' type).</li>
 %%% </ul>
 %%%
 %%% The `Responder' abstracts response delivery so the engine never
@@ -247,7 +247,7 @@ reply_json(Headers, Responder, Config, Status, Envelope) ->
     ).
 
 %%====================================================================
-%% Streamable transport — POST
+%% Streamable transport: POST
 %%====================================================================
 
 stream_post(Headers, Body, Responder, Config) ->
@@ -1589,7 +1589,7 @@ maybe_capture_initialize_version(_, _, _) ->
     ok.
 
 %%====================================================================
-%% Streamable transport — GET (long-lived SSE) and DELETE
+%% Streamable transport: GET (long-lived SSE) and DELETE
 %%====================================================================
 
 stream_get_sse(Headers, Responder, Config) ->

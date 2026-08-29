@@ -187,7 +187,7 @@ expired_subject_token_blocks_init(_Config) ->
                 resource => McpUrl
             }}
     },
-    %% `start/1' returns asynchronously — the gen_statem accepts
+    %% `start/1' returns asynchronously, the gen_statem accepts
     %% the spec, then fails during the connecting state when the
     %% auth handle init walks the EMA chain. Monitor the pid and
     %% wait for the EXIT.

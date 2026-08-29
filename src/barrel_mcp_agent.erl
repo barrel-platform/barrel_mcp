@@ -105,9 +105,9 @@ to_openai(Opts) ->
 %% prefix selects the client and the `ToolName' suffix is forwarded.
 %% Errors:
 %% <ul>
-%%   <li>`{error, no_separator}' — the name does not contain the
+%%   <li>`{error: no_separator}', the name does not contain the
 %%       configured separator.</li>
-%%   <li>`{error, unknown_server}' — no client is registered under
+%%   <li>`{error: unknown_server}', no client is registered under
 %%       the parsed `ServerId'.</li>
 %%   <li>Any error returned by
 %%       {@link barrel_mcp_client:call_tool/4}.</li>

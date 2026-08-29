@@ -22,7 +22,7 @@ deployment, and connects to both. See the
 
 ### Transports
 
-- HTTP transport (`barrel_mcp_http`) — JSON-RPC over POST. Legacy.
+- HTTP transport (`barrel_mcp_http`): JSON-RPC over POST. Legacy.
 - Streamable HTTP transport (`barrel_mcp_http_stream`): every
   revision from `2026-07-28` down to `2024-11-05`. POST (JSON or
   SSE), GET (SSE, legacy), DELETE (legacy), OPTIONS. Default bind
@@ -86,7 +86,7 @@ deployment, and connects to both. See the
 
 ### Registries
 
-- **Tools** — handlers may be arity 1 or arity 2. Arity-2
+- **Tools**: handlers may be arity 1 or arity 2. Arity-2
   handlers receive a `Ctx` map with `session_id`, `request_id`,
   `progress_token`, the inbound `meta` map (the spec's `_meta`
   extension hook), and an `emit_progress` function.
@@ -94,25 +94,25 @@ deployment, and connects to both. See the
   `{structured_meta, Data, Content, Map}`,
   `{tool_error, Content, Map}`) attach `_meta` to the response
   envelope.
-- **Resources** — text/binary content, MIME types,
+- **Resources**: text/binary content, MIME types,
   `notifications/resources/updated` for live updates. Handlers
   may return a single block (`#{text := _}` /
   `#{blob := _, mimeType := _}`, with optional `mimeType` and
   `annotations`) or a list of pre-built content blocks for
   multi-part responses.
-- **Resource templates** — RFC 6570 URI templates, surfaced via
+- **Resource templates**: RFC 6570 URI templates, surfaced via
   `resources/templates/list`. `resources/read` against a URI
   matching a registered template auto-expands the variables
   (Level 1, simple `{var}` substitutions) and routes to the
   template handler with the substituted values in `Args`.
-- **Prompts** — multi-message conversation templates with
+- **Prompts**: multi-message conversation templates with
   arguments.
-- **Completions** — keyed by `{prompt, Name, Arg}` or
+- **Completions**: keyed by `{prompt, Name, Arg}` or
   `{resource_template, Uri, Arg}`; advertised via the
   `completions` capability when at least one is registered.
 - All registrations accept optional `title` and `icons`.
 - Tool, resource, prompt, and resource-template registrations
-  also accept `annotations` — a free-form map surfaced verbatim
+  also accept `annotations`, a free-form map surfaced verbatim
   under `annotations` in the matching `*/list` payload. Tools use
   `readOnlyHint`, `destructiveHint`, `idempotentHint`,
   `openWorldHint`; resources/prompts/templates use `audience`
@@ -126,7 +126,7 @@ deployment, and connects to both. See the
 - `validate_input` and `validate_output` opt-in schema validation
   via `barrel_mcp_schema`.
 - `long_running => true` returns a `taskId` immediately and runs
-  the worker in the background. Backed by `barrel_mcp_tasks` —
+  the worker in the background. Backed by `barrel_mcp_tasks`, 
   surfaces `tasks/list`, `tasks/get`, `tasks/cancel`, and
   `notifications/tasks/status`.
 - Cancellation: cooperative arity-2 handlers see
@@ -189,7 +189,7 @@ by the spec.
 | Streamable HTTP | `barrel_mcp_client_http` | POST with `application/json, text/event-stream`, SSE on POST and on a long-lived GET, `Mcp-Session-Id` capture, `MCP-Protocol-Version` after init, DELETE on close, 401 retry through `barrel_mcp_client_auth`. |
 | stdio | `barrel_mcp_client_stdio` | Subprocess line-delimited JSON-RPC. |
 
-### Protocol coverage (Phase A — shipped)
+### Protocol coverage (Phase A, shipped)
 
 - Speaks every revision from `2026-07-28` down to `2024-11-05`.
   `protocol_version => auto` (the default) probes with
@@ -291,7 +291,7 @@ by the spec.
     with `client_secret` (HTTP Basic) or `client_assertion`
     (`private_key_jwt`, RFC 7523). Optional `scopes`, `resource`.
     The library fetches the token eagerly during `init/1` and
-    re-acquires via the same grant on 401 — no refresh_token
+    re-acquires via the same grant on 401, no refresh_token
     needed.
   - Enterprise-Managed Authorization (MCP `ext-auth` EMA) for
     SSO-driven hosts: pass `auth => {oauth_enterprise, Config}`.
@@ -317,12 +317,12 @@ registry into a single namespaced tool catalog the host can hand
 to an LLM, plus a router that dispatches a model's tool call back
 to the right MCP server.
 
-- `list_tools/0,1` — aggregated `tools/list` across every
+- `list_tools/0,1`: aggregated `tools/list` across every
   registered client; tool names rewritten to
   `<<"ServerId<sep>ToolName">>` (default separator `:`).
-- `to_anthropic/0,1`, `to_openai/0,1` — the same catalog in the
+- `to_anthropic/0,1`, `to_openai/0,1`: the same catalog in the
   matching provider shape.
-- `call_tool/2,3` — parses the namespaced name, routes to the
+- `call_tool/2,3`: parses the namespaced name, routes to the
   right client. Errors `{error, no_separator | unknown_server}`
   cover the parse / lookup paths.
 
@@ -332,8 +332,8 @@ Translates MCP tool maps to the shapes the major LLM provider
 APIs expect, and translates a model's tool-call back into the
 `(Name, Arguments)` pair `barrel_mcp_client:call_tool/4` consumes.
 
-- `to_anthropic/1`, `to_openai/1` — MCP tool → provider tool.
-- `from_anthropic_call/1`, `from_openai_call/1` — provider call →
+- `to_anthropic/1`, `to_openai/1`: MCP tool → provider tool.
+- `from_anthropic_call/1`, `from_openai_call/1`: provider call →
   `{Name, Args}`. Accepts both parsed maps and JSON-string
   arguments (the OpenAI wire shape).
 

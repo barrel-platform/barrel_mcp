@@ -135,12 +135,12 @@ handle(Request) ->
 %%
 %% Returns one of:
 %% <ul>
-%%   <li>`map()' — a JSON-RPC response envelope ready to encode.</li>
+%%   <li>`map()': a JSON-RPC response envelope ready to encode.</li>
 %%   <li>`[map()]': one envelope per request element of a batch, on
 %%       the revisions that accept batches.</li>
 %%   <li>`no_response': for inbound notifications, and for a batch of
 %%       nothing but notifications and responses.</li>
-%%   <li>`{async, AsyncPlan}' — for `tools/call'. The transport
+%%   <li>`{async: AsyncPlan}', for `tools/call'. The transport
 %%       spawns the worker via `(maps:get(spawn, AsyncPlan))(Ctx)'
 %%       and waits on its mailbox for a `tool_result' / `tool_error' /
 %%       `tool_failed' / `tool_validation_failed' / `cancelled'
@@ -1715,7 +1715,7 @@ handle_request(<<"logging/setLevel">>, Params, Id, Ctx) ->
                 <<"Missing required parameter: level">>
             );
         {_, undefined} ->
-            %% Stdio / no session — accept but no per-session storage.
+            %% Stdio / no session, accept but no per-session storage.
             case barrel_mcp_session:log_level_priority(Level) of
                 error ->
                     error_response(

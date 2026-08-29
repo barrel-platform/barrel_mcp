@@ -335,11 +335,11 @@ list_resources() ->
 %%
 %% Options:
 %% <ul>
-%%   <li>`name' — display name.</li>
-%%   <li>`uri_template' — RFC 6570 URI template (e.g.
+%%   <li>`name': display name.</li>
+%%   <li>`uri_template': RFC 6570 URI template (e.g.
 %%       `<<"file:///{path}">>').</li>
-%%   <li>`description' — human-readable description.</li>
-%%   <li>`mime_type' — content type (default `<<"text/plain">>').</li>
+%%   <li>`description': human-readable description.</li>
+%%   <li>`mime_type': content type (default `<<"text/plain">>').</li>
 %% </ul>
 -spec reg_resource_template(Name, Module, Function, Opts) -> ok | {error, term()} when
     Name :: binary(),
@@ -902,7 +902,7 @@ notify_log(SessionId, Level, Data) ->
 ) -> ok.
 notify_log(SessionId, Level, Logger, Data) ->
     case barrel_mcp_session:log_level_priority(Level) of
-        %% invalid level — drop
+        %% invalid level, drop
         error ->
             ok;
         EventPrio ->

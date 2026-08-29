@@ -739,7 +739,7 @@ transition(SessionId, TaskId, Status, Result, Reason) ->
             notify_changed(SessionId, Updated),
             ok;
         {ok, _Terminal} ->
-            %% Already terminal — idempotent.
+            %% Already terminal, idempotent.
             ok;
         {error, not_found} ->
             {error, not_found}

@@ -66,7 +66,7 @@ aggregates_and_routes(_Config) ->
     ok = wait_ready(Beta, 30),
 
     %% Both clients see the same registry, so the aggregator should
-    %% surface the `echo' tool twice — once per ServerId.
+    %% surface the `echo' tool twice, once per ServerId.
     Tools = barrel_mcp_agent:list_tools(),
     Names = [maps:get(<<"name">>, T) || T <- Tools],
     ?assert(lists:member(<<"alpha:echo">>, Names)),

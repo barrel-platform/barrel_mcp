@@ -511,7 +511,7 @@ A feature release that completes the OAuth surface vs MCP `2025-11-25` and `mode
 
 - The MCP spec defines `_meta` as the extensibility hook on every JSON-RPC envelope. Previously only `_meta.progressToken` was read on `tools/call`; everything else dropped on the floor. Now:
   - **Inbound**: tool handler `Ctx` carries the full inbound `_meta` map under the `meta` key. `progress_token` stays for back-compat. The async plan emitted by `barrel_mcp_protocol:handle/1` for `tools/call` carries `meta` so transports without their own `_meta` extraction (stdio, legacy HTTP) get it via `barrel_mcp_protocol:drive_async_plan/2`.
-  - **Outbound**: new return shapes on tool handlers — `{result_meta, Result, MetaMap}`, `{structured_meta, Data, Content, MetaMap}`, `{tool_error, Content, MetaMap}` — surface `_meta` on the response. The existing tuple shapes are unchanged.
+  - **Outbound**: new return shapes on tool handlers: `{result_meta, Result, MetaMap}`, `{structured_meta, Data, Content, MetaMap}`, `{tool_error, Content, MetaMap}`: surface `_meta` on the response. The existing tuple shapes are unchanged.
   - **Envelope helpers**: new `barrel_mcp_protocol:success_response/3` and `error_response/4` accept an optional `_meta` map. Empty map omits the field. Used by every transport's tool-outcome path so the wire shape is consistent.
 - 8 new eunit cases cover the envelope helpers, `drive_async_plan` for the new result/structured/error meta variants, and an end-to-end `_meta` round-trip through a tool that echoes Ctx-supplied `_meta` back through the response.
 
@@ -551,7 +551,7 @@ endpoint, the OAuth Client Credentials grant from
 apps. The default `protocol_version` env is now `2025-11-25`
 (was `2025-03-26`).
 
-**Breaking wire-level changes since 1.1.0** — hosts that
+**Breaking wire-level changes since 1.1.0**: hosts that
 produced or consumed these envelopes need to update:
 
 - `notifications/tasks/changed` was renamed to `notifications/tasks/status` (the spec method name).
@@ -570,13 +570,13 @@ produced or consumed these envelopes need to update:
 
 ### Cancellation race fix in Streamable HTTP
 
-- `wait_for_tool/2` now does a 50ms lookahead after every tool outcome to absorb a pending `{cancelled, _}` message that races with the worker's response. A cooperative arity-2 handler that returns `{tool_error, ...}` on cancel could deliver its outcome to the waiter's mailbox **before** the session-emitted `{cancelled, _}`, depending on scheduler — which made the HTTP path emit a JSON-RPC `isError: true` envelope instead of the spec-mandated 200 + empty body. With the lookahead the cancel always wins.
+- `wait_for_tool/2` now does a 50ms lookahead after every tool outcome to absorb a pending `{cancelled, _}` message that races with the worker's response. A cooperative arity-2 handler that returns `{tool_error, ...}` on cancel could deliver its outcome to the waiter's mailbox **before** the session-emitted `{cancelled, _}`, depending on scheduler, which made the HTTP path emit a JSON-RPC `isError: true` envelope instead of the spec-mandated 200 + empty body. With the lookahead the cancel always wins.
 
 ### OAuth Client Credentials grant (MCP `ext-auth` extension)
 
 - `barrel_mcp_client_auth_oauth` now supports the OAuth 2.1 `client_credentials` grant for unattended agent hosts. Pass `auth => {oauth_client_credentials, Config}` on the connect spec; required keys are `token_endpoint` and `client_id`, plus either `client_secret` (HTTP Basic per RFC 6749) or `client_assertion` (`private_key_jwt`, RFC 7523). Optional `scopes`, `resource`.
 - New public exchanger `barrel_mcp_client_auth_oauth:client_credentials/2` for direct use outside the auth-handle flow.
-- The library fetches the token eagerly during `init/1` (so a misconfigured client fails fast) and re-acquires via the same grant on every 401 — no refresh_token involved. Reuses the existing PRM + AS metadata discovery code.
+- The library fetches the token eagerly during `init/1` (so a misconfigured client fails fast) and re-acquires via the same grant on every 401, no refresh_token involved. Reuses the existing PRM + AS metadata discovery code.
 - Implements the OAuth Client Credentials extension from `modelcontextprotocol/ext-auth`. The Enterprise-Managed Authorization extension (token-exchange + JWT bearer assertions) is left for follow-up; ask if you need it.
 
 ### Doc cleanup: stale roadmap items + subscription session scope
@@ -584,7 +584,7 @@ produced or consumed these envelopes need to update:
 - `guides/features.md`'s roadmap section called out a "periodic deadline timer" and "client-side `Last-Event-ID` resume" as missing. Both turn out to be either by-design (default request timeout already bounds every call; explicit `infinity` is a deliberate caller choice) or already shipped (the transport's `reopen_sse` loop preserves `sse_last_event_id` across server-initiated SSE closes, and a full client restart re-initializes the session anyway). Replaced the roadmap section with notes explaining each.
 - `guides/tools-resources-prompts.md` now calls out that `resources/subscribe` is scoped to the calling `Mcp-Session-Id`: when a client re-initializes, the new session id has no carry-over subscriptions and must subscribe again. Matches the spec's session-lifecycle model; previously implicit.
 
-### `examples/agent_host` — runnable multi-server federation demo
+### `examples/agent_host`: runnable multi-server federation demo
 
 - New example app showing the `barrel_mcp_agent` aggregator + router end-to-end. `agent_host:run/0` connects two clients to one in-process MCP server under different `ServerId`s, calls `barrel_mcp_agent:list_tools/0` to surface the namespaced catalog, and routes a `<<"beta:echo">>` call through the right client. CT case asserts the namespaced names appear and the routed result round-trips.
 - Closes the docs loop for `barrel_mcp_agent` (the module shipped without a runnable example).
@@ -644,7 +644,7 @@ Together with sampling / elicitation / roots / progress / subscribe / tasks alre
 ### Tasks Task-shape wire alignment
 
 - Renamed the wire field `updatedAt` → `lastUpdatedAt` on every Task envelope (`tasks/get`, `tasks/list`, `notifications/tasks/changed`). The reference Python SDK models the field as `lastUpdatedAt`, and accepts no other name.
-- Added a `ttl` field to every Task envelope (always `null` for now — we don't yet honour client-supplied TTLs). The Python SDK's `Task` model requires the field to be present.
+- Added a `ttl` field to every Task envelope (always `null` for now, we don't yet honour client-supplied TTLs). The Python SDK's `Task` model requires the field to be present.
 - `tasks/cancel` now returns the cancelled Task instead of `{}`. Matches `CancelTaskResult` in the reference SDK; existing barrel_mcp clients that pattern-match `{ok, _}` are unaffected.
 - Extended the Direction A interop test to call `experimental.list_tasks()`, exercising the Task wire shape end-to-end against the reference pydantic models.
 
@@ -659,13 +659,13 @@ Together with sampling / elicitation / roots / progress / subscribe / tasks alre
 - `make interop-setup` creates the venv, `make interop-test` runs the suite. The CT cases skip cleanly when `INTEROP_PYTHON` is unset, so the default `rebar3 ct` loop is unaffected by missing Python tooling.
 - New `interop` CI job runs both directions on Linux with Python 3.12 + OTP 28.
 
-### `barrel_mcp_agent` — multi-server tool aggregator
+### `barrel_mcp_agent`: multi-server tool aggregator
 
 - New module sitting on top of `barrel_mcp_clients`. Aggregates `tools/list` across every connected MCP client, rewrites each tool name to `<<"ServerId<sep>ToolName">>` (default separator `:`), and routes a namespaced `call_tool/2,3` back to the correct client.
 - `to_anthropic/0,1` and `to_openai/0,1` return the aggregated catalog directly in provider format, ready to hand to a model.
 - Closes the orchestration gap for hosts running an agent loop against multiple MCP servers.
 
-### `barrel_mcp_tool_format` — LLM provider tool-shape translator
+### `barrel_mcp_tool_format`: LLM provider tool-shape translator
 
 - New module bridging MCP tool definitions and the tool shapes the LLM provider APIs expect.
 - `to_anthropic/1`, `to_openai/1` translate MCP `tools/list` entries (single map or list) to the Anthropic Messages API and OpenAI Chat Completions tool shapes.
@@ -675,11 +675,11 @@ Together with sampling / elicitation / roots / progress / subscribe / tasks alre
 ### `resources/read` content-block flexibility
 
 - Resource handlers may now return a list of pre-built content blocks; each block is passed through verbatim, with `uri` auto-injected when the handler omits it.
-- The `#{text := _}` and `#{blob := _, mimeType := _}` map shapes accept optional `mimeType` (text only — blob already requires it) and `annotations` keys, matching the spec's per-content metadata. Both flow through to the wire under `mimeType` / `annotations`.
+- The `#{text := _}` and `#{blob := _, mimeType := _}` map shapes accept optional `mimeType` (text only, blob already requires it) and `annotations` keys, matching the spec's per-content metadata. Both flow through to the wire under `mimeType` / `annotations`.
 
 ### Tool, resource, prompt, and resource-template annotations
 
-- `reg_tool/4`, `reg_resource/4`, `reg_prompt/4`, and `reg_resource_template/4` accept a new `annotations` option — a free-form map surfaced verbatim under `annotations` in the matching `*/list` payload. The MCP spec defines `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint` for tools, and `audience` / `priority` for resources, prompts, and templates. Registrations without annotations omit the field on the wire.
+- `reg_tool/4`, `reg_resource/4`, `reg_prompt/4`, and `reg_resource_template/4` accept a new `annotations` option, a free-form map surfaced verbatim under `annotations` in the matching `*/list` payload. The MCP spec defines `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint` for tools, and `audience` / `priority` for resources, prompts, and templates. Registrations without annotations omit the field on the wire.
 
 ### `logging/setLevel` actually filters the log stream
 
@@ -727,7 +727,7 @@ Together with sampling / elicitation / roots / progress / subscribe / tasks alre
 ### Spec parity: protocol bump, async tools, list-changed, auth hardening
 
 - **Server protocol bumped to `2025-11-25`.** `initialize` negotiates with the client: when the client requests a version we speak, we echo it; otherwise we reply with our preferred version. Capabilities advertised in `initialize` now include `listChanged: true` on `tools`, `resources`, and `prompts`.
-- **Async tool execution.** `barrel_mcp_protocol:handle/2` returns `{async, AsyncPlan}` for `tools/call`; the transport invokes the spawn closure to start a worker, records the in-flight entry, and waits on its mailbox. Tool handlers may export arity 1 (legacy) or arity 2 (`(Args, Ctx)` — the new shape that receives session/progress context).
+- **Async tool execution.** `barrel_mcp_protocol:handle/2` returns `{async, AsyncPlan}` for `tools/call`; the transport invokes the spawn closure to start a worker, records the in-flight entry, and waits on its mailbox. Tool handlers may export arity 1 (legacy) or arity 2 (`(Args, Ctx)`: the new shape that receives session/progress context).
 - **`notifications/cancelled` wired end-to-end.** Inbound cancel finds the in-flight worker via `barrel_mcp_session:cancel_in_flight/2`, sends `{cancel, RequestId}` to the worker and `{cancelled, RequestId}` to the waiter. Per the MCP spec the cancelled HTTP request closes with 200 + empty body; no JSON-RPC response is emitted.
 - **`notifications/progress` emit + handler context.** New façades `barrel_mcp:notify_progress/3,4`. Arity-2 tool handlers receive `Ctx` with an `emit_progress` function bound to the session's progress token, so they can emit progress without knowing about sessions.
 - **`notifications/roots/list_changed` dispatch hook.** Configurable via `application:set_env(barrel_mcp, roots_changed_handler, {Mod, Fun}).`. No-op when unset.
@@ -741,7 +741,7 @@ Together with sampling / elicitation / roots / progress / subscribe / tasks alre
 
 ### Security and spec conformance (Streamable HTTP + JSON-RPC)
 
-- **Origin validation.** Streamable HTTP and the legacy `barrel_mcp_http` now validate the `Origin` header on POST/GET/DELETE/OPTIONS using `uri_string:parse/1` (structural scheme/host/port match — no binary prefix matching). New options `allowed_origins` and `allow_missing_origin`. The literal `Origin: null` value is treated as a distinct present origin and is rejected unless explicitly allowed.
+- **Origin validation.** Streamable HTTP and the legacy `barrel_mcp_http` now validate the `Origin` header on POST/GET/DELETE/OPTIONS using `uri_string:parse/1` (structural scheme/host/port match, no binary prefix matching). New options `allowed_origins` and `allow_missing_origin`. The literal `Origin: null` value is treated as a distinct present origin and is rejected unless explicitly allowed.
 - **Default bind to loopback.** Both transports default to `{127, 0, 0, 1}`. Public binds require an explicit `allowed_origins`; the start function refuses with `{error, allowed_origins_required}` otherwise.
 - **CORS tightening.** `Access-Control-Allow-Origin` now echoes the validated `Origin` (no wildcard) with `Vary: Origin`, and is omitted entirely when no `Origin` is sent. The `Access-Control-Allow-Headers` allow-list is derived from the configured auth provider via a new optional `auth_headers/1` callback on `barrel_mcp_auth`. Custom API-key header names are honoured both in CORS and in `extract_headers`.
 - **Streamable HTTP response shape.** Notifications and POSTed responses to server-initiated requests now return **202 Accepted** with empty body. Missing `Mcp-Session-Id` on a non-initialize request returns **400 Bad Request**; unknown/invalid id returns **404 Not Found**. `initialize` is the only request that may run without a session.
@@ -787,11 +787,11 @@ Together with sampling / elicitation / roots / progress / subscribe / tasks alre
 
 ### Added (docs)
 
-- `guides/building-a-client.md` — task-oriented walkthrough for hosting MCP clients on `barrel_mcp` (transport choice, connect spec, lifecycle, capability negotiation, tool calls, server-initiated requests via the handler behaviour, OAuth, federation, schema validation, error reference).
-- `guides/internals.md` — architecture and behaviour contracts (module map, supervision tree, state machine, message flow, transport/handler/auth contracts, ETS layout, wire format).
-- `examples/echo_client/` — minimal MCP host that boots a local server, lists tools, calls `echo`. Common-test suite asserts the round-trip.
-- `examples/sampling_host/` — host implementing `barrel_mcp_client_handler` to answer `sampling/createMessage`. Common-test suite covers the full server-to-client round-trip.
-- `test/snippet_check.escript` + `test/doc_snippets_SUITE.erl` — extracts every `` ```erlang `` fenced block from the new guides and example READMEs and verifies it compiles. Wired into `rebar3 ct`.
+- `guides/building-a-client.md`: task-oriented walkthrough for hosting MCP clients on `barrel_mcp` (transport choice, connect spec, lifecycle, capability negotiation, tool calls, server-initiated requests via the handler behaviour, OAuth, federation, schema validation, error reference).
+- `guides/internals.md`: architecture and behaviour contracts (module map, supervision tree, state machine, message flow, transport/handler/auth contracts, ETS layout, wire format).
+- `examples/echo_client/`: minimal MCP host that boots a local server, lists tools, calls `echo`. Common-test suite asserts the round-trip.
+- `examples/sampling_host/`: host implementing `barrel_mcp_client_handler` to answer `sampling/createMessage`. Common-test suite covers the full server-to-client round-trip.
+- `test/snippet_check.escript` + `test/doc_snippets_SUITE.erl`: extracts every `` ```erlang `` fenced block from the new guides and example READMEs and verifies it compiles. Wired into `rebar3 ct`.
 - `Makefile` with `examples-setup` and `examples-test` targets; CI runs example suites on OTP 27 + 28.
 - Per-function `@doc` and `-spec` on the public client surface (`barrel_mcp_client`, `barrel_mcp_clients`, `barrel_mcp_client_handler` example).
 - ex_doc sidebar reorganised: client modules grouped, new "Building a Client" / "Client Internals" pages.

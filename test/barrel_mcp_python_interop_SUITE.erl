@@ -117,7 +117,7 @@ init_per_testcase(_TC, Config) -> Config.
 end_per_testcase(_TC, _Config) -> ok.
 
 %%====================================================================
-%% Direction A — Python client → Erlang server
+%% Direction A: Python client → Erlang server
 %%====================================================================
 
 python_client_against_erlang_server(Config) ->
@@ -163,7 +163,7 @@ legacy_direction_a(Python, Flags) ->
     ok.
 
 %%====================================================================
-%% Direction B — Erlang client → Python server
+%% Direction B: Erlang client → Python server
 %%====================================================================
 
 erlang_client_against_python_server(Config) ->

@@ -1,7 +1,7 @@
 #!/usr/bin/env escript
 %%! -noshell
 %%
-%% snippet_check — extract every ```erlang fenced block from the
+%% snippet_check: extract every ```erlang fenced block from the
 %% project's documentation and verify each compiles.
 %%
 %% Usage:
@@ -9,7 +9,7 @@
 %%
 %% Conventions:
 %%   - Fences with info string `erlang' are compiled.
-%%   - Fences with info string `erl' (or any other) are skipped — use
+%%   - Fences with info string `erl' (or any other) are skipped, use
 %%     them for illustrative output, REPL transcripts, or fragments
 %%     that aren't expected to compile in isolation.
 %%   - A snippet that starts with `-module(' is treated as a complete
@@ -47,7 +47,7 @@ main(_) ->
 %%====================================================================
 
 %% New, snippet-tested docs only. Older guides (client.md, http-stream.md,
-%% etc.) remain illustrative — port them over when their snippets are
+%% etc.) remain illustrative, port them over when their snippets are
 %% rewritten to compile standalone.
 collect_doc_files() ->
     Globs = ["guides/building-a-client.md",

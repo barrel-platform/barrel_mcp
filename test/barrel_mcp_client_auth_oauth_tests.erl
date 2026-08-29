@@ -374,7 +374,7 @@ test_client_credentials_jwt() ->
 
 test_client_credentials_refresh() ->
     %% A 401 in client_credentials mode should re-acquire via the
-    %% same grant — no refresh_token involved.
+    %% same grant, no refresh_token involved.
     Auth = barrel_mcp_client_auth:new(
         {oauth_client_credentials, #{
             allow_insecure_oauth => true,
@@ -481,7 +481,7 @@ test_enterprise_managed_refresh() ->
     ).
 
 test_enterprise_managed_subject_token_expired() ->
-    %% IdP returns invalid_grant — caller learns the typed
+    %% IdP returns invalid_grant, caller learns the typed
     %% subject_token_expired result so it can re-acquire the ID
     %% Token from the IdP.
     Result = barrel_mcp_client_auth:new(

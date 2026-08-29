@@ -7,28 +7,28 @@
 %%%
 %%% States:
 %%% <ul>
-%%%   <li>`connecting'   — transport is opening.</li>
-%%%   <li>`initializing' — `initialize' request in flight.</li>
-%%%   <li>`ready'        — handshake complete; calls accepted.</li>
-%%%   <li>`closing'      — owner asked to close.</li>
+%%%   <li>`connecting': transport is opening.</li>
+%%%   <li>`initializing': `initialize' request in flight.</li>
+%%%   <li>`ready': handshake complete; calls accepted.</li>
+%%%   <li>`closing': owner asked to close.</li>
 %%% </ul>
 %%%
 %%% Inbound JSON-RPC envelopes from the transport are routed by
 %%% `decode_envelope/1':
 %%% <ul>
-%%%   <li>response/error with `id' — match against the pending-request
+%%%   <li>response/error with `id': match against the pending-request
 %%%       table, post the result to the waiting caller.</li>
-%%%   <li>request with `id'        — dispatch to the configured
+%%%   <li>request with `id': dispatch to the configured
 %%%       `barrel_mcp_client_handler' module; reply (sync or async)
 %%%       goes back over the same transport.</li>
-%%%   <li>notification (no `id')   — dispatch to handler; resource
+%%%   <li>notification (no `id'): dispatch to handler; resource
 %%%       update notifications are also routed to subscribers.</li>
 %%% </ul>
 %%%
 %%% Server-side host application code never sees the transport
 %%% layer; it talks to this module via the API below. Whether to bind
 %%% an LLM provider (Anthropic, OpenAI, Hermes-style local model) into
-%%% this loop is the host's job — `barrel_mcp' itself stays a pure
+%%% this loop is the host's job, `barrel_mcp' itself stays a pure
 %%% MCP library.
 %%% @end
 %%%-------------------------------------------------------------------
@@ -231,11 +231,11 @@ list_tools(Pid) ->
 %%
 %% `Opts' may contain:
 %% <ul>
-%%   <li>`{cursor, Cursor}' — start from a previously-returned
+%%   <li>`{cursor: Cursor}', start from a previously-returned
 %%       `nextCursor'.</li>
-%%   <li>`{want_cursor, true}' — return `{ok, Items, NextCursor}' even
+%%   <li>`{want_cursor: true}', return `{ok, Items, NextCursor}' even
 %%       on the last page (with `undefined' for `NextCursor').</li>
-%%   <li>`{timeout, Ms}' — override the per-request timeout.</li>
+%%   <li>`{timeout: Ms}', override the per-request timeout.</li>
 %% </ul>
 -spec list_tools(pid(), map()) ->
     {ok, [map()], NextCursor :: binary() | undefined}
@@ -260,10 +260,10 @@ call_tool(Pid, Name, Args) ->
 %%
 %% `Opts' may contain:
 %% <ul>
-%%   <li>`{progress_token, Token}' — register the calling process to
+%%   <li>`{progress_token: Token}', register the calling process to
 %%       receive `{mcp_progress, Token, Params}' messages until the
 %%       request settles.</li>
-%%   <li>`{timeout, Ms}' — override the per-request timeout
+%%   <li>`{timeout: Ms}', override the per-request timeout
 %%       (`request_timeout' from the connect spec, default 30000).</li>
 %% </ul>
 -spec call_tool(pid(), binary(), map(), map()) -> {ok, map()} | {error, term()}.

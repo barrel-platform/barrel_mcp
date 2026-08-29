@@ -74,7 +74,7 @@ test_start_stop() ->
     ok = barrel_mcp:stop_http_stream().
 
 test_post_json() ->
-    %% Sessions disabled — `ping' goes through without one.
+    %% Sessions disabled, `ping' goes through without one.
     {ok, _} = barrel_mcp:start_http_stream(#{
         port => 19091,
         session_enabled => false

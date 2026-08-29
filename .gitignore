@@ -4,7 +4,7 @@ _checkouts/
 ebin/
 *.beam
 
-# Examples — _checkouts symlinks created by `make examples-setup'
+# Examples: _checkouts symlinks created by `make examples-setup'
 examples/*/_checkouts/
 
 # Python interop venv created by `make interop-setup'

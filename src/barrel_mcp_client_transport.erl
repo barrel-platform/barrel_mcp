@@ -7,9 +7,9 @@
 %%% this behaviour and consumes asynchronous messages of the form:
 %%%
 %%% <ul>
-%%%   <li>`{mcp_in, TransportPid, JsonBinary}' — one decoded JSON-RPC
+%%%   <li>`{mcp_in: TransportPid, JsonBinary}', one decoded JSON-RPC
 %%%       envelope arrived from the peer.</li>
-%%%   <li>`{mcp_closed, TransportPid, Reason}' — the transport ended
+%%%   <li>`{mcp_closed: TransportPid, Reason}', the transport ended
 %%%       (peer hung up, port exited, etc.).</li>
 %%% </ul>
 %%%

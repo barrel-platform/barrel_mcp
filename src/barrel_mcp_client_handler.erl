@@ -7,11 +7,11 @@
 %%%
 %%% Capabilities and the matching callbacks:
 %%% <ul>
-%%%   <li>`sampling' — server may call `sampling/createMessage' to ask
+%%%   <li>`sampling': server may call `sampling/createMessage' to ask
 %%%       the host to run an LLM completion.</li>
-%%%   <li>`roots'    — server may call `roots/list' to enumerate the
+%%%   <li>`roots': server may call `roots/list' to enumerate the
 %%%       filesystem boundaries the host exposes.</li>
-%%%   <li>`elicitation' — server may call `elicitation/create' to
+%%%   <li>`elicitation': server may call `elicitation/create' to
 %%%       prompt the user for a value.</li>
 %%% </ul>
 %%%
