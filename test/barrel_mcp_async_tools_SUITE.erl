@@ -176,14 +176,20 @@ progress_emits_events(Config) ->
         Body,
         [with_body]
     ),
-    Resp = json:decode(RespBody),
+    Resp = final_envelope(RespBody),
     ?assertEqual(11, maps:get(<<"id">>, Resp)),
     ?assert(maps:is_key(<<"result">>, Resp)),
 
-    %% Drain progress events from the SSE collector. Three are
-    %% expected before the run completes; the response above already
-    %% returned, so the events are buffered in the collector mailbox.
-    Events = collect_progress(3, []),
+    %% Progress rides the call's own response stream, as the reference
+    %% server routes it (related_request_id): three events precede the
+    %% result there, and none reach the standalone GET stream.
+    {Datas, _} = split_sse(<<RespBody/binary, "\n\n">>),
+    Events = [
+        E
+     || D <- Datas,
+        E <- [json:decode(D)],
+        maps:get(<<"method">>, E, <<>>) =:= <<"notifications/progress">>
+    ],
     ?assertEqual(3, length(Events)),
     [E1 | _] = Events,
     ?assertEqual(<<"notifications/progress">>, maps:get(<<"method">>, E1)),
@@ -220,7 +226,7 @@ tool_error_returns_isError(Config) ->
         Body,
         [with_body]
     ),
-    Resp = json:decode(RB),
+    Resp = final_envelope(RB),
     Result = maps:get(<<"result">>, Resp),
     ?assertEqual(true, maps:get(<<"isError">>, Result)),
     [Block | _] = maps:get(<<"content">>, Result),
@@ -268,7 +274,7 @@ auth_info_passed_to_tool(Config) ->
         Body,
         [with_body]
     ),
-    Resp = json:decode(RB),
+    Resp = final_envelope(RB),
     Result = maps:get(<<"result">>, Resp),
     [Block | _] = maps:get(<<"content">>, Result),
     ?assertEqual(<<"user1">>, maps:get(<<"text">>, Block)),
@@ -445,21 +451,6 @@ extract_data(Block) ->
         [D | _] -> D
     end.
 
-collect_progress(0, Acc) ->
-    lists:reverse(Acc);
-collect_progress(N, Acc) ->
-    receive
-        {progress, Msg} ->
-            case maps:get(<<"method">>, Msg, <<>>) of
-                <<"notifications/progress">> ->
-                    collect_progress(N - 1, [Msg | Acc]);
-                _ ->
-                    collect_progress(N, Acc)
-            end
-    after 5000 ->
-        lists:reverse(Acc)
-    end.
-
 %%====================================================================
 %% No worker
 %%====================================================================
@@ -486,6 +477,17 @@ unknown_tool_leaves_the_session_usable(Config) ->
     ok = barrel_mcp_registry:unreg(tool, <<"present">>),
     ok.
 
+%% The final JSON-RPC envelope of a response, whether it came back as a
+%% JSON body or as the last event of an SSE stream.
+final_envelope(RB) ->
+    case binary:match(RB, <<"data: ">>) of
+        nomatch ->
+            final_envelope(RB);
+        _ ->
+            {Events, _} = split_sse(<<RB/binary, "\n\n">>),
+            json:decode(lists:last(Events))
+    end.
+
 call(Port, SessionId, Body) ->
     {ok, 200, _, RB} = hackney:request(
         post,
@@ -498,4 +500,4 @@ call(Port, SessionId, Body) ->
         Body,
         [with_body]
     ),
-    json:decode(RB).
+    final_envelope(RB).

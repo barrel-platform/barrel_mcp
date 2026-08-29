@@ -40,6 +40,8 @@
     with_logging/2,
     sampling/2,
     elicitation/2,
+    elicitation_defaults/2,
+    elicitation_enums/2,
     input_required_elicitation/2,
     input_required_sampling/2,
     input_required_list_roots/2,
@@ -223,6 +225,9 @@ summarise(OutDir) ->
 fixture() ->
     Tools = [
         {<<"test_simple_text">>, simple_text, #{}},
+        %% SEP-1699 SSE polling: the scenario exercises the stream, not
+        %% the tool, so any successful text result serves.
+        {<<"test_reconnection">>, simple_text, #{}},
         {<<"test_image_content">>, image_content, #{}},
         {<<"test_audio_content">>, audio_content, #{}},
         {<<"test_embedded_resource">>, embedded_resource, #{}},
@@ -237,6 +242,8 @@ fixture() ->
                 <<"properties">> => #{<<"prompt">> => #{<<"type">> => <<"string">>}}
             }
         }},
+        {<<"test_elicitation_sep1034_defaults">>, elicitation_defaults, #{}},
+        {<<"test_elicitation_sep1330_enums">>, elicitation_enums, #{}},
         {<<"test_elicitation">>, elicitation, #{
             input_schema => #{
                 <<"type">> => <<"object">>,
@@ -325,6 +332,7 @@ fixture() ->
 cleanup_fixture() ->
     Tools = [
         <<"test_simple_text">>,
+        <<"test_reconnection">>,
         <<"test_image_content">>,
         <<"test_audio_content">>,
         <<"test_embedded_resource">>,
@@ -334,6 +342,8 @@ cleanup_fixture() ->
         <<"test_tool_with_logging">>,
         <<"test_sampling">>,
         <<"test_elicitation">>,
+        <<"test_elicitation_sep1034_defaults">>,
+        <<"test_elicitation_sep1330_enums">>,
         <<"test_input_required_result_elicitation">>,
         <<"test_input_required_result_sampling">>,
         <<"test_input_required_result_list_roots">>,
@@ -478,6 +488,75 @@ elicitation(#{<<"message">> := Message}, Ctx) ->
                     Action, json:encode(Content)
                 ])
             );
+        {error, Reason} ->
+            {tool_error, [text(io_lib:format("elicitation failed: ~p", [Reason]))]}
+    end.
+
+%% SEP-1034: every property carries a default the scenario checks.
+elicitation_defaults(_, Ctx) ->
+    Schema = #{
+        <<"type">> => <<"object">>,
+        <<"properties">> => #{
+            <<"name">> => #{<<"type">> => <<"string">>, <<"default">> => <<"John Doe">>},
+            <<"age">> => #{<<"type">> => <<"integer">>, <<"default">> => 30},
+            <<"score">> => #{<<"type">> => <<"number">>, <<"default">> => 95.5},
+            <<"status">> => #{
+                <<"type">> => <<"string">>,
+                <<"enum">> => [<<"active">>, <<"inactive">>],
+                <<"default">> => <<"active">>
+            },
+            <<"verified">> => #{<<"type">> => <<"boolean">>, <<"default">> => true}
+        }
+    },
+    ask_client(<<"Confirm your details">>, Schema, Ctx).
+
+%% SEP-1330: untitled enums use `enum', titled ones `oneOf' with
+%% const/title, legacy ones enum + enumNames, and multi-select the
+%% array forms of each.
+elicitation_enums(_, Ctx) ->
+    Titled = fun(Pairs) -> [#{<<"const">> => C, <<"title">> => T} || {C, T} <- Pairs] end,
+    Schema = #{
+        <<"type">> => <<"object">>,
+        <<"properties">> => #{
+            <<"untitledSingle">> => #{
+                <<"type">> => <<"string">>, <<"enum">> => [<<"option1">>, <<"option2">>]
+            },
+            <<"titledSingle">> => #{
+                <<"type">> => <<"string">>,
+                <<"oneOf">> => Titled([
+                    {<<"value1">>, <<"Value One">>}, {<<"value2">>, <<"Value Two">>}
+                ])
+            },
+            <<"legacyEnum">> => #{
+                <<"type">> => <<"string">>,
+                <<"enum">> => [<<"opt1">>, <<"opt2">>],
+                <<"enumNames">> => [<<"Option 1">>, <<"Option 2">>]
+            },
+            <<"untitledMulti">> => #{
+                <<"type">> => <<"array">>,
+                <<"items">> => #{
+                    <<"type">> => <<"string">>, <<"enum">> => [<<"option1">>, <<"option2">>]
+                }
+            },
+            <<"titledMulti">> => #{
+                <<"type">> => <<"array">>,
+                <<"items">> => #{
+                    <<"anyOf">> => Titled([
+                        {<<"value1">>, <<"Value One">>}, {<<"value2">>, <<"Value Two">>}
+                    ])
+                }
+            }
+        }
+    },
+    ask_client(<<"Pick your options">>, Schema, Ctx).
+
+%% A blocking elicitation over whatever channel this request has.
+ask_client(Message, Schema, Ctx) ->
+    Params = #{<<"message">> => Message, <<"requestedSchema">> => Schema},
+    Opts = #{timeout_ms => 5000, channel => maps:get(channel, Ctx, undefined)},
+    case barrel_mcp:elicit_create(session(Ctx), Params, Opts) of
+        {ok, Result} ->
+            text(io_lib:format("User response: ~s", [json:encode(Result)]));
         {error, Reason} ->
             {tool_error, [text(io_lib:format("elicitation failed: ~p", [Reason]))]}
     end.

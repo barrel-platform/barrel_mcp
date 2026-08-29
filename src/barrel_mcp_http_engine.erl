@@ -847,16 +847,21 @@ handle_async_tool_call(
             %% Opting into progress or logging turns the reply into an
             %% SSE stream, opened before the tool runs.
             LogLevel = request_log_level(Reply),
-            Streaming = streams_notifications(Reply, ProgressToken, LogLevel),
+            Streaming = streams_notifications(Reply, ProgressToken, LogLevel, Headers),
             EmitProgress =
                 case Streaming of
                     true -> self_progress_fun(Self, RequestId, ProgressToken);
                     false -> emit_progress_fun(SessionId, ProgressToken)
                 end,
             EmitLog =
-                case Streaming of
-                    true -> self_log_fun(Self, RequestId, LogLevel);
-                    false -> emit_log_fun(Reply, SessionId)
+                case {Streaming, LogLevel} of
+                    %% A modern request opted in per request.
+                    {true, L} when L =/= undefined -> self_log_fun(Self, RequestId, L);
+                    %% A legacy streamed call has no per-request level:
+                    %% the session's logging/setLevel decides, and the
+                    %% message rides this request's own stream.
+                    {true, undefined} -> session_log_on_stream_fun(Self, RequestId, SessionId);
+                    {false, _} -> emit_log_fun(Reply, SessionId)
                 end,
             Ctx = #{
                 session_id => SessionId,
@@ -866,6 +871,10 @@ handle_async_tool_call(
                 emit_progress => EmitProgress,
                 emit_log => EmitLog,
                 reply_to => Self,
+                %% Where a server request raised by this tool goes: its
+                %% own response stream, the way the reference server
+                %% routes by related_request_id.
+                channel => channel_of(Streaming, Self),
                 auth_info => AuthInfo
             },
             OnProgress = start_progress_stream(
@@ -909,12 +918,27 @@ handle_async_tool_call(
 
 %% Legacy delivers both out of band on the session channel, so only a
 %% modern request that opted in needs its response turned into a stream.
-streams_notifications(_Reply, undefined, undefined) ->
-    false;
-streams_notifications(#{ctx := Ctx}, _Token, _Level) when Ctx =/= undefined ->
-    barrel_mcp_ctx:is_modern(Ctx);
-streams_notifications(_Reply, _Token, _Level) ->
-    false.
+%% The reference server answers every POST as a stream unless a JSON
+%% response was explicitly enabled (mcp/server/streamable_http.py:141),
+%% and routes a server request raised by a tool to the originating
+%% request's stream (related_request_id, :1009). A legacy client that
+%% only POSTs can therefore be asked something mid-request. Ours answers
+%% a legacy call as a stream whenever the client's Accept allows one,
+%% which validate_accept_header/1 already requires it to.
+%%
+%% Modern keeps its own rule: it streams only with a progress token or
+%% a log level, so an error the tool returns before anything is written
+%% still carries its HTTP status.
+streams_notifications(#{ctx := Ctx}, Token, Level, Headers) when Ctx =/= undefined ->
+    case barrel_mcp_ctx:is_modern(Ctx) of
+        true -> Token =/= undefined orelse Level =/= undefined;
+        false -> accepts_sse(Headers)
+    end;
+streams_notifications(_Reply, _Token, _Level, Headers) ->
+    accepts_sse(Headers).
+
+accepts_sse(Headers) ->
+    binary:match(header(<<"accept">>, Headers, <<>>), <<"text/event-stream">>) =/= nomatch.
 
 %% 2026-07-28: the server "MUST treat a client disconnect as
 %% cancellation of that request"
@@ -1216,6 +1240,12 @@ collect_tool_outcome(RequestId, Deadline, OnEmit, CancelOnDisconnect) ->
                 disconnected;
             {tool_progress, RequestId, Params} ->
                 OnEmit(progress_notification(Params)),
+                notified;
+            %% A server request the tool raised, sent here because this
+            %% request's stream is its channel. It travels like a
+            %% notification; the answer arrives on the client's next POST.
+            {sse_send_message, Envelope} ->
+                OnEmit(Envelope),
                 notified;
             {tool_log, RequestId, Params} ->
                 OnEmit(log_notification(Params)),
@@ -1745,6 +1775,37 @@ legacy_answer(SessionId, Message, ProtocolState) ->
             ),
             push_legacy(SessionId, Response)
     end.
+
+%% 2025-11-25/basic/transports.mdx:145 says a server request on a
+%% POST's response stream SHOULD be unrelated to the running request.
+%% It is a SHOULD; both reference SDKs read one off exactly that stream
+%% and answer on a new POST, and the reference server sends it there.
+%% The legacy log filter, delivered on the request's own stream rather
+%% than the session channel.
+session_log_on_stream_fun(_Self, _RequestId, undefined) ->
+    fun(_, _, _) -> ok end;
+session_log_on_stream_fun(Self, RequestId, SessionId) ->
+    fun(Level, Logger, Data) ->
+        case barrel_mcp_session:log_level_priority(Level) of
+            error ->
+                ok;
+            Prio ->
+                Floor =
+                    case barrel_mcp_session:get_log_level(SessionId) of
+                        {ok, L} -> barrel_mcp_session:log_level_priority(L);
+                        _ -> barrel_mcp_session:log_level_priority(<<"info">>)
+                    end,
+                _ =
+                    case Prio >= Floor of
+                        true -> Self ! {tool_log, RequestId, log_params(Level, Logger, Data)};
+                        false -> ok
+                    end,
+                ok
+        end
+    end.
+
+channel_of(true, Self) -> Self;
+channel_of(false, _Self) -> undefined.
 
 %% The stream is the session, and the answer has nowhere to go once it
 %% closes, so the tool it was waiting on must not keep running. The

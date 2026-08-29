@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A legacy (2024-11-05 through 2025-11-25) `tools/call` over Streamable
+  HTTP is answered as an SSE stream whenever the client's `Accept`
+  lists `text/event-stream`, which the transport already requires it
+  to. The result is the stream's final event. This is what the
+  reference server does by default, and every conforming client
+  already parses either shape. A client that sends the required
+  `Accept` but only ever parses a JSON body will need to read the
+  stream. In return, a client that only POSTs can now be asked
+  `elicitation/create`, `sampling/createMessage` and `roots/list`
+  mid-request, and progress and log notifications ride the call's own
+  response instead of needing a standalone GET stream.
+
 ### Fixed
 
 - Deleting a session now drops the rows it owns in the subscription,

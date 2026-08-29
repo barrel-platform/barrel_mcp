@@ -16,7 +16,7 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("barrel_mcp.hrl").
 
--import(barrel_mcp_test_helpers, [header/2, url/1]).
+-import(barrel_mcp_test_helpers, [header/2, url/1, init_body/2]).
 
 -export([
     all/0,
@@ -60,8 +60,11 @@
     modern_logs_below_requested_level_are_dropped/1,
     modern_unknown_log_level_is_invalid_params/1,
     modern_disconnect_cancels_the_request/1,
-    legacy_disconnect_does_not_cancel/1
+    legacy_disconnect_does_not_cancel/1,
+    legacy_post_only_client_can_be_asked/1
 ]).
+
+-export([asking_tool/2]).
 
 -define(BASE_PORT, 21400).
 -define(MODERN, <<"2026-07-28">>).
@@ -116,7 +119,8 @@ all() ->
         modern_logs_below_requested_level_are_dropped,
         modern_unknown_log_level_is_invalid_params,
         modern_disconnect_cancels_the_request,
-        legacy_disconnect_does_not_cancel
+        legacy_disconnect_does_not_cancel,
+        legacy_post_only_client_can_be_asked
     ].
 
 init_per_suite(Config) ->
@@ -427,7 +431,7 @@ legacy_tool_error_keeps_its_code(Config) ->
     ok.
 
 assert_crash_result(Body) ->
-    #{<<"result">> := #{<<"isError">> := true, <<"content">> := [Block]}} = json:decode(Body),
+    #{<<"result">> := #{<<"isError">> := true, <<"content">> := [Block]}} = envelope_of(Body),
     Text = maps:get(<<"text">>, Block),
     ?assertEqual(<<"Internal tool error">>, Text),
     ?assertEqual(nomatch, binary:match(Text, <<"deliberate_crash">>)).
@@ -794,6 +798,74 @@ modern_disconnect_cancels_the_request(Config) ->
 
 %% "Disconnection SHOULD NOT be interpreted as the client cancelling its
 %% request" (2025-11-25/basic/transports.mdx:128).
+%% The reference server answers every POST as a stream and routes a
+%% server request to the originating request's stream
+%% (mcp/server/streamable_http.py, related_request_id). A legacy client
+%% that only POSTs can therefore be asked something mid-request. Ours
+%% could not: the request needed a standalone GET stream nobody opened.
+legacy_post_only_client_can_be_asked(Config) ->
+    Port = ?config(port, Config),
+    ok = barrel_mcp:reg_tool(<<"asking">>, ?MODULE, asking_tool, #{}),
+    try
+        {200, InitHeaders, _} = post(
+            Port,
+            init_body(?MCP_LATEST_LEGACY_VERSION, #{<<"elicitation">> => #{}}),
+            []
+        ),
+        SessionId = header(<<"mcp-session-id">>, InitHeaders),
+        %% No GET stream is opened. The call's own response, read off a
+        %% raw socket as a client would, is the only channel there is.
+        Call = iolist_to_binary(
+            legacy_request(5, <<"tools/call">>, #{
+                <<"name">> => <<"asking">>, <<"arguments">> => #{}
+            })
+        ),
+        Sock = raw_post(Port, SessionId, Call),
+        {Ask, Sock1} = next_sse_event(Sock),
+        ?assertEqual(<<"elicitation/create">>, maps:get(<<"method">>, Ask)),
+        AskId = maps:get(<<"id">>, Ask),
+        %% The answer goes back on a second POST, as every reference
+        %% client does it.
+        {202, _, _} = post(
+            Port,
+            iolist_to_binary(
+                json:encode(#{
+                    <<"jsonrpc">> => <<"2.0">>,
+                    <<"id">> => AskId,
+                    <<"result">> => #{
+                        <<"action">> => <<"accept">>, <<"content">> => #{<<"name">> => <<"ada">>}
+                    }
+                })
+            ),
+            [{<<"mcp-session-id">>, SessionId}]
+        ),
+        {Final, _} = next_sse_event(Sock1),
+        ?assertEqual(5, maps:get(<<"id">>, Final)),
+        [Block | _] = maps:get(<<"content">>, maps:get(<<"result">>, Final)),
+        ?assertEqual(<<"hello ada">>, maps:get(<<"text">>, Block))
+    after
+        barrel_mcp_registry:unreg(tool, <<"asking">>)
+    end.
+
+asking_tool(_Args, Ctx) ->
+    Params = barrel_mcp:elicit_form(<<"Your name?">>, #{
+        <<"type">> => <<"object">>,
+        <<"properties">> => #{<<"name">> => #{<<"type">> => <<"string">>}}
+    }),
+    Opts = #{timeout_ms => 5000, channel => maps:get(reply_to, Ctx)},
+    case barrel_mcp:elicit_create(maps:get(session_id, Ctx), Params, Opts) of
+        {ok, #{<<"content">> := #{<<"name">> := Name}}} ->
+            <<"hello ", Name/binary>>;
+        Other ->
+            {tool_error, [
+                #{
+                    <<"type">> => <<"text">>,
+                    <<"text">> =>
+                        iolist_to_binary(io_lib:format("~p", [Other]))
+                }
+            ]}
+    end.
+
 legacy_disconnect_does_not_cancel(Config) ->
     Port = ?config(port, Config),
     {200, InitHeaders, _} = post(Port, init_body(), []),
@@ -1022,6 +1094,39 @@ post_sse_raw(Port, Body) ->
     ),
     {Status, RespHeaders, Raw}.
 
+%% A POST whose response is read incrementally off the socket, so a
+%% server request that arrives before the tool finishes is seen when it
+%% is sent rather than after hackney has buffered the whole body.
+raw_post(Port, SessionId, Body) ->
+    {ok, Sock} = gen_tcp:connect(
+        {127, 0, 0, 1}, Port, [binary, {active, false}, {packet, raw}], 5000
+    ),
+    ok = gen_tcp:send(Sock, [
+        <<"POST /mcp HTTP/1.1\r\n">>,
+        <<"Host: 127.0.0.1\r\n">>,
+        <<"Content-Type: application/json\r\n">>,
+        <<"Accept: application/json, text/event-stream\r\n">>,
+        <<"Mcp-Session-Id: ">>,
+        SessionId,
+        <<"\r\n">>,
+        <<"Content-Length: ">>,
+        integer_to_binary(byte_size(Body)),
+        <<"\r\n\r\n">>,
+        Body
+    ]),
+    {Sock, <<>>, 0}.
+
+%% The next decoded `data:' event on the socket, past any headers.
+next_sse_event({Sock, Buf, Seen}) ->
+    Lines = [json:decode(D) || <<"data: ", D/binary>> <- binary:split(Buf, <<"\n">>, [global])],
+    case lists:nthtail(min(Seen, length(Lines)), Lines) of
+        [Event | _] ->
+            {Event, {Sock, Buf, Seen + 1}};
+        [] ->
+            {ok, More} = gen_tcp:recv(Sock, 0, 10000),
+            next_sse_event({Sock, <<Buf/binary, More/binary>>, Seen})
+    end.
+
 decode_sse(Raw) ->
     Blocks = binary:split(Raw, <<"\n\n">>, [global]),
     lists:filtermap(
@@ -1041,11 +1146,23 @@ sse_data(Block) ->
         Datas -> iolist_to_binary(lists:join(<<"\n">>, Datas))
     end.
 
+%% The JSON-RPC envelope of a response, whether it arrived as a JSON
+%% body or as the last event of an SSE stream. A legacy call streams
+%% now, as the reference server's does.
+envelope_of(Body) ->
+    case binary:match(Body, <<"data: ">>) of
+        nomatch ->
+            json:decode(Body);
+        _ ->
+            Datas = [D || <<"data: ", D/binary>> <- binary:split(Body, <<"\n">>, [global])],
+            json:decode(lists:last(Datas))
+    end.
+
 result_of(Body) ->
-    maps:get(<<"result">>, json:decode(Body)).
+    maps:get(<<"result">>, envelope_of(Body)).
 
 error_of(Body) ->
-    maps:get(<<"error">>, json:decode(Body)).
+    maps:get(<<"error">>, envelope_of(Body)).
 
 %% A port per case, by position rather than by hash: two case names
 %% hashing to the same slot means the second one gets eaddrinuse while

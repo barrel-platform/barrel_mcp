@@ -373,7 +373,7 @@ legacy_client_gets_internal_error(Config) ->
     {200, _, Resp} = post(Port, Body, [{<<"mcp-session-id">>, SessionId}]),
     %% client_supports/2 is false without a modern context, so the tool
     %% degrades on its own terms before the framework has to refuse.
-    Result = maps:get(<<"result">>, json:decode(Resp)),
+    Result = maps:get(<<"result">>, envelope_of(Resp)),
     ?assertEqual(true, maps:get(<<"isError">>, Result)),
     ok.
 
@@ -513,7 +513,7 @@ legacy_task_shape_unchanged(Config) ->
         <<"params">> => #{<<"name">> => <<"slow">>, <<"arguments">> => #{}}
     }),
     {200, _, Resp} = post(Port, Body, [{<<"mcp-session-id">>, SessionId}]),
-    Result = maps:get(<<"result">>, json:decode(Resp)),
+    Result = maps:get(<<"result">>, envelope_of(Resp)),
     ?assert(maps:is_key(<<"task">>, Result)),
     ?assertNot(maps:is_key(<<"resultType">>, Result)),
     ?assertEqual(<<"working">>, maps:get(<<"status">>, maps:get(<<"task">>, Result))),
@@ -725,9 +725,20 @@ init_body() ->
         }
     }).
 
-result_of(Body) -> maps:get(<<"result">>, json:decode(Body)).
+%% The envelope, whether a JSON body or the last event of an SSE
+%% stream: a legacy call streams now, as the reference server's does.
+envelope_of(Body) ->
+    case binary:match(Body, <<"data: ">>) of
+        nomatch ->
+            json:decode(Body);
+        _ ->
+            Datas = [D || <<"data: ", D/binary>> <- binary:split(Body, <<"\n">>, [global])],
+            json:decode(lists:last(Datas))
+    end.
 
-error_of(Body) -> maps:get(<<"error">>, json:decode(Body)).
+result_of(Body) -> maps:get(<<"result">>, envelope_of(Body)).
+
+error_of(Body) -> maps:get(<<"error">>, envelope_of(Body)).
 
 %% A port per case, by position rather than by hash: two case names
 %% hashing to the same slot means the second one gets eaddrinuse while

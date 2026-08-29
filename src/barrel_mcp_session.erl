@@ -419,7 +419,7 @@ sampling_create_message(SessionId, Params, Opts) ->
         false ->
             {error, not_supported};
         true ->
-            case get_sse_pid(SessionId) of
+            case channel(SessionId, Opts) of
                 {error, _} = E -> E;
                 {ok, Pid} -> do_sampling(SessionId, Pid, Params, Opts)
             end
@@ -436,7 +436,7 @@ elicit_create(SessionId, Params, Opts) ->
         false ->
             {error, not_supported};
         true ->
-            case get_sse_pid(SessionId) of
+            case channel(SessionId, Opts) of
                 {error, _} = E -> E;
                 {ok, Pid} -> do_elicit(SessionId, Pid, Params, Opts)
             end
@@ -453,10 +453,20 @@ roots_list(SessionId, Opts) ->
         false ->
             {error, not_supported};
         true ->
-            case get_sse_pid(SessionId) of
+            case channel(SessionId, Opts) of
                 {error, _} = E -> E;
                 {ok, Pid} -> do_roots_list(SessionId, Pid, Opts)
             end
+    end.
+
+%% The channel a server request goes out on: the originating request's
+%% own stream when the caller names one in `Opts', the session's
+%% standalone GET stream otherwise. That is the reference server's
+%% related_request_id routing (mcp/server/streamable_http.py:1009).
+channel(SessionId, Opts) ->
+    case maps:get(channel, Opts, undefined) of
+        Pid when is_pid(Pid) -> {ok, Pid};
+        _ -> get_sse_pid(SessionId)
     end.
 
 %% @doc Deliver a JSON-RPC response from the client back to the waiting
