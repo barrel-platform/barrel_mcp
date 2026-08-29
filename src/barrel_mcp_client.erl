@@ -30,6 +30,22 @@
 %%% an LLM provider (Anthropic, OpenAI, Hermes-style local model) into
 %%% this loop is the host's job, `barrel_mcp' itself stays a pure
 %%% MCP library.
+%%%
+%%% == Sections, in file order ==
+%%%
+%%% <ul>
+%%%   <li>Public API: connect, the verbs, subscriptions, close.</li>
+%%%   <li>gen_statem: the four states above and the common event
+%%%       handling.</li>
+%%%   <li>Inbound message routing, tool definitions and header
+%%%       bindings, subscriptions, multi round-trip requests.</li>
+%%%   <li>Initialize handling: `server/discover' probe or
+%%%       `initialize' handshake by requested version.</li>
+%%%   <li>Transport plumbing, helpers, ping cadence, termination.</li>
+%%% </ul>
+%%%
+%%% The state record is documented field by field in the Client
+%%% Internals guide, section 7.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_client).

@@ -25,6 +25,22 @@
 %%%
 %%% Depth, subschema count and reference expansions are capped, so a
 %%% hostile schema cannot spend the caller's stack or time.
+%%%
+%%% == Sections, in file order ==
+%%%
+%%% <ul>
+%%%   <li>Compilation: identifiers, anchors, references, the registry.</li>
+%%%   <li>Validation: the entry point and the per-schema walk with
+%%%       annotations.</li>
+%%%   <li>Assertions: the leaf keywords (`type', `enum', bounds,
+%%%       patterns, `format' as annotation).</li>
+%%%   <li>Applicators: `properties', `items', `allOf' and friends.</li>
+%%%   <li>`unevaluated*': the keywords that read the annotations the
+%%%       walk collected.</li>
+%%%   <li>URIs and pointers, and the dialect's own metaschema.</li>
+%%% </ul>
+%%%
+%%% Pure functions throughout; nothing here spawns or stores.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_jsonschema).

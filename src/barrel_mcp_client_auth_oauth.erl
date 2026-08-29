@@ -81,6 +81,42 @@
 %%% Security"). `allow_insecure_oauth => true' lifts that for a
 %%% plaintext test server. It is noncompliant and never a production
 %%% setting.
+%%%
+%%% == Sections, in file order ==
+%%%
+%%% <ul>
+%%%   <li>Behaviour callbacks: `init/1', `headers/1', `refresh/2',
+%%%       `challenge/2', `settled/1', `request_headers/3'.</li>
+%%%   <li>Discovery: `WWW-Authenticate' parsing, PRM, AS metadata,
+%%%       the HTTPS policy `secure_url/2'.</li>
+%%%   <li>PKCE, authorization URL, token endpoint.</li>
+%%%   <li>Choosing a registration mechanism, Client ID Metadata
+%%%       Documents, binding a client to an authorization server.</li>
+%%%   <li>The authorization-code flow driven from a challenge:
+%%%       `prm_flow', `ensure_client', `run_authorization',
+%%%       `exchange', `step_up'; the non-interactive grants and DPoP
+%%%       proofs sit with it.</li>
+%%%   <li>HTTP helpers and encoders.</li>
+%%% </ul>
+%%%
+%%% == The handle record ==
+%%%
+%%% `#h{}' is the whole state. The fields that steer behaviour:
+%%% `mode' (which grant), `phase' (`flow' runs the authorization-code
+%%% flow from a 401, `token' only refreshes what the host supplied),
+%%% `tea_method' (how the client authenticates at the token
+%%% endpoint, persisted with the client), `want_refresh' (ask for
+%%% `offline_access' when the AS lists it), `insecure' (the plaintext
+%%% policy), `dpop' (proof key and the AS and RS nonces),
+%%% `token_type' (`dpop' switches the `Authorization' scheme). `prm',
+%%% `as_metadata' and `client' are the discovered documents;
+%%% `requested_scope' and `granted_scope' drive step-up on 403.
+%%%
+%%% == Processes ==
+%%%
+%%% The handle is a value; the transport calls it. `challenge/2' does
+%%% network I/O and may block on the host's `authorize' fun, which is
+%%% why `barrel_mcp_client_http' runs it in a worker.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_client_auth_oauth).

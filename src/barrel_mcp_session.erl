@@ -1,11 +1,39 @@
 %%%-------------------------------------------------------------------
 %%% @author Benoit Chesneau
 %%% @copyright 2024-2026 Benoit Chesneau
-%%% @doc MCP Session Management.
+%%% @doc Legacy-era sessions and everything that hangs off them.
 %%%
-%%% Provides ETS-based session management for MCP Streamable HTTP transport.
-%%% Sessions track client connections, protocol versions, and activity.
+%%% A session is what a handshake-era client establishes with
+%%% `initialize': its id, negotiated version, capabilities, principal,
+%%% the process holding its SSE stream, the replay buffer for
+%%% `Last-Event-ID', the server-to-client requests waiting for an
+%%% answer, and the tool workers in flight. Modern (2026-07-28)
+%%% requests are stateless and never create one; stdio creates one
+%%% per process.
 %%%
+%%% == Tables ==
+%%%
+%%% Four `protected' ETS tables owned by this gen_server: sessions,
+%%% resource subscriptions, pending requests, in-flight workers.
+%%% Request processes read them directly and write through the calls
+%%% below, which is why the API is many small functions. A pending
+%%% request is matched on `{SessionId, Id}' at delivery, so a
+%%% response posted on another session cannot answer it.
+%%%
+%%% == Sections, in file order ==
+%%%
+%%% <ul>
+%%%   <li>API: create / get / delete, the setters, the SSE channel,
+%%%       `sampling_create_message/3', `elicit_create/3',
+%%%       `roots_list/2' and `deliver_response/3', in-flight
+%%%       bookkeeping, `broadcast_list_changed/1'.</li>
+%%%   <li>gen_server callbacks: every write, the expiry sweep.</li>
+%%%   <li>Internal functions: `ask_client/5' (one server-to-client
+%%%       request and its wait), table bootstrap.</li>
+%%% </ul>
+%%%
+%%% The writer of each `#mcp_session{}' field is listed in the Server
+%%% Internals guide.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_session).
