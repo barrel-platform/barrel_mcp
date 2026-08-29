@@ -89,10 +89,20 @@ regardless. The case reads that list from the runner's YAML and
 prints those failures apart, so a regression there is still visible.
 The SEP-2663 task scenarios on the server side and the extension
 grants (client credentials, EMA, WIF, DPoP) on the client side are
-among them and pass here; the one thing left in that report is the
-runner's own `wire-schema-valid` check validating a `CreateTaskResult`
-against the core `CallToolResult` schema, which no implementation can
-satisfy.
+among them and pass here.
+
+One runner defect is patched locally: the pinned bundle validates
+every `tools/call` answer against the core `CallToolResult`, and at
+2026-07-28 the core schema no longer carries `CreateTaskResult`, so a
+task handle could never pass `wire-schema-valid`. The upstream fix
+validates a `resultType: "task"` result against the tasks extension's
+own schema; `make conformance-setup` applies the same rule to the
+pinned bundle with `test/conformance/patch-runner.js`, idempotently,
+and refuses to run if the runner's validator changed. The upstream
+change itself is `test/conformance/upstream/0001-validate-create-task-result.patch`,
+made against `modelcontextprotocol/conformance` at `74edef3` (its
+tests, typecheck, lint and build pass with it). Delete the script,
+the Makefile line and the patch once a runner release carries it.
 
 ## Run locally
 

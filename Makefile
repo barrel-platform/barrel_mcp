@@ -53,6 +53,7 @@ interop-python: interop-setup
 # test/conformance/package.json. `conformance-setup' is idempotent.
 conformance-setup:
 	cd test/conformance && npm install --no-audit --no-fund
+	node test/conformance/patch-runner.js
 
 conformance: conformance-setup
 	INTEROP_CONFORMANCE=$(CURDIR)/test/conformance/node_modules/@modelcontextprotocol/conformance/dist/index.js \
