@@ -14,7 +14,7 @@ the building guide is task-oriented, this one is structural.
 | `barrel_mcp` | Top-level façade. `start_client/2`, `notify_resource_updated/1,2`, `sampling_create_message/3`, etc. |
 | `barrel_mcp_client` | The client `gen_statem`. Owns one connection. |
 | `barrel_mcp_client_sup` | Supervises client workers (transient). |
-| `barrel_mcp_clients` | Federation registry: `ServerId → pid()`. |
+| `barrel_mcp_clients` | Federation registry over `barrel_mcp_client_sup`'s children. |
 | `barrel_mcp_client_transport` | Behaviour: `connect/2`, `send/2`, `close/1`. |
 | `barrel_mcp_client_stdio` | Transport impl over `open_port/2`. |
 | `barrel_mcp_client_http` | Transport impl over Streamable HTTP (POST + SSE GET). |
@@ -33,16 +33,21 @@ the building guide is task-oriented, this one is structural.
 barrel_mcp_sup (one_for_one)
 ├── barrel_mcp_registry      -- server-side registry of tools/resources/prompts
 ├── barrel_mcp_session       -- server-side session manager
-├── barrel_mcp_client_sup    -- one_for_one of barrel_mcp_client workers
-│   ├── client(<<"server-1">>)
-│   └── client(<<"server-2">>)
-└── barrel_mcp_clients       -- registry: ServerId -> pid + monitor
+└── barrel_mcp_client_sup    -- one_for_one of barrel_mcp_client workers
+    ├── client(<<"server-1">>)
+    └── client(<<"server-2">>)
 ```
 
-`barrel_mcp_clients` is a `gen_server` that owns the lookup table
-and serializes registration so two callers can't race on the same
-`ServerId`. Lookups (`whereis_client/1`, `list_clients/0`) hit the
-ETS table directly without crossing the process boundary.
+`barrel_mcp_clients` is a set of functions over that supervisor: each
+client is a transient child under its `ServerId`, so a crashed client
+is restarted and keeps its id, and `whereis_client/1` and
+`list_clients/0` read `supervisor:which_children/1`. A child whose
+restart is still failing shows as `restarting`: lookups answer
+`undefined`, `start_client/2` answers `{error, {restarting, Id}}`, and
+`stop_client/1` clears it. Ten failed restarts inside 60 s exhaust the
+supervisor's intensity and restart it empty, as with any OTP
+supervisor, so a handler whose `init/1` cannot succeed after a crash
+takes the other clients with it.
 
 ## 3. Client state machine
 

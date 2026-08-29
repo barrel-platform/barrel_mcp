@@ -94,15 +94,6 @@ init([]) ->
         modules => [barrel_mcp_client_sup]
     },
 
-    Clients = #{
-        id => barrel_mcp_clients,
-        start => {barrel_mcp_clients, start_link, []},
-        restart => permanent,
-        shutdown => 5000,
-        type => worker,
-        modules => [barrel_mcp_clients]
-    },
-
     {ok,
         {SupFlags, [
             Registry,
@@ -111,6 +102,5 @@ init([]) ->
             Elicitations,
             ListenerSup,
             Tasks,
-            ClientSup,
-            Clients
+            ClientSup
         ]}}.
