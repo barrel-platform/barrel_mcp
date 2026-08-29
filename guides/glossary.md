@@ -13,7 +13,7 @@ from the word to the code.
   `status`, `www_authenticate`, `server_url`, `protocol_version` and
   `dpop_nonce`. The handle answers with a new token or refuses.
 - **Channel**: the process a server-to-client request is written to.
-  For a session it is the `sse_pid` (`barrel_mcp_session:channel/2`);
+  For a session it is the `sse_pid` (`barrel_mcp_session:channel`);
   for a request answered on its own response stream it is the
   request process.
 - **CIMD (Client ID Metadata Document)**: an HTTPS URL used as the

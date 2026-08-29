@@ -9,8 +9,8 @@
 %%% enumerate via `tasks/list' (legacy), and abort via `tasks/cancel'.
 %%% State transitions emit `notifications/tasks/status' on the
 %%% session's SSE channel. The mode rule lives in the transports
-%%% (`barrel_mcp_http_engine:handle_async_tool_call/7',
-%%% `barrel_mcp_protocol:task_plan/2'), not here: this module is the
+%%% (`barrel_mcp_http_engine:handle_async_tool_call',
+%%% `barrel_mcp_protocol:task_plan'), not here: this module is the
 %%% table and the lifecycle.
 %%%
 %%% Tasks live in a `protected' ETS table keyed by `TaskId', which is
