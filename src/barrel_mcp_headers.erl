@@ -8,10 +8,10 @@
 %%% tooling can route and inspect a request without parsing its body:
 %%%
 %%% <ul>
-%%%   <li>`Mcp-Method' — the JSON-RPC `method', on every request.</li>
-%%%   <li>`Mcp-Name' — `params.name' or `params.uri', on `tools/call',
+%%%   <li>`Mcp-Method': the JSON-RPC `method', on every request.</li>
+%%%   <li>`Mcp-Name': `params.name' or `params.uri', on `tools/call',
 %%%       `resources/read' and `prompts/get'.</li>
-%%%   <li>`Mcp-Param-{Name}' — tool arguments a server opted into
+%%%   <li>`Mcp-Param-{Name}': tool arguments a server opted into
 %%%       mirroring, via `x-mcp-header' in its `inputSchema'.</li>
 %%% </ul>
 %%%

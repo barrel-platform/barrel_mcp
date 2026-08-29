@@ -968,12 +968,12 @@ notify_list_changed(Kind) when
 %% returns:
 %%
 %% <ul>
-%%   <li>`elicitation/create' — `{ok, ElicitResult}', the raw result
+%%   <li>`elicitation/create': `{ok, ElicitResult}', the raw result
 %%       with its `action' and `content', as
 %%       {@link elicit_create/3}.</li>
-%%   <li>`sampling/createMessage' — `{ok, Result, Usage}', as
+%%   <li>`sampling/createMessage': `{ok, Result, Usage}', as
 %%       {@link sampling_create_message/3}.</li>
-%%   <li>`roots/list' — `{ok, Roots}', already unwrapped, as
+%%   <li>`roots/list': `{ok, Roots}', already unwrapped, as
 %%       {@link roots_list/2}.</li>
 %% </ul>
 %%

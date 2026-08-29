@@ -53,7 +53,7 @@
 %%   <li>`allowed_origins' — `[binary()] | any'.</li>
 %%   <li>`allow_missing_origin' — accept requests with no `Origin'
 %%       header. Defaults to `true' on loopback, `false' otherwise.</li>
-%%   <li>`subscription_keepalive_ms' — how often a quiet
+%%   <li>`subscription_keepalive_ms': how often a quiet
 %%       `subscriptions/listen' stream emits an SSE comment so
 %%       intermediaries do not drop it. Defaults to 15000.
 %%
@@ -61,7 +61,7 @@
 %%       went away lingers: nothing reads the socket while a stream is
 %%       held open, so a client's disconnect surfaces on the next
 %%       write. Raise it and dropped subscribers are reaped later.</li>
-%%   <li>`sse_path' and `sse_message_path' — serve the deprecated
+%%   <li>`sse_path' and `sse_message_path': serve the deprecated
 %%       2024-11-05 HTTP+SSE transport on these two routes as well,
 %%       for clients that predate Streamable HTTP. Both must be given;
 %%       neither is served otherwise, because a GET on one of them and

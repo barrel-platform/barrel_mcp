@@ -10,9 +10,9 @@
 %%%   <li>RFC 8414 — Authorization Server Metadata</li>
 %%%   <li>RFC 7636 — PKCE (S256)</li>
 %%%   <li>RFC 8707 — `resource' indicator on auth + token requests</li>
-%%%   <li>RFC 9207 — issuer identification on the authorization response</li>
+%%%   <li>RFC 9207: issuer identification on the authorization response</li>
 %%%   <li>RFC 6749 / OAuth 2.1 — authorization-code + refresh_token grants</li>
-%%%   <li>draft-ietf-oauth-client-id-metadata-document-00 — an HTTPS
+%%%   <li>draft-ietf-oauth-client-id-metadata-document-00: an HTTPS
 %%%       URL as the `client_id'</li>
 %%% </ul>
 %%%

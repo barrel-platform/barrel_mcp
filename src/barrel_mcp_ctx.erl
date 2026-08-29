@@ -13,10 +13,10 @@
 %%% Every request belongs to one of two eras:
 %%%
 %%% <ul>
-%%%   <li>`modern' — `params._meta' carries
+%%%   <li>`modern': `params._meta' carries
 %%%       `io.modelcontextprotocol/protocolVersion'. Stateless, no
 %%%       session.</li>
-%%%   <li>`legacy' — everything else, including every `initialize'.
+%%%   <li>`legacy': everything else, including every `initialize'.
 %%%       Version and capabilities live on the session and are supplied
 %%%       by the transport through `Extra'.</li>
 %%% </ul>

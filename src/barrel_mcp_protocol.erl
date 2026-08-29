@@ -136,16 +136,16 @@ handle(Request) ->
 %% Returns one of:
 %% <ul>
 %%   <li>`map()' — a JSON-RPC response envelope ready to encode.</li>
-%%   <li>`[map()]' — one envelope per request element of a batch, on
+%%   <li>`[map()]': one envelope per request element of a batch, on
 %%       the revisions that accept batches.</li>
-%%   <li>`no_response' — for inbound notifications, and for a batch of
+%%   <li>`no_response': for inbound notifications, and for a batch of
 %%       nothing but notifications and responses.</li>
 %%   <li>`{async, AsyncPlan}' — for `tools/call'. The transport
 %%       spawns the worker via `(maps:get(spawn, AsyncPlan))(Ctx)'
 %%       and waits on its mailbox for a `tool_result' / `tool_error' /
 %%       `tool_failed' / `tool_validation_failed' / `cancelled'
 %%       message.</li>
-%%   <li>`{subscribe, Sub}' — for `subscriptions/listen', which needs a
+%%   <li>`{subscribe, Sub}': for `subscriptions/listen', which needs a
 %%       stream the transport holds open.</li>
 %% </ul>
 %%
@@ -444,13 +444,13 @@ unsupported_version_error(Id, Requested) ->
 %%
 %% Controlled by the `advertise_versions' env:
 %% <ul>
-%%   <li>`modern' (default) — only the stateless revisions. This is what
+%%   <li>`modern' (default): only the stateless revisions. This is what
 %%       a client can retry a rejected request with: the spec has it
 %%       select from this list and re-send, and a legacy revision named
 %%       in per-request metadata is rejected again, so advertising one
 %%       here invites a loop. Legacy clients are unaffected; they never
 %%       see this list and the `initialize' handshake still works.</li>
-%%   <li>`all' — both eras, for operators who want the full picture
+%%   <li>`all': both eras, for operators who want the full picture
 %%       advertised. A client offered a legacy revision has to drop to
 %%       the handshake to use it.</li>
 %% </ul>

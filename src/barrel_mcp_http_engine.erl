@@ -382,7 +382,7 @@ stream_post_request(Headers, Responder, Config, SessionEnabled, Request, AuthInf
     end.
 
 %%====================================================================
-%% Streamable transport — modern (2026-07-28) requests
+%% Streamable transport: modern (2026-07-28) requests
 %%====================================================================
 
 %% Stateless: no session to look up, none to mint, and no
@@ -525,7 +525,7 @@ dispatch_modern_request(Headers, Responder, Config, Request, AuthInfo, Transport
     end.
 
 %%====================================================================
-%% Streamable transport — subscriptions/listen
+%% Streamable transport: subscriptions/listen
 %%====================================================================
 
 %% The response stream to a `subscriptions/listen' request stays open
