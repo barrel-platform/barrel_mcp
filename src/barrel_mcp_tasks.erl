@@ -209,8 +209,6 @@ list(SessionId, _Opts) ->
 cancel(SessionId, TaskId) ->
     gen_server:call(?MODULE, {cancel, SessionId, TaskId}).
 
-%% @doc Record the worker pid (and optional originating request id)
-%% on a running task so a later `tasks/cancel' can stop it.
 %% @doc Attach the worker to a task created before it, so cancel and
 %% expiry can reach the process; carries the request id for MRTR
 %% resumption.

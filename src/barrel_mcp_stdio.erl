@@ -45,9 +45,6 @@
 %%% (macOS), `%APPDATA%\Claude\claude_desktop_config.json' (Windows) or
 %%% `~/.config/claude/claude_desktop_config.json' (Linux).
 %%%
-%%% @see barrel_mcp
-%%% @see barrel_mcp_protocol
-%%%
 %%% == Sections, in file order ==
 %%%
 %%% <ul>
@@ -68,6 +65,9 @@
 %%% worker cap; `notifications', `notifying', `outbound' and
 %%% `dropped' bound the outbound notification buffer so a flood of
 %%% progress cannot exhaust memory.
+%%%
+%%% @see barrel_mcp
+%%% @see barrel_mcp_protocol
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_stdio).

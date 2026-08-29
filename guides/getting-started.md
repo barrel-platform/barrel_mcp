@@ -129,4 +129,6 @@ For Claude Desktop integration, use the stdio transport:
 - [Features matrix](features.md): what's supported on the wire.
 - [Building a client](building-a-client.md): task-oriented walkthrough for hosting MCP clients.
 - [Client internals](internals.md): architecture and behaviour contracts.
+- [Server internals](server-internals.md): processes, request lifecycle, tool-call modes, sessions; read before changing `src/`.
+- [Glossary](glossary.md): the terms the code and the guides use.
 - [MCP Client (reference)](client.md) - Older API reference, kept for cross-linking

@@ -763,7 +763,7 @@ tool_call_plan(Params, Id, Ctx, Mrtr) ->
 %% Both Python SDK generations turn every exception in the tool-call
 %% handler into a CallToolResult with isError, never a protocol error
 %% (v2 mcp/server/mcpserver/server.py:424, v1 lowlevel/server.py:472),
-%% and an unknown tool raises ToolError("Unknown tool: <name>") into
+%% and an unknown tool raises ToolError("Unknown tool: ...") into
 %% that same branch (tools/tool_manager.py:72). That is what clients on
 %% the wire expect and what the official conformance runner asserts.
 %%

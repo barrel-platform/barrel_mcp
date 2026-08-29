@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `guides/server-internals.md` (supervision tree, process model,
+  request lifecycle per verb, tool-call modes, session fields, tables)
+  and `guides/glossary.md`. The protocol-versions guide lists every
+  era branch site, the authentication guide has a Principals section,
+  and the ten largest modules open with a section index, their
+  process model and their state record.
 - Tools declare `task_support => forbidden | optional | required`
   (`long_running => true` still means `optional`), listed as
   `execution.taskSupport` in the modern era. A `required` tool refuses
