@@ -575,7 +575,7 @@ events_since(SessionId, LastId) ->
 collect_after(Buf, LastId) ->
     case lists:splitwith(fun({Id, _}) -> Id =/= LastId end, Buf) of
         {_, []} ->
-            %% LastId not found — buffer rolled over.
+            %% LastId not found, buffer rolled over.
             truncated;
         {Newer, [_ | _]} ->
             {ok, lists:reverse(Newer)}

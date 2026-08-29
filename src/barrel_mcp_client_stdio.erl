@@ -91,7 +91,7 @@ handle_cast(close, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-%% A complete line — emit it.
+%% A complete line, emit it.
 handle_info(
     {Port, {data, {eol, Line}}},
     #state{port = Port, owner = Owner, buffer = Buf} = State
@@ -99,7 +99,7 @@ handle_info(
     Full = <<Buf/binary, Line/binary>>,
     Owner ! {mcp_in, self(), Full},
     {noreply, State#state{buffer = <<>>}};
-%% A partial line — buffer it until the eol arrives.
+%% A partial line, buffer it until the eol arrives.
 handle_info(
     {Port, {data, {noeol, Chunk}}},
     #state{port = Port, buffer = Buf} = State

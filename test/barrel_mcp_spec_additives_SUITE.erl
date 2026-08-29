@@ -335,7 +335,7 @@ long_running_returns_taskid(Config) ->
     ),
     ResultPayload = maps:get(<<"result">>, json:decode(ResultResp)),
     %% The long_tool returned <<"done">>; the result map is whatever
-    %% the registry stored — it may be wrapped further by the
+    %% the registry stored, it may be wrapped further by the
     %% collector. Just assert we got a non-error response.
     ?assert(is_map(ResultPayload) orelse is_binary(ResultPayload)),
     ok = barrel_mcp_registry:unreg(tool, <<"long">>),
@@ -348,7 +348,7 @@ long_running_cancel_signals_worker(Config) ->
         session_enabled => true
     }),
     Self = self(),
-    %% The cooperative tool reads `cancel_observer' from Ctx — but
+    %% The cooperative tool reads `cancel_observer' from Ctx, but
     %% the runtime fills Ctx, not the test. Use a small registered
     %% process that the tool message-passes to after observing the
     %% cancel: we stash Self in a process_dict-style fallback by
@@ -379,7 +379,7 @@ long_running_cancel_signals_worker(Config) ->
     ),
     Result = maps:get(<<"result">>, envelope_of(RB)),
     TaskId = maps:get(<<"taskId">>, maps:get(<<"task">>, Result)),
-    %% Cancel the task — the worker should receive a `{cancel, _}'
+    %% Cancel the task, the worker should receive a `{cancel, _}'
     %% signal in its mailbox (cooperatively observed by our tool).
     {ok, 200, _, _} = hackney:request(
         post,
@@ -398,7 +398,7 @@ long_running_cancel_signals_worker(Config) ->
         [with_body]
     ),
     %% The tool sends us `{observed_cancel, _}' from inside the
-    %% worker — but only if the runtime delivered the cancel. We
+    %% worker, but only if the runtime delivered the cancel. We
     %% can't assert that path without a registered observer hook;
     %% instead, poll the task store until the status is
     %% `cancelled', proving the wire path completed.
@@ -441,7 +441,7 @@ sse_replay_after_reconnect(_Config) ->
      || N <- lists:seq(1, 3)
     ],
 
-    %% Replay events newer than "1" — expect [2, 3] in order.
+    %% Replay events newer than "1", expect [2, 3] in order.
     {ok, Events} = barrel_mcp_session:events_since(SessionId, <<"1">>),
     ?assertEqual(
         [

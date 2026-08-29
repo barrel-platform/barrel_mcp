@@ -292,8 +292,8 @@ run_completion(Key, Value, Ctx) ->
 
 %% @doc Execute a tool handler asynchronously. Spawns a worker that
 %% calls `Mod:Fun(Args, Ctx)' (when arity 2 is exported) or
-%% `Mod:Fun(Args)' otherwise. `Ctx' carries `tool_name' — the name the
-%% tool was invoked under — so one handler can serve many registered
+%% `Mod:Fun(Args)' otherwise. `Ctx' carries `tool_name', the name the
+%% tool was invoked under, so one handler can serve many registered
 %% tools (as an MCP gateway does). The worker reports back to
 %% `maps:get(reply_to, Ctx)' as either:
 %% <ul>

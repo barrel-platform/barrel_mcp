@@ -42,16 +42,16 @@
 %% == Options ==
 %%
 %% <ul>
-%%   <li>`port' — TCP port (default 9090).</li>
-%%   <li>`ip' — bind address (default `{127,0,0,1}').</li>
-%%   <li>`auth' — authentication provider config.</li>
-%%   <li>`session_enabled' — `true' (default) to use
+%%   <li>`port': TCP port (default 9090).</li>
+%%   <li>`ip': bind address (default `{127,0,0,1}').</li>
+%%   <li>`auth': authentication provider config.</li>
+%%   <li>`session_enabled': `true' (default) to use
 %%       `Mcp-Session-Id' sessions.</li>
-%%   <li>`ssl' — TLS options (`certfile', `keyfile',
+%%   <li>`ssl': TLS options (`certfile', `keyfile',
 %%       optional `cacertfile'). A TLS bind serves HTTP/1.1 and
 %%       HTTP/2 on the same port via ALPN.</li>
-%%   <li>`allowed_origins' — `[binary()] | any'.</li>
-%%   <li>`allow_missing_origin' — accept requests with no `Origin'
+%%   <li>`allowed_origins': `[binary()] | any'.</li>
+%%   <li>`allow_missing_origin': accept requests with no `Origin'
 %%       header. Defaults to `true' on loopback, `false' otherwise.</li>
 %%   <li>`subscription_keepalive_ms': how often a quiet
 %%       `subscriptions/listen' stream emits an SSE comment so

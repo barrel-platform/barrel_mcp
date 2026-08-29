@@ -28,7 +28,7 @@ change. See [Protocol Versions](guides/protocol-versions.md).
   (`barrel_mcp_schema`).
 - **Transports**: Streamable HTTP (Claude Code), legacy HTTP,
   stdio (Claude Desktop). The HTTP server is built on `h1`/`h2`
-  (HTTP/1.1 + HTTP/2 on one port via ALPN) — no Cowboy. Streamable
+  (HTTP/1.1 + HTTP/2 on one port via ALPN), no Cowboy. Streamable
   HTTP defaults to `127.0.0.1`, validates `Origin`, and replays SSE
   events via `Last-Event-ID`.
 - **Authentication**: bearer (JWT/opaque), API keys (peppered
@@ -116,10 +116,10 @@ If `wait_for_proc` is not set, the registry becomes ready immediately after init
 
 barrel_mcp covers the three MCP roles in one library:
 
-- **server** — exposes tools, resources, prompts to MCP clients.
-- **client** — connects to one MCP server, calls tools, reads
+- **server**: exposes tools, resources, prompts to MCP clients.
+- **client**: connects to one MCP server, calls tools, reads
   resources, handles server-initiated requests.
-- **host (agent)** — drives one or more clients on behalf of an
+- **host (agent)**: drives one or more clients on behalf of an
   LLM; collects each server's tool catalog, hands it to the
   model, routes the model's tool call back through the right
   client.
@@ -128,7 +128,7 @@ The three short examples below cover the typical wiring; deeper
 guides live under `guides/` (`getting-started.md`,
 `tools-resources-prompts.md`, `building-a-client.md`).
 
-### Server — expose a tool over Streamable HTTP
+### Server: expose a tool over Streamable HTTP
 
 ```erlang
 -module(my_server).
@@ -153,7 +153,7 @@ That's a complete MCP server. Point any MCP client (Claude Code,
 Claude Desktop via stdio, the `barrel_mcp_client` below, …) at
 `http://127.0.0.1:8080/mcp`.
 
-### Client — connect and call a tool
+### Client: connect and call a tool
 
 ```erlang
 client_demo() ->
@@ -169,9 +169,9 @@ client_demo() ->
 
 The transport tuple selects the wire (`{http, Url}`,
 `{stdio, [Cmd | Args]}`). Auth and OAuth options live on the same
-spec — see `guides/building-a-client.md`.
+spec, see `guides/building-a-client.md`.
 
-### Host (agent) — hand many MCP servers to an LLM
+### Host (agent): hand many MCP servers to an LLM
 
 ```erlang
 agent_loop() ->
@@ -200,7 +200,7 @@ agent_loop() ->
 provider shapes (Anthropic Messages API, OpenAI Chat Completions);
 swap `to_anthropic/0` and `from_anthropic_call/1` for the OpenAI
 counterparts to use a different model. `ask_llm/1` is your own
-LLM HTTP call — barrel_mcp does not bundle an LLM SDK.
+LLM HTTP call, barrel_mcp does not bundle an LLM SDK.
 
 ## Quick Start
 
@@ -538,8 +538,8 @@ handshake to complete, call tools.
 ok = barrel_mcp_client:close(Pid).
 ```
 
-For the full task-oriented walkthrough — transport choice, auth,
-OAuth, server-to-client handlers, federation, schema validation —
+For the full task-oriented walkthrough (transport choice, auth,
+OAuth, server-to-client handlers, federation, schema validation)
 see [Building a client](guides/building-a-client.md). For
 architecture and behaviour contracts, see
 [Internals](guides/internals.md). Three runnable examples live

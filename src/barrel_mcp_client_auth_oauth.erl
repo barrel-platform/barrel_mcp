@@ -6,12 +6,12 @@
 %%% the spec</a> and the underlying RFCs:
 %%%
 %%% <ul>
-%%%   <li>RFC 9728 — Protected Resource Metadata (PRM)</li>
-%%%   <li>RFC 8414 — Authorization Server Metadata</li>
-%%%   <li>RFC 7636 — PKCE (S256)</li>
-%%%   <li>RFC 8707 — `resource' indicator on auth + token requests</li>
+%%%   <li>RFC 9728: Protected Resource Metadata (PRM)</li>
+%%%   <li>RFC 8414: Authorization Server Metadata</li>
+%%%   <li>RFC 7636: PKCE (S256)</li>
+%%%   <li>RFC 8707: `resource' indicator on auth + token requests</li>
 %%%   <li>RFC 9207: issuer identification on the authorization response</li>
-%%%   <li>RFC 6749 / OAuth 2.1 — authorization-code + refresh_token grants</li>
+%%%   <li>RFC 6749 / OAuth 2.1: authorization-code + refresh_token grants</li>
 %%%   <li>draft-ietf-oauth-client-id-metadata-document-00: an HTTPS
 %%%       URL as the `client_id'</li>
 %%% </ul>
@@ -156,7 +156,7 @@
     subject_token := binary(),
     %% Spec URN: `id_token' or `saml2'.
     subject_token_type := binary(),
-    %% AS issuer URL — the `aud' the IdP signs into the ID-JAG.
+    %% AS issuer URL: the `aud' the IdP signs into the ID-JAG.
     audience := binary(),
     %% MCP server's RFC 9728 resource identifier.
     resource := binary(),
@@ -806,7 +806,7 @@ refresh_token(TokenEndpoint, Params) ->
     ).
 
 %% @doc Acquire an access token via the OAuth 2.1 client_credentials
-%% grant — for unattended / machine-to-machine flows where there is
+%% grant, for unattended / machine-to-machine flows where there is
 %% no human in the loop. Per the MCP `ext-auth' OAuth Client
 %% Credentials extension, callers may authenticate either with a
 %% `client_secret' (HTTP Basic, per RFC 6749) or a `client_assertion'
@@ -1191,7 +1191,7 @@ cred(Key, Credentials) ->
     end.
 
 %%====================================================================
-%% Internal — refresh wired through the behaviour
+%% Internal: refresh wired through the behaviour
 %%====================================================================
 
 do_refresh(

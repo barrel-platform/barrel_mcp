@@ -10,7 +10,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 %%====================================================================
-%% basic auth — pbkdf2-sha256
+%% basic auth: pbkdf2-sha256
 %%====================================================================
 
 basic_default_uses_pbkdf2_test() ->
@@ -56,7 +56,7 @@ basic_iterations_are_overridable_test() ->
     ?assertEqual(ok, barrel_mcp_auth_basic:verify_password(<<"x">>, H)).
 
 %%====================================================================
-%% apikey auth — hmac-sha256
+%% apikey auth: hmac-sha256
 %%====================================================================
 
 apikey_legacy_default_test() ->

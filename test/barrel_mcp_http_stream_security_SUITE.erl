@@ -639,7 +639,7 @@ bearer_challenge_includes_resource_metadata(Config) ->
 %%====================================================================
 
 %% A GET (open SSE) with no credentials must be rejected by the auth
-%% provider before any session is touched — the session id is not a
+%% provider before any session is touched, the session id is not a
 %% credential. Regression for the GET/DELETE auth-bypass.
 get_sse_requires_auth(Config) ->
     Port = ?config(port, Config),

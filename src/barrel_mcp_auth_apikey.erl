@@ -169,7 +169,7 @@ hash_key(Key) ->
 %%
 %% `Opts' may include:
 %% <ul>
-%%   <li>`pepper' (binary, required for the new format) — server-side
+%%   <li>`pepper' (binary, required for the new format): server-side
 %%       secret mixed into the HMAC. Stored format becomes
 %%       `hmac-sha256$<base64(hash)>'.</li>
 %% </ul>
@@ -180,7 +180,7 @@ hash_key(Key, _) ->
     legacy_sha256_hex(Key).
 
 %% @doc Constant-time comparison of a presented `Key' against a
-%% `Stored' digest. Accepts only the legacy hex SHA-256 format —
+%% `Stored' digest. Accepts only the legacy hex SHA-256 format,
 %% the modern `hmac-sha256$...' format requires the server-side
 %% pepper, which {@link verify_key/3} takes explicitly. This shim
 %% rejects HMAC-format inputs so callers don't accidentally treat
@@ -202,7 +202,7 @@ verify_key(_Key, _Stored) ->
 %% `hmac-sha256$...' format. The `Pepper' is ignored for legacy
 %% hex SHA-256 digests (they were produced without a pepper). Use
 %% this from any code that owns the pepper (config tooling,
-%% tests) — the auth provider's internal authenticate path goes
+%% tests), the auth provider's internal authenticate path goes
 %% through `verify_against_state/2' which already has the pepper
 %% in state.
 -spec verify_key(

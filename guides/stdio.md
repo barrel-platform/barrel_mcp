@@ -14,7 +14,7 @@ Unlike HTTP transport, stdio transport:
 
 The same registries (tools, resources, prompts, resource
 templates, completions, tasks) work over stdio. Tool handlers may
-be arity 1 or arity 2 (`(Args, Ctx)`) — the `emit_progress` and
+be arity 1 or arity 2 (`(Args, Ctx)`), the `emit_progress` and
 cancellation hooks in `Ctx` interleave on stdout in stdio just
 like they do on the SSE channel for HTTP. See the
 [Tools guide](tools-resources-prompts.md) for the handler shape.

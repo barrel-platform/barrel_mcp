@@ -47,15 +47,15 @@
 -optional_callbacks([challenge/2, settled/1, request_headers/3]).
 
 %% Build the auth handle from a config term.
-%%   `none' — no auth header sent.
-%%   `{bearer, Token}' — static bearer token.
-%%   `{oauth, Config}' — OAuth 2.1 + PKCE (authorization_code grant).
-%%   `{oauth_client_credentials, Config}' — OAuth 2.1 client_credentials
+%%   `none': no auth header sent.
+%%   `{bearer: Token}', static bearer token.
+%%   `{oauth: Config}', OAuth 2.1 + PKCE (authorization_code grant).
+%%   `{oauth_client_credentials: Config}', OAuth 2.1 client_credentials
 %%       grant (RFC 6749, plus the MCP `ext-auth' OAuth Client
 %%       Credentials extension). For unattended agent hosts. Config
 %%       requires `token_endpoint' and `client_id'; supply either
 %%       `client_secret' or `client_assertion' (private_key_jwt).
-%%   `{oauth_enterprise, Config}' — Enterprise-Managed Authorization
+%%   `{oauth_enterprise: Config}', Enterprise-Managed Authorization
 %%       (MCP `ext-auth' EMA). Chains an IdP-issued ID Token through
 %%       RFC 8693 token-exchange and RFC 7523 jwt-bearer to mint a
 %%       short-lived MCP access token. For SSO-driven hosts. Config

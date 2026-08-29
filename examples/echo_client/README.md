@@ -24,5 +24,5 @@ rebar3 ct
 
 ## What to read
 
-- `src/echo_client.erl` — the entire flow in ~50 lines.
-- `test/echo_client_SUITE.erl` — common_test wrapper.
+- `src/echo_client.erl`: the entire flow in ~50 lines.
+- `test/echo_client_SUITE.erl`: common_test wrapper.

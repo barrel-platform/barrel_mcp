@@ -86,12 +86,12 @@ temporary under `barrel_mcp_client_sup`, so no other client notices.
 
 State transitions:
 
-- `connecting → initializing` — internal event after `open_transport/1`.
-- `initializing → ready` — successful `initialize` response, version in
+- `connecting → initializing`: internal event after `open_transport/1`.
+- `initializing → ready`: successful `initialize` response, version in
   `?MCP_CLIENT_SUPPORTED_VERSIONS`.
-- `initializing → stop {init_failed, _}` — server returned a JSON-RPC
+- `initializing → stop {init_failed, _}`: server returned a JSON-RPC
   error to `initialize` or omitted `protocolVersion`.
-- `ready → closing` — caller cast `close`, or stop on `mcp_closed`,
+- `ready → closing`: caller cast `close`, or stop on `mcp_closed`,
   or stop with `ping_failed`.
 
 ## 4. Inbound message flow
@@ -112,7 +112,7 @@ barrel_mcp_client gen_statem (info handler)
                                (+ progress routing for notifications/progress)
 ```
 
-The transport process owns the wire — socket, port, SSE buffer — and
+The transport process owns the wire (socket, port, SSE buffer) and
 forwards one JSON-RPC envelope per `{mcp_in, _, _}` message. The
 gen_statem never reads the wire directly. This means transports can
 implement framing however suits them (line-delimited for stdio,
@@ -165,7 +165,7 @@ matching state-timeout.
 
 The transport process MUST emit `{mcp_in, TransportPid, JsonBinary}`
 to `Owner` for every complete inbound JSON-RPC envelope. On
-shutdown — peer disconnect, port exit, fatal error — it MUST emit
+shutdown (peer disconnect, port exit, fatal error) it MUST emit
 `{mcp_closed, TransportPid, Reason}` exactly once.
 
 ### `barrel_mcp_client_handler`

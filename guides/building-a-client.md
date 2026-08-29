@@ -2,7 +2,7 @@
 
 `barrel_mcp` is a pure MCP library. It implements the wire protocol,
 the transports, and the client state machine. It does **not** call
-LLM providers, build prompts, or run an agent loop — those belong to
+LLM providers, build prompts, or run an agent loop, those belong to
 the host application that uses this library.
 
 This guide is task-oriented. Each section answers "I want to do X"
@@ -426,9 +426,9 @@ The server may follow up with `roots/list` against your handler.
 
 Three return shapes from `handle_request/3`:
 
-- `{reply, Result, State}` — synchronous answer.
-- `{error, Code, Message, State}` — JSON-RPC error response.
-- `{async, Tag, State}` — defer; reply later from any process via
+- `{reply, Result, State}`: synchronous answer.
+- `{error, Code, Message, State}`: JSON-RPC error response.
+- `{async, Tag, State}`: defer; reply later from any process via
   `barrel_mcp_client:reply_async(Pid, Tag, Result)`.
 
 Skeleton:
@@ -523,17 +523,17 @@ handle_request(<<"sampling/createMessage">>, Params, State) ->
 The handler's `handle_notification/3` callback receives every inbound
 notification with its raw `params` map. Common methods:
 
-- `notifications/resources/updated` — also dispatched to subscribers
+- `notifications/resources/updated`: also dispatched to subscribers
   of the URI as `{mcp_resource_updated, Uri, Params}` (see section 8).
-- `notifications/progress` — also dispatched to the caller of the
+- `notifications/progress`: also dispatched to the caller of the
   request that owns the progress token (see section 7).
 - `notifications/tools/list_changed`, `.../resources/list_changed`,
-  `.../prompts/list_changed` — catalogue updated; re-fetch or
+  `.../prompts/list_changed`: catalogue updated; re-fetch or
   invalidate caches.
-- `notifications/tasks/status` — a long-running task transitioned
+- `notifications/tasks/status`: a long-running task transitioned
   state. The full task record is in `params`.
-- `notifications/message` — server logging stream.
-- `notifications/replay_truncated` — your `Last-Event-ID` was
+- `notifications/message`: server logging stream.
+- `notifications/replay_truncated`: your `Last-Event-ID` was
   outside the server's replay window; resync rather than trust the
   partial stream.
 
@@ -602,13 +602,13 @@ cancel_request(Pid, Id) ->
 The id is the JSON-RPC request id for the in-flight call.
 `barrel_mcp_client` increments these internally; in tests you can
 read pending ids via `sys:get_state/1`. In production you usually
-don't cancel by id — you set a `timeout` on `call_tool/4` and let
+don't cancel by id, you set a `timeout` on `call_tool/4` and let
 the deadline fire.
 
 Periodic ping is opt-in:
 
 ```erl
-%% Spec snippet — a key on barrel_mcp_client:start_link/1's input map.
+%% Spec snippet, a key on barrel_mcp_client:start_link/1's input map.
 #{ping_interval => 30000, ping_failure_threshold => 3}
 ```
 
@@ -727,7 +727,7 @@ call_validated(Pid, Name, Args, Schema) ->
     end.
 ```
 
-This is opt-in — many hosts trust the LLM output enough to skip it.
+This is opt-in, many hosts trust the LLM output enough to skip it.
 Use it when you want a clear error before the request reaches the
 server.
 
@@ -803,9 +803,9 @@ Why}` when a pinned modern connection could not be established, and
 
 ## See also
 
-- [Internals](internals.md) — architecture and behaviour contracts.
-- [`examples/echo_client/`](https://github.com/barrel-platform/barrel_mcp/tree/main/examples/echo_client) — minimal
+- [Internals](internals.md): architecture and behaviour contracts.
+- [`examples/echo_client/`](https://github.com/barrel-platform/barrel_mcp/tree/main/examples/echo_client): minimal
   end-to-end host.
-- [`examples/sampling_host/`](https://github.com/barrel-platform/barrel_mcp/tree/main/examples/sampling_host) — handler
+- [`examples/sampling_host/`](https://github.com/barrel-platform/barrel_mcp/tree/main/examples/sampling_host): handler
   behaviour worked example.
-- [Features](features.md) — spec coverage matrix.
+- [Features](features.md): spec coverage matrix.
