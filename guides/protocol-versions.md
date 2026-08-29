@@ -170,6 +170,52 @@ retry. See the [Features guide](features.md) for the full shape.
 `-32020` through `-32099` are reserved for the specification. Do not emit a code
 in that range that the spec does not define.
 
+## Where the era is decided
+
+Read this before adding a revision or changing what one era serves.
+The era is one function and one classification, but it is consulted
+in many places; this is the list to walk.
+
+Definition: `barrel_mcp_version:era/1` maps a revision to `modern` or
+`legacy` from `?MCP_MODERN_VERSIONS` and `?MCP_LEGACY_VERSIONS` in
+`include/barrel_mcp.hrl`. Adding a revision starts there.
+
+Classification: `barrel_mcp_ctx:from_request/2` builds the request
+context and decides the era once, from the body's `_meta` and the
+transport's version (`classify/3`, `version_of/3`,
+`capabilities_of/3`). Everything downstream reads
+`barrel_mcp_ctx:era/1` or `barrel_mcp_ctx:is_modern/1`; nothing
+re-derives it.
+
+The fork per transport:
+
+- Streamable HTTP: `barrel_mcp_http_engine:stream_post_request/6`,
+  after decode and before any session lookup, so a modern request
+  never touches the session machinery.
+- The 2024-11-05 pair: always legacy
+  (`legacy_transport_version/2`).
+- stdio: `barrel_mcp_stdio:bind_session/2` attaches the SSE channel
+  to the session for the legacy era only.
+- Client: `barrel_mcp_client` chooses between `server/discover` and
+  `initialize` from the requested version.
+
+Branch sites, by module. Each one behaves differently per era and
+needs a look when an era's rules change:
+
+| module | functions |
+| --- | --- |
+| `barrel_mcp_protocol` | `serves/2` and `serves_in_era/2` (which methods exist), `advertised_versions/0`, `check_version/1`, `resource_not_found_code/1`, `internal_error_code/1`, `with_cache_hints/3`, `finalize/2`, `seal_input_required/6`, `with_tasks_extension/3`, `task_owner/1`, `tasks_enabled/1`, `create_task_result/3`, `cancel_task_response/4`, `with_execution/3`, `drive_async_plan/4`, `read_task_for/3`, the `tasks/get` handler |
+| `barrel_mcp_http_engine` | `stream_post_request/6`, `handle_async_tool_call/7` (the `escalate` mode), `streams_notifications/4`, `cancels_on_disconnect/1`, `request_log_level/1`, `internal_error_code/1`, `start_task_worker/3` |
+| `barrel_mcp_tasks` | `get/2` (defaults to legacy), the `ttl` versus `ttlMs` rendering, `task_to_map` |
+| `barrel_mcp_task_relay` | `escalate/6` renders the task for the caller's era |
+| `barrel_mcp_elicitation` | `with_elicitation_id/3` (modern only) |
+| `barrel_mcp_ctx` | `classify/3`, `validate/1`, `validate_version/1` |
+
+The tests that pin the split: `test/barrel_mcp_dual_era_SUITE.erl`
+(both eras on one listener), `test/barrel_mcp_protocol_tests.erl`
+(initialize per legacy revision), and the conformance runner at each
+revision (`test/barrel_mcp_conformance_SUITE.erl`).
+
 ## Notes
 
 - Nothing was removed in 3.0. Every legacy path still works, and a 2.3.0
