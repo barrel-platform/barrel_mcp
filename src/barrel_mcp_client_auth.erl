@@ -12,12 +12,32 @@
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_client_auth).
 
--export([new/1, header/1, refresh/2]).
+-export([new/1, header/1, refresh/2, challenge/2, settled/1]).
 
--export_type([t/0, handle/0]).
+-export_type([t/0, handle/0, challenge/0]).
 
 -type handle() :: term().
 -type t() :: {module(), handle()} | none.
+
+%% What the transport knows when the server refuses a request:
+%% the status (401, or 403 with `insufficient_scope'), the raw
+%% `WWW-Authenticate' value, the MCP server URL the request went to, and
+%% the negotiated protocol version if any. An OAuth handle discovers,
+%% registers and authorizes from that.
+-type challenge() :: #{
+    status := 401 | 403,
+    www_authenticate := binary() | undefined,
+    server_url := binary(),
+    protocol_version := binary() | undefined
+}.
+
+%% A handle that can run a whole authorization from a challenge
+%% exports these two; one that only refreshes a token in hand does
+%% not, and the transport falls back to `refresh/2' for it.
+-callback challenge(handle(), challenge()) -> {ok, handle()} | {error, term()}.
+%% The transport reports a request the server accepted.
+-callback settled(handle()) -> handle().
+-optional_callbacks([challenge/2, settled/1]).
 
 %% Build the auth handle from a config term.
 %%   `none' — no auth header sent.
@@ -99,4 +119,32 @@ refresh({Mod, H}, Www) ->
     case Mod:refresh(H, Www) of
         {ok, H1} -> {ok, {Mod, H1}};
         Err -> Err
+    end.
+
+%% @doc Answer a server's refusal with a new handle. Runs the handle's
+%% `challenge/2' when it has one, else its `refresh/2' with the header.
+%% May take as long as a person takes to authorize; the transport
+%% calls it from a worker, never inline.
+-spec challenge(t(), challenge()) -> {ok, t()} | {error, term()}.
+challenge(none, _Challenge) ->
+    {error, no_auth_configured};
+challenge({Mod, H}, Challenge) ->
+    Result =
+        case erlang:function_exported(Mod, challenge, 2) of
+            true -> Mod:challenge(H, Challenge);
+            false -> Mod:refresh(H, maps:get(www_authenticate, Challenge, undefined))
+        end,
+    case Result of
+        {ok, H1} -> {ok, {Mod, H1}};
+        Err -> Err
+    end.
+
+%% @doc Tell the handle a request was accepted.
+-spec settled(t()) -> t().
+settled(none) ->
+    none;
+settled({Mod, H}) ->
+    case erlang:function_exported(Mod, settled, 1) of
+        true -> {Mod, Mod:settled(H)};
+        false -> {Mod, H}
     end.

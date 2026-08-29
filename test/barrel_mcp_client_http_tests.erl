@@ -7,6 +7,9 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
+%% A test auth handle (see the flow tests at the end of this module).
+-export([init/1, header/1, refresh/2, challenge/2]).
+
 -define(A_PORT, 19298).
 -define(B_PORT, 19299).
 -define(TAB, client_http_tests_hits).
@@ -323,3 +326,228 @@ test_refused_event_stream() ->
     ok = barrel_mcp_client_http:open_event_stream(Pid),
     ?assertEqual(closed, peer_closed()),
     barrel_mcp_client_http:close(Pid).
+
+%%====================================================================
+%% The authorization flow runs beside the transport, not inside it
+%%====================================================================
+
+%% A test auth handle: `challenge/2' asks the test process for the
+%% answer and waits, which is what a person's consent step looks like
+%% from the transport.
+
+init(Ctl) -> {ok, #{ctl => Ctl, token => undefined}}.
+
+header(#{token := undefined}) -> none;
+header(#{token := T}) -> {ok, <<"Bearer ", T/binary>>}.
+
+refresh(H, _Www) -> {ok, H}.
+
+challenge(#{ctl := Ctl} = H, _Challenge) ->
+    Ctl ! {challenge, self()},
+    receive
+        {token, T} -> {ok, H#{token => T}};
+        crash -> exit(boom)
+    end.
+
+-define(AUTH_PORT, 19301).
+
+auth_flow_test_() ->
+    {setup, fun auth_setup/0, fun auth_cleanup/1,
+        {timeout, 60, [
+            {"one flow serves concurrent refusals and the transport stays live",
+                {timeout, 30, fun test_single_flight/0}},
+            {"a crashed flow fails the waiting requests", {timeout, 30, fun test_flow_crash/0}},
+            {"close kills a running flow", {timeout, 30, fun test_close_kills_flow/0}},
+            {"a request gives up after three rounds", {timeout, 30, fun test_retry_limit/0}}
+        ]}}.
+
+auth_setup() ->
+    {ok, _} = application:ensure_all_started(hackney),
+    {ok, _} = barrel_mcp_test_http:start(auth_mcp, ?AUTH_PORT, fun handle_auth/1),
+    ok.
+
+auth_cleanup(_) ->
+    try
+        barrel_mcp_test_http:stop(auth_mcp)
+    catch
+        _:_ -> ok
+    end,
+    ok.
+
+%% 200 with a JSON-RPC result for the right bearer, 401 otherwise. The
+%% `always_401' token never satisfies it.
+handle_auth(Req) ->
+    case barrel_mcp_test_http:header(<<"authorization">>, Req) of
+        <<"Bearer good">> ->
+            #{<<"id">> := Id} = json:decode(maps:get(body, Req)),
+            {200, #{<<"content-type">> => <<"application/json">>},
+                iolist_to_binary(json:encode(#{jsonrpc => <<"2.0">>, id => Id, result => #{}}))};
+        _ ->
+            {401, #{<<"www-authenticate">> => <<"Bearer realm=\"mcp\"">>}, <<>>}
+    end.
+
+auth_connect() ->
+    barrel_mcp_client_http:connect(self(), #{
+        url => url(?AUTH_PORT, "/mcp"),
+        open_event_stream => false,
+        auth => {?MODULE, #{ctl => self(), token => undefined}}
+    }).
+
+request(Id) ->
+    iolist_to_binary(json:encode(#{jsonrpc => <<"2.0">>, id => Id, method => <<"ping">>})).
+
+next_challenge() ->
+    receive
+        {challenge, Worker} -> Worker
+    after 5000 -> error(no_challenge)
+    end.
+
+next_in() ->
+    receive
+        {mcp_in, _, Body} -> maps:get(<<"id">>, json:decode(Body))
+    after 5000 -> error(no_response)
+    end.
+
+test_single_flight() ->
+    {ok, Pid} = auth_connect(),
+    ok = barrel_mcp_client_http:send(Pid, request(1)),
+    Worker = next_challenge(),
+    %% Refused while the flow runs: queued, no second flow.
+    ok = barrel_mcp_client_http:send(Pid, request(2)),
+    %% The transport answers a call while the worker waits.
+    ok = barrel_mcp_client_http:set_session_id(Pid, <<"s">>),
+    ?assertEqual({error, badcall}, gen_server:call(Pid, nothing, 1000)),
+    receive
+        {challenge, _} -> error(second_flow_started)
+    after 300 -> ok
+    end,
+    Worker ! {token, <<"good">>},
+    Ids = lists:sort([next_in(), next_in()]),
+    ?assertEqual([1, 2], Ids),
+    barrel_mcp_client_http:close(Pid).
+
+test_flow_crash() ->
+    {ok, Pid} = auth_connect(),
+    ok = barrel_mcp_client_http:send(Pid, request(1)),
+    ok = barrel_mcp_client_http:send(Pid, request(2)),
+    Worker = next_challenge(),
+    Worker ! crash,
+    receive
+        {mcp_closed, Pid, {unauthorized, {auth_flow_crashed, boom}}} -> ok
+    after 5000 -> error(no_close)
+    end,
+    barrel_mcp_client_http:close(Pid).
+
+test_close_kills_flow() ->
+    {ok, Pid} = auth_connect(),
+    ok = barrel_mcp_client_http:send(Pid, request(1)),
+    Worker = next_challenge(),
+    Ref = monitor(process, Worker),
+    barrel_mcp_client_http:close(Pid),
+    receive
+        {'DOWN', Ref, process, Worker, killed} -> ok
+    after 5000 -> error(worker_survived)
+    end.
+
+test_retry_limit() ->
+    {ok, Pid} = auth_connect(),
+    ok = barrel_mcp_client_http:send(Pid, request(1)),
+    %% A token the server never accepts: every round ends in 401.
+    Rounds = [
+        begin
+            W = next_challenge(),
+            W ! {token, <<"bad">>},
+            round
+        end
+     || _ <- [1, 2, 3]
+    ],
+    ?assertEqual([round, round, round], Rounds),
+    receive
+        {mcp_closed, Pid, {unauthorized, retry_limit}} -> ok
+    after 5000 -> error(no_limit)
+    end,
+    receive
+        {challenge, _} -> error(fourth_round)
+    after 300 -> ok
+    end,
+    barrel_mcp_client_http:close(Pid).
+
+%%====================================================================
+%% SEP-1699: a response stream cut short is resumed from its last event
+%%====================================================================
+
+resume_test_() ->
+    {setup, fun overflow_setup/0, fun overflow_cleanup/1,
+        {timeout, 60, [
+            {"an unanswered stream is resumed with Last-Event-ID after retry",
+                {timeout, 30, fun test_resume_after_retry/0}}
+        ]}}.
+
+-define(RESUME_PORT, 19302).
+
+test_resume_after_retry() ->
+    Test = self(),
+    spawn_link(fun() ->
+        {ok, L} = gen_tcp:listen(?RESUME_PORT, [
+            binary, {active, false}, {reuseaddr, true}, {packet, raw}
+        ]),
+        Test ! listening,
+        %% 1. The POST: prime the stream with an id and a retry, close it.
+        {ok, S1} = gen_tcp:accept(L, 10000),
+        {ok, _} = gen_tcp:recv(S1, 0, 5000),
+        ok = gen_tcp:send(S1, [
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n",
+            "transfer-encoding: chunked\r\n\r\n"
+        ]),
+        Prime =
+            <<"id: event-7\nretry: 400\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{}}\n\n">>,
+        ok = gen_tcp:send(S1, [
+            io_lib:format("~.16b\r\n", [byte_size(Prime)]), Prime, "\r\n0\r\n\r\n"
+        ]),
+        Closed = erlang:monotonic_time(millisecond),
+        ok = gen_tcp:close(S1),
+        %% 2. The resumption GET: carries the id, arrives after the delay.
+        {ok, S2} = gen_tcp:accept(L, 10000),
+        Arrived = erlang:monotonic_time(millisecond),
+        {ok, Head} = gen_tcp:recv(S2, 0, 5000),
+        Test ! {resumed, Head, Arrived - Closed},
+        Answer =
+            <<"id: event-8\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"resumed\":true}}\n\n">>,
+        ok = gen_tcp:send(S2, [
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n",
+            "transfer-encoding: chunked\r\n\r\n",
+            io_lib:format("~.16b\r\n", [byte_size(Answer)]),
+            Answer,
+            "\r\n0\r\n\r\n"
+        ]),
+        ok = gen_tcp:close(S2),
+        ok = gen_tcp:close(L)
+    end),
+    receive
+        listening -> ok
+    after 5000 -> error(no_listener)
+    end,
+    {ok, Pid} = barrel_mcp_client_http:connect(self(), #{
+        url => url(?RESUME_PORT, "/mcp"), open_event_stream => false
+    }),
+    ok = barrel_mcp_client_http:send(Pid, request(1)),
+    receive
+        {resumed, Head, Elapsed} ->
+            ?assertNotEqual(nomatch, binary:match(Head, <<"GET /mcp">>)),
+            ?assertNotEqual(nomatch, binary:match(Head, <<"last-event-id: event-7">>)),
+            ?assert(Elapsed >= 350)
+    after 10000 -> error(no_resumption)
+    end,
+    ?assertEqual(1, next_response()),
+    barrel_mcp_client_http:close(Pid).
+
+%% The stream forwards notifications too; wait for the response.
+next_response() ->
+    receive
+        {mcp_in, _, Body} ->
+            case json:decode(Body) of
+                #{<<"id">> := Id, <<"result">> := _} -> Id;
+                _ -> next_response()
+            end
+    after 5000 -> error(no_response)
+    end.

@@ -15,8 +15,9 @@
 %%%   <li>DELETE on close, with the captured `Mcp-Session-Id'.</li>
 %%%   <li>`MCP-Protocol-Version' header echoed on every request after
 %%%       the initialize response has been processed by the client.</li>
-%%%   <li>401 with `WWW-Authenticate' triggers the configured auth
-%%%       refresh; the original request is retried once.</li>
+%%%   <li>401, or 403 with `insufficient_scope', hands the challenge to
+%%%       the configured auth handle in a worker and reissues the
+%%%       request when it comes back; three rounds at most.</li>
 %%% </ul>
 %%%
 %%% Each parsed SSE event's `data:' payload is forwarded to the owning
@@ -58,8 +59,20 @@
     headers = [] :: list(),
     buffer = <<>> :: binary(),
     format :: undefined | json | sse,
-    retried = false :: boolean()
+    %% Authorization rounds this request has been through. Three is the
+    %% most the conformance runner allows before a client must stop.
+    attempts = 0 :: non_neg_integer(),
+    %% SEP-1699: a response stream that ends before the response, after
+    %% an event with an id, is resumed with a GET carrying that id.
+    last_event_id :: binary() | undefined,
+    retry_ms :: pos_integer() | undefined,
+    answered = false :: boolean(),
+    resumes = 0 :: non_neg_integer()
 }).
+
+-define(MAX_RESUMES, 2).
+
+-define(MAX_AUTH_ATTEMPTS, 3).
 
 %% Cap incoming response and SSE buffers so a malicious or
 %% misbehaving MCP server cannot drive unbounded memory growth on
@@ -75,12 +88,16 @@
     extra_headers = [] :: list(),
     session_id :: binary() | undefined,
     protocol_version :: binary() | undefined,
+    %% What the host asked for, before anything is negotiated.
+    requested_version :: binary() | undefined,
     auth :: barrel_mcp_client_auth:t(),
     requests = #{} :: #{reference() => #req{}},
     %% hackney's async stream handle is a connection pid, not a ref.
     sse_ref :: pid() | undefined,
     sse_buffer = <<>> :: binary(),
     sse_last_event_id :: binary() | undefined,
+    %% The server's `retry:' field, the reconnect delay it asked for.
+    sse_retry_ms = 1000 :: pos_integer(),
     sse_enabled = false :: boolean(),
     %% How the long-lived stream is opened. Legacy servers hand it out
     %% on a GET; 2026-07-28 removed that endpoint, so a modern one
@@ -95,6 +112,11 @@
     endpoint :: binary() | undefined,
     %% Sends issued before the endpoint event arrives.
     queued = [] :: [binary()],
+    %% Requests the server refused with 401 or 403, waiting on the one
+    %% authorization flow in progress. The flow runs in a worker so a
+    %% person's consent step never blocks this process.
+    challenged = [] :: [#req{}],
+    auth_flow :: undefined | {pid(), reference()},
     %% Per-tool `x-mcp-header' bindings, learned from `tools/list'.
     %% Held here rather than passed per send: the headers are derived
     %% from the body about to go out, and this is where that happens.
@@ -184,11 +206,12 @@ init({Owner, Opts}) ->
         extra_headers = Headers,
         auth = Auth,
         sse_enabled = SseEnabled,
-        legacy_sse_url = maps:get(legacy_sse_url, Opts, undefined)
+        legacy_sse_url = maps:get(legacy_sse_url, Opts, undefined),
+        requested_version = maps:get(requested_version, Opts, undefined)
     }}.
 
 handle_call({send, Body}, _From, State) ->
-    case start_post(Body, false, State) of
+    case start_post(Body, 0, State) of
         {ok, State1} -> {reply, ok, State1};
         {error, Reason} -> {reply, {error, Reason}, State}
     end;
@@ -227,6 +250,28 @@ handle_cast(close, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
+%% Resume an unanswered response stream from its last event.
+handle_info({resume, #req{last_event_id = Id} = R}, #state{requests = Reqs} = State) ->
+    Headers = [{<<"last-event-id">>, Id} | build_headers(State)],
+    case
+        hackney:request(
+            get, State#state.url, Headers, <<>>, [async, {pool, false}, {recv_timeout, infinity}]
+        )
+    of
+        {ok, Ref} ->
+            R1 = R#req{status = undefined, headers = [], buffer = <<>>, format = undefined},
+            {noreply, State#state{requests = Reqs#{Ref => R1}}};
+        {error, Reason} ->
+            State#state.owner ! {mcp_closed, self(), {request_failed, Reason}},
+            {noreply, State}
+    end;
+%% The authorization worker answered, or died.
+handle_info({auth_flow, Pid, Result}, #state{auth_flow = {Pid, Ref}} = State) ->
+    erlang:demonitor(Ref, [flush]),
+    {noreply, finish_auth_flow(Result, State#state{auth_flow = undefined})};
+handle_info({'DOWN', Ref, process, Pid, Reason}, #state{auth_flow = {Pid, Ref}} = State) ->
+    {noreply,
+        finish_auth_flow({error, {auth_flow_crashed, Reason}}, State#state{auth_flow = undefined})};
 %% Hackney async response messages.
 handle_info(
     {hackney_response, Ref, {status, Status, _Reason}},
@@ -296,7 +341,7 @@ handle_info(
                 false ->
                     {Events, NewBuf} = parse_sse(Combined),
                     State1 = forward_sse_events(Events, State),
-                    R1 = R#req{buffer = NewBuf},
+                    R1 = note_stream_progress(Events, Combined, R#req{buffer = NewBuf}),
                     {noreply, State1#state{requests = Reqs#{Ref => R1}}}
             end;
         {ok, #req{buffer = Buf} = R} ->
@@ -321,8 +366,15 @@ handle_info(_Msg, State) ->
     {noreply, State}.
 
 terminate(_Reason, State) ->
+    kill_auth_flow(State),
     _ = send_delete(State),
     State#state.owner ! {mcp_closed, self(), terminated},
+    ok.
+
+kill_auth_flow(#state{auth_flow = {Pid, Ref}}) ->
+    erlang:demonitor(Ref, [flush]),
+    exit(Pid, kill);
+kill_auth_flow(_State) ->
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -332,10 +384,10 @@ code_change(_OldVsn, State, _Extra) ->
 %% POST request lifecycle
 %%====================================================================
 
-start_post(Body, _Retried, #state{legacy_sse = true, endpoint = undefined} = State) ->
+start_post(Body, _Attempts, #state{legacy_sse = true, endpoint = undefined} = State) ->
     %% Nowhere to send it yet: the endpoint event has not arrived.
     {ok, State#state{queued = State#state.queued ++ [Body]}};
-start_post(Body, Retried, State) ->
+start_post(Body, Attempts, State) ->
     Headers = build_headers(State) ++ metadata_headers(Body, State#state.tool_headers),
     case
         hackney:request(
@@ -347,7 +399,7 @@ start_post(Body, Retried, State) ->
         )
     of
         {ok, Ref} ->
-            Req = #req{body = Body, retried = Retried, request_id = body_request_id(Body)},
+            Req = #req{body = Body, attempts = Attempts, request_id = body_request_id(Body)},
             {ok, State#state{requests = (State#state.requests)#{Ref => Req}}};
         {error, _} = Err ->
             Err
@@ -370,31 +422,32 @@ body_request_id(Body) ->
         _:_ -> undefined
     end.
 
-finalize_request(Ref, #req{format = sse} = _R, #state{requests = Reqs} = State) ->
-    %% SSE stream ended (server done). Drop the request slot.
-    State#state{requests = maps:remove(Ref, Reqs)};
 finalize_request(
     Ref,
-    #req{status = 401, retried = false, body = Body, headers = H},
-    #state{requests = Reqs, auth = Auth, owner = Owner} = State
-) ->
-    Www = header_value(<<"www-authenticate">>, H),
-    case barrel_mcp_client_auth:refresh(Auth, Www) of
-        {ok, NewAuth} ->
-            State1 = State#state{
-                auth = NewAuth,
-                requests = maps:remove(Ref, Reqs)
-            },
-            case start_post(Body, true, State1) of
-                {ok, State2} ->
-                    State2;
-                {error, _} ->
-                    Owner ! {mcp_closed, self(), unauthorized},
-                    State1
-            end;
-        {error, _} ->
-            Owner ! {mcp_closed, self(), unauthorized},
-            State#state{requests = maps:remove(Ref, Reqs)}
+    #req{format = sse, answered = false, last_event_id = Id, resumes = N} = R,
+    #state{requests = Reqs} = State
+) when
+    Id =/= undefined, N < ?MAX_RESUMES
+->
+    %% The server closed the response stream before the response
+    %% (SEP-1699): resume from the last event after the delay it asked
+    %% for, on a GET, where the rest of the stream is replayed.
+    Delay =
+        case R#req.retry_ms of
+            undefined -> State#state.sse_retry_ms;
+            Ms -> Ms
+        end,
+    _ = erlang:send_after(Delay, self(), {resume, R#req{resumes = N + 1}}),
+    State#state{requests = maps:remove(Ref, Reqs)};
+finalize_request(Ref, #req{format = sse} = _R, #state{requests = Reqs, auth = Auth} = State) ->
+    %% SSE stream ended (server done). Drop the request slot.
+    State#state{requests = maps:remove(Ref, Reqs), auth = barrel_mcp_client_auth:settled(Auth)};
+finalize_request(Ref, #req{status = 401} = R, State) ->
+    challenge_request(Ref, R, 401, State);
+finalize_request(Ref, #req{status = 403, headers = H} = R, State) ->
+    case insufficient_scope(header_value(<<"www-authenticate">>, H)) of
+        true -> challenge_request(Ref, R, 403, State);
+        false -> finalize_refused(Ref, R, State)
     end;
 finalize_request(
     Ref,
@@ -411,14 +464,20 @@ finalize_request(
             Owner ! {mcp_in, self(), Buf},
             ok
     end,
-    State#state{requests = maps:remove(Ref, Reqs)};
+    State#state{
+        requests = maps:remove(Ref, Reqs),
+        auth = barrel_mcp_client_auth:settled(State#state.auth)
+    };
 %% A 4xx is not necessarily a transport failure. The 2026-07-28 binding
 %% pins several ordinary JSON-RPC errors to a status: an unimplemented
 %% method is 404, and a malformed or unservable request is 400. Those
 %% are answers, and the spec has the client inspect the body before
 %% concluding anything about the connection. Only a body that is not a
 %% JSON-RPC message means the peer stopped talking to us.
-finalize_request(
+finalize_request(Ref, R, State) ->
+    finalize_refused(Ref, R, State).
+
+finalize_refused(
     Ref,
     #req{status = Status, buffer = Buf, body = Body},
     #state{requests = Reqs, owner = Owner} = State
@@ -438,6 +497,70 @@ finalize_request(
 settle_http_error(Status, Buf, #state{owner = Owner} = State) ->
     Owner ! {mcp_closed, self(), {http_error, Status, Buf}},
     State.
+
+insufficient_scope(undefined) ->
+    false;
+insufficient_scope(Www) ->
+    binary:match(Www, <<"insufficient_scope">>) =/= nomatch.
+
+%% A refused request waits for the authorization flow; the first one
+%% starts it. A request that has already been through three rounds is
+%% given up on instead.
+challenge_request(
+    Ref, #req{attempts = N}, _Status, #state{requests = Reqs, owner = Owner} = State
+) when
+    N >= ?MAX_AUTH_ATTEMPTS
+->
+    Owner ! {mcp_closed, self(), {unauthorized, retry_limit}},
+    State#state{requests = maps:remove(Ref, Reqs)};
+challenge_request(Ref, #req{headers = H} = R, Status, #state{requests = Reqs} = State) ->
+    State1 = State#state{
+        requests = maps:remove(Ref, Reqs),
+        challenged = [R | State#state.challenged]
+    },
+    case State1#state.auth_flow of
+        undefined -> start_auth_flow(Status, header_value(<<"www-authenticate">>, H), State1);
+        _ -> State1
+    end.
+
+start_auth_flow(Status, Www, #state{auth = Auth, url = Url} = State) ->
+    Version =
+        case State#state.protocol_version of
+            undefined -> State#state.requested_version;
+            Negotiated -> Negotiated
+        end,
+    Challenge = #{
+        status => Status,
+        www_authenticate => Www,
+        server_url => Url,
+        protocol_version => Version
+    },
+    Transport = self(),
+    Flow = spawn_monitor(fun() ->
+        Transport ! {auth_flow, self(), barrel_mcp_client_auth:challenge(Auth, Challenge)}
+    end),
+    State#state{auth_flow = Flow}.
+
+finish_auth_flow({ok, NewAuth}, #state{challenged = Challenged} = State) ->
+    State1 = State#state{auth = NewAuth, challenged = []},
+    lists:foldl(
+        fun(#req{body = Body, attempts = N}, S) ->
+            case start_post(Body, N + 1, S) of
+                {ok, S1} ->
+                    S1;
+                {error, Reason} ->
+                    S#state.owner ! {mcp_closed, self(), {unauthorized, Reason}},
+                    S
+            end
+        end,
+        State1,
+        lists:reverse(Challenged)
+    );
+finish_auth_flow({error, _Reason}, #state{challenged = []} = State) ->
+    State;
+finish_auth_flow({error, Reason}, #state{owner = Owner} = State) ->
+    Owner ! {mcp_closed, self(), {unauthorized, Reason}},
+    State#state{challenged = []}.
 
 %% "A 400, 404 or 405 ... indicates the server does not host the
 %% Streamable HTTP endpoint" (2026-07-28/.../streamable-http.mdx:274),
@@ -595,12 +718,18 @@ handle_sse_chunk(Chunk, #state{sse_buffer = Buf, owner = Owner} = State) ->
         false ->
             {Events, NewBuf} = parse_sse(Combined),
             State1 = forward_sse_events(Events, State),
-            {noreply, State1#state{sse_buffer = NewBuf}}
+            Retry =
+                case sse_retry_ms(Combined) of
+                    undefined -> State1#state.sse_retry_ms;
+                    Ms -> Ms
+                end,
+            {noreply, State1#state{sse_buffer = NewBuf, sse_retry_ms = Retry}}
     end.
 
-handle_sse_done(State) ->
-    %% Server closed the long-lived stream; reopen in a moment.
-    erlang:send_after(1000, self(), reopen_sse),
+handle_sse_done(#state{sse_retry_ms = Retry} = State) ->
+    %% Server closed the long-lived stream; reopen after the delay it
+    %% asked for (SEP-1699), a second by default.
+    erlang:send_after(Retry, self(), reopen_sse),
     {noreply, State#state{sse_ref = undefined, sse_buffer = <<>>}}.
 
 %%====================================================================
@@ -620,6 +749,45 @@ parse_sse(Buf, Acc) ->
         [Block, Rest] ->
             Event = parse_event_block(Block),
             parse_sse(Rest, [Event | Acc])
+    end.
+
+%% What a response stream told us: the last event id, the retry
+%% delay, and whether the response itself has gone by.
+note_stream_progress(Events, Raw, #req{request_id = ReqId} = R) ->
+    LastId = lists:foldl(
+        fun
+            ({undefined, _, _}, Acc) -> Acc;
+            ({Id, _, _}, _) -> Id
+        end,
+        R#req.last_event_id,
+        Events
+    ),
+    Retry =
+        case sse_retry_ms(Raw) of
+            undefined -> R#req.retry_ms;
+            Ms -> Ms
+        end,
+    Answered =
+        R#req.answered orelse lists:any(fun({_, _, Data}) -> answers(Data, ReqId) end, Events),
+    R#req{last_event_id = LastId, retry_ms = Retry, answered = Answered}.
+
+answers(_Data, undefined) ->
+    false;
+answers(Data, ReqId) ->
+    try json:decode(Data) of
+        #{<<"id">> := ReqId} = Msg ->
+            maps:is_key(<<"result">>, Msg) orelse maps:is_key(<<"error">>, Msg);
+        _ ->
+            false
+    catch
+        _:_ -> false
+    end.
+
+%% `retry:' is a stream-level instruction, not part of any event.
+sse_retry_ms(Buf) ->
+    case re:run(Buf, <<"(?m)^retry: ?(\\d+)\\s*$">>, [{capture, all_but_first, binary}]) of
+        {match, [Ms]} -> binary_to_integer(Ms);
+        nomatch -> undefined
     end.
 
 parse_event_block(Block) ->
@@ -699,7 +867,7 @@ flush_queued(#state{queued = []} = State) ->
     State;
 flush_queued(#state{queued = [Body | Rest]} = State) ->
     State1 =
-        case start_post(Body, false, State#state{queued = Rest}) of
+        case start_post(Body, 0, State#state{queued = Rest}) of
             {ok, S} -> S;
             {error, _} -> State#state{queued = Rest}
         end,

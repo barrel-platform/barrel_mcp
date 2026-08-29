@@ -422,6 +422,47 @@ User    Host                   AS                  MCP server
  │   │       (on 401: refresh_token grant)              │
 ```
 
+The handle runs the flow from the first 401. You supply the one step
+only a host can do, sending the person to the authorization URL and
+handing back the URL they were redirected to:
+
+```erlang
+auth => {oauth, #{
+    redirect_uri => <<"http://127.0.0.1:8765/callback">>,
+    authorize => fun(AuthorizationUrl) ->
+        %% Open the URL in a browser, run a listener on the redirect
+        %% URI, and return the full callback URL it received.
+        {ok, my_host:await_callback(AuthorizationUrl)}
+    end,
+    scopes => [<<"mcp.read">>, <<"mcp.write">>],
+    %% Optional. Without a client_id the handle uses a Client ID
+    %% Metadata Document when the server supports it, else dynamic
+    %% registration with `client_metadata`.
+    client_id => <<"...">>,
+    client_secret => <<"...">>,
+    token_endpoint_auth_method => client_secret_basic,
+    %% Optional persistence of the registered client and the tokens.
+    store => {my_token_store, Arg}
+}}
+```
+
+From that 401 the handle discovers the protected resource and its
+authorization server (validating issuer, PKCE support and HTTPS),
+picks the client identity, builds the PKCE authorization URL, calls
+`authorize`, checks the callback (redirect URI, `state`, `iss`),
+exchanges the code, and retries the request. Later 401s refresh; a
+403 `insufficient_scope` re-authorizes with the union of scopes; a
+change of authorization server discards the stored client and
+registers again. The transport runs all of it in a worker, so a
+person taking a minute to consent blocks nothing.
+
+`store` is a module implementing `barrel_mcp_client_auth_store`
+(`get/2`, `put/3`, `delete/2` over the keys `client` and `tokens`).
+Without one, both live in the handle.
+
+With tokens obtained some other way, give them directly and the
+handle only refreshes:
+
 ```erlang
 auth => {oauth, #{
     access_token   => <<"...">>,            % required
@@ -433,9 +474,6 @@ auth => {oauth, #{
     scopes         => [<<"mcp.read">>, <<"mcp.write">>]
 }}
 ```
-
-The host drives the browser dance and feeds the resulting tokens
-in. The library handles the refresh.
 
 #### Validate the authorization response
 

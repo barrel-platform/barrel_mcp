@@ -26,6 +26,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and on the discovery and grant helpers lifts the check for a
   plaintext test server. It is noncompliant and documented as such.
 
+### Added
+
+- The OAuth client handle runs the authorization-code flow itself. An
+  `{oauth, #{redirect_uri, authorize, ...}}` config with no
+  `access_token` answers a 401 by discovering the protected resource
+  and its authorization server, choosing the client identity
+  (pre-registered, CIMD or dynamic registration), calling the host's
+  `authorize` fun with the authorization URL, validating the callback
+  (redirect URI, `state`, RFC 9207 `iss`) and exchanging the code. A
+  403 `insufficient_scope` steps up with the union of scopes
+  (SEP-2350). Scope selection follows the specification (challenge,
+  then PRM `scopes_supported`, then omitted), `offline_access` is
+  added only when the authorization server lists it (SEP-2207), and a
+  change of authorization server drops the stored client and tokens
+  (SEP-2352). 2025-03-26 servers get the origin-based discovery and
+  the `/authorize` `/token` `/register` fallbacks of that revision.
+  An optional `store => {Module, Arg}` (`barrel_mcp_client_auth_store`)
+  persists the client and tokens.
+- `barrel_mcp_client_auth` has two optional callbacks, `challenge/2`
+  and `settled/1`. The HTTP transport hands a 401, or a 403
+  `insufficient_scope`, to a worker running the handle's `challenge/2`
+  and keeps serving; refused requests wait for that one flow and are
+  reissued when it returns, three rounds at most per request.
+- The HTTP client honours the SSE `retry:` field on reconnect and
+  resumes a response stream the server closed before the response
+  with a GET carrying `Last-Event-ID` (SEP-1699).
+- The official conformance runner's client mode runs against our
+  client: `test/barrel_mcp_conformance_client.erl` under four CT
+  cases (`--requirements` at 2026-07-28 and 2025-11-25, `--suite all`
+  at 2025-06-18 and 2025-03-26).
+
 ### Changed
 
 - `barrel_mcp_client_auth_oauth:discover_authorization_server/1,2`

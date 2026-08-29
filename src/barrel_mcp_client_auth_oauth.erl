@@ -32,16 +32,34 @@
 %%%       401 (when a `refresh_token' was supplied).</li>
 %%% </ol>
 %%%
-%%% == What this module does NOT do ==
+%%% == The redirect step ==
 %%%
-%%% The authorization-code redirect step requires a browser and a
-%%% local listener to capture the callback — that's a host concern,
-%%% not a library one. Hosts run the interactive step however suits
-%%% them (open a URL, do a CLI device-code flow, paste a code), then
-%%% pass the resulting tokens back via the `{oauth, Config}' tuple.
-%%% The library handles refresh from there.
+%%% Sending a person to the authorization URL and getting the callback
+%%% back is the host's: a browser, a paste, a local listener. The host
+%%% gives it as the `authorize' fun below, and the handle runs the rest
+%%% from a 401: discovery, registration, PKCE, validation, exchange,
+%%% refresh, step-up. A host that obtained tokens by other means gives
+%%% them as `access_token' instead and the handle only refreshes.
 %%%
 %%% == Config shape ==
+%%%
+%%% ```
+%%% {oauth, #{
+%%%   redirect_uri   := binary(),       %% the flow's registered redirect
+%%%   authorize      := fun((Url) -> {ok, CallbackUrl} | {error, _}),
+%%%   client_id      => binary(),       %% pre-registered; else CIMD or DCR
+%%%   client_secret  => binary(),
+%%%   client_id_metadata_url => binary(),
+%%%   client_metadata => map(),         %% the DCR document
+%%%   token_endpoint_auth_method => client_secret_basic | client_secret_post | none,
+%%%   scopes         => [binary()],
+%%%   resource       => binary(),
+%%%   store          => {module(), term()}, %% barrel_mcp_client_auth_store
+%%%   allow_insecure_oauth => boolean()
+%%% }}
+%%% '''
+%%%
+%%% or, with tokens in hand:
 %%%
 %%% ```
 %%% {oauth, #{
@@ -70,7 +88,7 @@
 -behaviour(barrel_mcp_client_auth).
 
 %% Behaviour callbacks
--export([init/1, header/1, refresh/2]).
+-export([init/1, header/1, refresh/2, challenge/2, settled/1]).
 
 %% Public discovery + PKCE + token helpers (host-side).
 -export([
@@ -159,6 +177,23 @@
     resource :: binary() | undefined,
     scopes :: [binary()] | undefined,
     mode = auth_code :: auth_code | client_credentials | enterprise_managed,
+    %% `flow': this handle runs the authorization-code flow itself from
+    %% a 401. `token': the host obtained the tokens and we only refresh.
+    phase = token :: token | flow,
+    redirect_uri :: binary() | undefined,
+    authorize :: fun((binary()) -> {ok, binary()} | {error, term()}) | undefined,
+    client_metadata :: map() | undefined,
+    client_id_metadata_url :: binary() | undefined,
+    tea_method :: client_secret_basic | client_secret_post | none | undefined,
+    store :: barrel_mcp_client_auth_store:store(),
+    want_refresh = true :: boolean(),
+    server_url :: binary() | undefined,
+    prm :: map() | undefined,
+    as_metadata :: map() | undefined,
+    %% The client identity in use and the issuer it is bound to.
+    client :: map() | undefined,
+    requested_scope :: [binary()] | undefined,
+    granted_scope :: [binary()] | undefined,
     %% Enterprise-managed-only state (RFC 8693 + RFC 7523 chain).
     idp_token_endpoint :: binary() | undefined,
     subject_token :: binary() | undefined,
@@ -191,6 +226,27 @@ configured_endpoints(Cfg) ->
         is_binary(Url)
     ].
 
+%% Authorization-code flow driven from a 401: the host supplies the
+%% redirect step and gets the tokens back through the handle.
+init_mode(#{redirect_uri := Redirect, authorize := Authorize} = Cfg, Insecure) when
+    is_binary(Redirect), is_function(Authorize, 1)
+->
+    H0 = #h{
+        insecure = Insecure,
+        mode = auth_code,
+        phase = flow,
+        redirect_uri = Redirect,
+        authorize = Authorize,
+        client_metadata = maps:get(client_metadata, Cfg, undefined),
+        client_id_metadata_url = maps:get(client_id_metadata_url, Cfg, undefined),
+        tea_method = maps:get(token_endpoint_auth_method, Cfg, undefined),
+        store = maps:get(store, Cfg, undefined),
+        want_refresh = maps:get(want_refresh_token, Cfg, true),
+        resource = maps:get(resource, Cfg, undefined),
+        scopes = maps:get(scopes, Cfg, undefined),
+        requested_scope = maps:get(scopes, Cfg, undefined)
+    },
+    {ok, load_store(set_client(H0, preregistered(Cfg)))};
 init_mode(#{access_token := AT} = Cfg, Insecure) when is_binary(AT), AT =/= <<>> ->
     {ok, #h{
         insecure = Insecure,
@@ -237,7 +293,7 @@ init_mode(
     #{
         grant_type := enterprise_managed,
         idp_token_endpoint := IDP,
-        as_token_endpoint := AS,
+        as_token_endpoint := AsTokenEndpoint,
         client_id := CI,
         subject_token := ST,
         subject_token_type := STT,
@@ -248,8 +304,8 @@ init_mode(
 ) when
     is_binary(IDP),
     IDP =/= <<>>,
-    is_binary(AS),
-    AS =/= <<>>,
+    is_binary(AsTokenEndpoint),
+    AsTokenEndpoint =/= <<>>,
     is_binary(CI),
     CI =/= <<>>,
     is_binary(ST),
@@ -262,7 +318,7 @@ init_mode(
     Res =/= <<>>
 ->
     H0 = #h{
-        token_endpoint = AS,
+        token_endpoint = AsTokenEndpoint,
         client_id = CI,
         client_secret = maps:get(client_secret, Cfg, undefined),
         client_assertion = maps:get(client_assertion, Cfg, undefined),
@@ -345,8 +401,8 @@ discover_protected_resource(Url, Opts) ->
         {ok,
             #{
                 <<"resource">> := _,
-                <<"authorization_servers">> := AS
-            } = Doc} when is_list(AS) ->
+                <<"authorization_servers">> := Servers
+            } = Doc} when is_list(Servers) ->
             {ok, Doc};
         {ok, Other} ->
             {error, {invalid_prm, Other}};
@@ -1018,24 +1074,30 @@ cred(Key, Credentials) ->
 %% Internal — refresh wired through the behaviour
 %%====================================================================
 
-do_refresh(#h{
-    refresh_token = RT,
-    token_endpoint = TE,
-    client_id = CI,
-    client_secret = CS,
-    resource = Res,
-    scopes = Scopes,
-    insecure = Insecure
-}) ->
+do_refresh(
+    #h{
+        refresh_token = RT,
+        token_endpoint = TE,
+        client_id = CI,
+        client_secret = CS,
+        resource = Res,
+        scopes = Scopes,
+        insecure = Insecure
+    } = H
+) ->
     Params = drop_undefined(#{
         refresh_token => RT,
         client_id => CI,
         client_secret => CS,
         resource => Res,
         scopes => Scopes,
+        token_endpoint_auth_method => refresh_tea(H),
         allow_insecure_oauth => Insecure
     }),
     refresh_token(TE, Params).
+
+refresh_tea(#h{client = Client} = H) when is_map(Client) -> tea_method(H);
+refresh_tea(_H) -> undefined.
 
 %% Fetch / re-fetch a token via the client_credentials grant and
 %% fold the response into the handle.
@@ -1071,7 +1133,7 @@ acquire_via_client_credentials(
 acquire_via_ema(
     #h{
         idp_token_endpoint = IDP,
-        token_endpoint = AS,
+        token_endpoint = AsTokenEndpoint,
         client_id = CI,
         client_secret = CS,
         client_assertion = CA,
@@ -1104,7 +1166,7 @@ acquire_via_ema(
                 scopes => Scopes,
                 allow_insecure_oauth => Insecure
             }),
-            case jwt_bearer(AS, Step2) of
+            case jwt_bearer(AsTokenEndpoint, Step2) of
                 {ok, R} -> {ok, apply_token_response(H, R)};
                 {error, _} = Err -> Err
             end;
@@ -1126,12 +1188,549 @@ is_invalid_grant(_) ->
     false.
 
 apply_token_response(#h{} = H, #{<<"access_token">> := AT} = R) ->
+    Granted =
+        case maps:get(<<"scope">>, R, undefined) of
+            S when is_binary(S) -> binary:split(S, <<" ">>, [global, trim_all]);
+            _ -> H#h.requested_scope
+        end,
     H#h{
         access_token = AT,
-        refresh_token = maps:get(<<"refresh_token">>, R, H#h.refresh_token)
+        refresh_token = maps:get(<<"refresh_token">>, R, H#h.refresh_token),
+        granted_scope = Granted
     };
 apply_token_response(H, _) ->
     H.
+
+%%====================================================================
+%% The authorization-code flow, driven from a challenge
+%%====================================================================
+
+%% @doc Answer a 401 or a 403 `insufficient_scope' with a handle that
+%% holds a usable token, running discovery, registration, the host's
+%% redirect step and the code exchange as the challenge requires.
+-spec challenge(handle(), barrel_mcp_client_auth:challenge()) ->
+    {ok, handle()} | {error, term()}.
+challenge(#h{mode = client_credentials} = H, _Challenge) ->
+    acquire_via_client_credentials(H);
+challenge(#h{mode = enterprise_managed} = H, _Challenge) ->
+    acquire_via_ema(H);
+challenge(#h{phase = token} = H, Challenge) ->
+    refresh(H, maps:get(www_authenticate, Challenge, undefined));
+challenge(#h{phase = flow} = H, #{status := 403} = Challenge) ->
+    step_up(H, Challenge);
+challenge(#h{phase = flow} = H, #{status := 401, server_url := ServerUrl} = Challenge) ->
+    H1 = H#h{server_url = ServerUrl},
+    case auth_era(maps:get(protocol_version, Challenge, undefined)) of
+        none -> {error, unauthorized};
+        legacy -> legacy_flow(H1, Challenge);
+        prm -> prm_flow(H1, Challenge)
+    end.
+
+%% @doc The transport reports an accepted request. Nothing to reset:
+%% the retry budget lives with the request, not here.
+-spec settled(handle()) -> handle().
+settled(H) ->
+    H.
+
+%% 2025-03-26 put the authorization server at the MCP server's origin;
+%% 2025-06-18 introduced Protected Resource Metadata; 2024-11-05 has no
+%% authorization at all. No negotiated version yet means the modern
+%% flow: that is what a stateless 2026 server answers before any
+%% request succeeds.
+auth_era(undefined) -> prm;
+auth_era(<<"2024-11-05">>) -> none;
+auth_era(<<"2025-03-26">>) -> legacy;
+auth_era(_Version) -> prm.
+
+%%-- Protected Resource Metadata era ----------------------------------
+
+prm_flow(H, #{www_authenticate := Www}) ->
+    Opts = opts(H),
+    case discover_prm(prm_urls(Www, H#h.server_url), Opts, undefined) of
+        {ok, #{<<"resource">> := Resource, <<"authorization_servers">> := [Issuer | _]} = Prm} ->
+            case resource_allowed(H#h.server_url, Resource) of
+                false ->
+                    {error, {resource_mismatch, Resource, H#h.server_url}};
+                true ->
+                    H1 = rebind(H#h{prm = Prm}, Issuer),
+                    case H1#h.refresh_token of
+                        undefined -> authorize_at(H1, Issuer, Www, true);
+                        _ -> refresh_or_authorize(H1, Issuer, Www)
+                    end
+            end;
+        {ok, Prm} ->
+            {error, {invalid_prm, Prm}};
+        {error, _} = Err ->
+            Err
+    end.
+
+%% The header names the document (RFC 9728 5.1); without it, the
+%% path-based well-known for the server URL, then the root one.
+prm_urls(Www, ServerUrl) ->
+    #{origin := Origin, path := Path} = split_url(ServerUrl),
+    FromHeader =
+        case parse_www_authenticate(Www) of
+            undefined -> [];
+            Url -> [Url]
+        end,
+    Guessed =
+        case Path of
+            P when P =:= <<>>; P =:= <<"/">> ->
+                [<<Origin/binary, "/.well-known/oauth-protected-resource">>];
+            P ->
+                [
+                    <<Origin/binary, "/.well-known/oauth-protected-resource", P/binary>>,
+                    <<Origin/binary, "/.well-known/oauth-protected-resource">>
+                ]
+        end,
+    lists:uniq(FromHeader ++ Guessed).
+
+%% Any URL that yields no document moves to the next one, the way the
+%% reference client does (mcp/client/auth/oauth2.py, protected resource
+%% response handling).
+discover_prm([], _Opts, Last) ->
+    {error, {no_prm, Last}};
+discover_prm([Url | Rest], Opts, _Last) ->
+    case discover_protected_resource(Url, Opts) of
+        {ok, _} = Ok -> Ok;
+        {error, Reason} -> discover_prm(Rest, Opts, Reason)
+    end.
+
+%% RFC 8707: the PRM's resource must cover the server URL, same origin
+%% and a path the server URL lives under.
+resource_allowed(ServerUrl, Resource) when is_binary(Resource) ->
+    #{origin := O1, path := P1} = split_url(ServerUrl),
+    #{origin := O2, path := P2} = split_url(Resource),
+    O1 =:= O2 andalso path_under(P1, P2);
+resource_allowed(_ServerUrl, _Resource) ->
+    false.
+
+path_under(Server, Resource) ->
+    S = trim_slash(Server),
+    R = trim_slash(Resource),
+    R =:= <<>> orelse S =:= R orelse
+        binary:longest_common_prefix([S, <<R/binary, "/">>]) =:= byte_size(R) + 1.
+
+trim_slash(P) ->
+    string:trim(P, trailing, "/").
+
+%% Scheme, lowercased host and effective port as one binary, plus the
+%% path. Fragments are dropped (RFC 8707 canonical form).
+split_url(Url) ->
+    Parsed = uri_string:parse(Url),
+    Scheme = string:lowercase(maps:get(scheme, Parsed, <<"https">>)),
+    Host = string:lowercase(maps:get(host, Parsed, <<>>)),
+    Default =
+        case Scheme of
+            <<"https">> -> 443;
+            _ -> 80
+        end,
+    Port = maps:get(port, Parsed, Default),
+    Origin =
+        case Port =:= Default of
+            true -> <<Scheme/binary, "://", Host/binary>>;
+            false -> <<Scheme/binary, "://", Host/binary, ":", (integer_to_binary(Port))/binary>>
+        end,
+    #{origin => Origin, path => maps:get(path, Parsed, <<>>)}.
+
+%% A stored client is only good at the issuer it was minted for. A new
+%% issuer means a new registration and no reuse of the old tokens.
+rebind(#h{client = undefined} = H, _Issuer) ->
+    H;
+rebind(#h{client = Client} = H, Issuer) ->
+    case check_issuer_binding(Client, Issuer) of
+        ok ->
+            H;
+        {error, unbound_credentials} ->
+            set_client(H, Client#{issuer => Issuer});
+        {error, {issuer_changed, _, _}} ->
+            _ = barrel_mcp_client_auth_store:delete(H#h.store, client),
+            _ = barrel_mcp_client_auth_store:delete(H#h.store, tokens),
+            (set_client(H, undefined))#h{
+                access_token = undefined,
+                refresh_token = undefined,
+                granted_scope = undefined,
+                as_metadata = undefined,
+                token_endpoint = undefined
+            }
+    end.
+
+refresh_or_authorize(H, Issuer, Www) ->
+    case do_refresh(H) of
+        {ok, Resp} -> {ok, store_tokens(apply_token_response(H, Resp))};
+        {error, _} -> authorize_at(H#h{refresh_token = undefined}, Issuer, Www, true)
+    end.
+
+authorize_at(H, Issuer, Www, WithResource) ->
+    case discover_authorization_server(Issuer, opts(H)) of
+        {ok, AsMd} ->
+            H1 = H#h{as_metadata = AsMd, token_endpoint = maps:get(<<"token_endpoint">>, AsMd)},
+            Scope = select_scope(Www, H1#h.prm, AsMd, H1),
+            case ensure_client(H1#h{requested_scope = Scope}, AsMd, Issuer) of
+                {ok, H2} -> run_authorization(H2, WithResource);
+                {error, _} = Err -> Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+%% authorization/index.mdx "Scope Selection Strategy": the challenge's
+%% scope, else the PRM's scopes_supported, else omit. The config's
+%% scopes stand in when neither names any. `offline_access' is added
+%% only when the authorization server lists it (SEP-2207).
+select_scope(Www, Prm, AsMd, H) ->
+    Base =
+        case www_param(<<"scope">>, Www) of
+            undefined ->
+                case Prm of
+                    #{<<"scopes_supported">> := L} when is_list(L), L =/= [] -> L;
+                    _ -> H#h.scopes
+                end;
+            Scope ->
+                binary:split(Scope, <<" ">>, [global, trim_all])
+        end,
+    with_offline_access(Base, AsMd, H).
+
+with_offline_access(undefined, _As, _H) ->
+    undefined;
+with_offline_access(Scope, AsMd, #h{want_refresh = true}) ->
+    Supported = maps:get(<<"scopes_supported">>, AsMd, []),
+    case
+        is_list(Supported) andalso lists:member(<<"offline_access">>, Supported) andalso
+            not lists:member(<<"offline_access">>, Scope)
+    of
+        true -> Scope ++ [<<"offline_access">>];
+        false -> Scope
+    end;
+with_offline_access(Scope, _As, _H) ->
+    Scope.
+
+ensure_client(#h{client = #{client_id := _}} = H, _As, _Issuer) ->
+    {ok, H};
+ensure_client(H, AsMd, Issuer) ->
+    case registration_strategy(AsMd, #{client_id_metadata_url => H#h.client_id_metadata_url}) of
+        {client_id_metadata_document, Url} ->
+            {ok,
+                store_client(
+                    set_client(H, #{
+                        client_id => Url, issuer => Issuer, token_endpoint_auth_method => none
+                    })
+                )};
+        {dynamic_registration, Endpoint} ->
+            Metadata = client_metadata(H),
+            case register_client(Endpoint, Metadata, opts(H)) of
+                {ok, Info} ->
+                    Client = #{
+                        client_id => maps:get(<<"client_id">>, Info),
+                        client_secret => maps:get(<<"client_secret">>, Info, undefined),
+                        issuer => Issuer,
+                        token_endpoint_auth_method =>
+                            tea_of(
+                                maps:get(
+                                    <<"token_endpoint_auth_method">>,
+                                    Info,
+                                    maps:get(<<"token_endpoint_auth_method">>, Metadata, undefined)
+                                )
+                            )
+                    },
+                    {ok, store_client(set_client(H, Client))};
+                {error, _} = Err ->
+                    Err
+            end;
+        prompt_user ->
+            {error, no_registration_path};
+        {pre_registered, _} ->
+            {ok, H}
+    end.
+
+client_metadata(#h{client_metadata = Given} = H) when is_map(Given) ->
+    Given#{<<"redirect_uris">> => [H#h.redirect_uri]};
+client_metadata(H) ->
+    Base = #{
+        <<"client_name">> => <<"barrel_mcp">>,
+        <<"redirect_uris">> => [H#h.redirect_uri],
+        <<"grant_types">> => [<<"authorization_code">>, <<"refresh_token">>],
+        <<"response_types">> => [<<"code">>],
+        <<"token_endpoint_auth_method">> => <<"none">>
+    },
+    case H#h.requested_scope of
+        undefined -> Base;
+        Scope -> Base#{<<"scope">> => iolist_to_binary(lists:join(<<" ">>, Scope))}
+    end.
+
+tea_of(<<"client_secret_basic">>) -> client_secret_basic;
+tea_of(<<"client_secret_post">>) -> client_secret_post;
+tea_of(<<"none">>) -> none;
+tea_of(Atom) when is_atom(Atom) -> Atom;
+tea_of(_) -> undefined.
+
+%% The method the client registered with, else the configured one,
+%% else the first the server supports, else what the credential allows.
+tea_method(#h{client = Client, tea_method = Configured, as_metadata = AsMd}) ->
+    Registered = maps:get(token_endpoint_auth_method, Client, undefined),
+    Supported =
+        case AsMd of
+            #{<<"token_endpoint_auth_methods_supported">> := L} when is_list(L) ->
+                [M || M <- [tea_of(X) || X <- L], M =/= undefined];
+            _ ->
+                []
+        end,
+    HasSecret = is_binary(maps:get(client_secret, Client, undefined)),
+    case {Registered, Configured, Supported, HasSecret} of
+        {M, _, _, _} when M =/= undefined -> M;
+        {_, M, _, _} when M =/= undefined -> M;
+        {_, _, [M | _], _} -> M;
+        {_, _, _, true} -> client_secret_basic;
+        _ -> none
+    end.
+
+run_authorization(#h{as_metadata = AsMd, client = #{client_id := ClientId}} = H, WithResource) ->
+    AuthEndpoint = maps:get(<<"authorization_endpoint">>, AsMd),
+    Params0 = #{
+        client_id => ClientId,
+        redirect_uri => H#h.redirect_uri,
+        scopes => H#h.requested_scope
+    },
+    Params =
+        case WithResource of
+            true -> Params0#{resource => resource_indicator(H)};
+            false -> Params0
+        end,
+    {Url0, Verifier, State} = build_authorization_url(AuthEndpoint, drop_undefined(Params)),
+    Url = with_consent_prompt(Url0, H#h.requested_scope),
+    case (H#h.authorize)(Url) of
+        {ok, CallbackUrl} ->
+            case callback_query(CallbackUrl, AuthEndpoint, H#h.redirect_uri) of
+                {ok, Query} ->
+                    Expected = drop_undefined(#{
+                        state => State,
+                        issuer => maps:get(<<"issuer">>, AsMd, undefined),
+                        as_metadata => AsMd
+                    }),
+                    case validate_callback(Query, Expected) of
+                        ok ->
+                            exchange(
+                                H, maps:get(<<"code">>, Query, undefined), Verifier, WithResource
+                            );
+                        {error, _} = Err ->
+                            Err
+                    end;
+                {error, _} = Err ->
+                    Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+%% RFC 8707: the resource indicator is the PRM's own `resource' when
+%% there is one, else the configured one, else the server URL.
+resource_indicator(#h{prm = #{<<"resource">> := R}}) when is_binary(R) -> R;
+resource_indicator(#h{resource = R}) when is_binary(R) -> R;
+resource_indicator(#h{server_url = Url}) -> Url.
+
+%% OpenID Connect Core 11: `offline_access' needs `prompt=consent'.
+with_consent_prompt(Url, Scope) when is_list(Scope) ->
+    case lists:member(<<"offline_access">>, Scope) of
+        true -> <<Url/binary, "&prompt=consent">>;
+        false -> Url
+    end;
+with_consent_prompt(Url, _Scope) ->
+    Url.
+
+%% The host hands back the URL the authorization server redirected to.
+%% It is only read when it is the registered redirect URI; a relative
+%% one is resolved against the authorization endpoint first.
+callback_query(CallbackUrl, AuthEndpoint, RedirectUri) ->
+    case uri_string:resolve(CallbackUrl, AuthEndpoint) of
+        Resolved when is_binary(Resolved) ->
+            Got = uri_string:parse(Resolved),
+            Want = uri_string:parse(RedirectUri),
+            case same_location(Got, Want) of
+                true -> {ok, query_map(maps:get(query, Got, <<>>))};
+                false -> {error, {callback_mismatch, Resolved}}
+            end;
+        _ ->
+            {error, {callback_mismatch, CallbackUrl}}
+    end.
+
+same_location(#{scheme := _} = A, #{scheme := _} = B) ->
+    #{origin := O1} = split_url(uri_string:recompose(maps:with([scheme, host, port, path], A))),
+    #{origin := O2} = split_url(uri_string:recompose(maps:with([scheme, host, port, path], B))),
+    O1 =:= O2 andalso
+        maps:get(path, A, <<"/">>) =:= maps:get(path, B, <<"/">>);
+same_location(_, _) ->
+    false.
+
+query_map(Query) ->
+    case uri_string:dissect_query(Query) of
+        Pairs when is_list(Pairs) ->
+            maps:from_list([{K, V} || {K, V} <- Pairs, is_binary(V)]);
+        _ ->
+            #{}
+    end.
+
+exchange(_H, undefined, _Verifier, _WithResource) ->
+    {error, no_authorization_code};
+exchange(#h{client = Client} = H, Code, Verifier, WithResource) ->
+    Params0 = #{
+        code => Code,
+        code_verifier => Verifier,
+        client_id => maps:get(client_id, Client),
+        client_secret => maps:get(client_secret, Client, undefined),
+        redirect_uri => H#h.redirect_uri,
+        token_endpoint_auth_method => tea_method(H),
+        allow_insecure_oauth => H#h.insecure
+    },
+    Params =
+        case WithResource of
+            true -> Params0#{resource => resource_indicator(H)};
+            false -> Params0
+        end,
+    case exchange_code(H#h.token_endpoint, drop_undefined(Params)) of
+        {ok, Resp} -> {ok, store_tokens(apply_token_response(H, Resp))};
+        {error, _} = Err -> Err
+    end.
+
+%%-- 403 insufficient_scope: step up ------------------------------------
+
+%% SEP-2350: request the union of what was requested, what was granted
+%% and what the challenge names; no rediscovery.
+step_up(#h{as_metadata = AsMd, client = Client} = H, Challenge) when
+    is_map(AsMd), is_map(Client)
+->
+    Www = maps:get(www_authenticate, Challenge, undefined),
+    Challenged =
+        case www_param(<<"scope">>, Www) of
+            undefined -> [];
+            S -> binary:split(S, <<" ">>, [global, trim_all])
+        end,
+    Union = lists:uniq(
+        default_list(H#h.requested_scope) ++ default_list(H#h.granted_scope) ++ Challenged
+    ),
+    Scope =
+        case Union of
+            [] -> undefined;
+            _ -> Union
+        end,
+    run_authorization(H#h{requested_scope = Scope}, auth_era(undefined) =:= prm);
+step_up(H, Challenge) ->
+    challenge(H, Challenge#{status => 401}).
+
+default_list(undefined) -> [];
+default_list(L) -> L.
+
+%%-- 2025-03-26: metadata at the server's origin, fixed fallbacks ------
+
+%% authorization.mdx (2025-03-26) 2.3: the authorization base URL is the
+%% server URL without its path; metadata lives at the well-known path
+%% there, and `/authorize', `/token', `/register' serve when it does
+%% not. PKCE is still used; that revision does not require it to be
+%% advertised.
+legacy_flow(H, _Challenge) ->
+    #{origin := Base} = split_url(H#h.server_url),
+    Opts = opts(H),
+    case secure_url(Base, Opts) of
+        {error, _} = Err ->
+            Err;
+        ok ->
+            AsMd =
+                case
+                    http_get_json(<<Base/binary, "/.well-known/oauth-authorization-server">>, Opts)
+                of
+                    {ok, #{<<"authorization_endpoint">> := _, <<"token_endpoint">> := _} = Doc} ->
+                        Doc#{<<"issuer">> => maps:get(<<"issuer">>, Doc, Base)};
+                    _ ->
+                        #{
+                            <<"issuer">> => Base,
+                            <<"authorization_endpoint">> => <<Base/binary, "/authorize">>,
+                            <<"token_endpoint">> => <<Base/binary, "/token">>,
+                            <<"registration_endpoint">> => <<Base/binary, "/register">>
+                        }
+                end,
+            case secure_urls(as_endpoints(AsMd), Opts) of
+                {error, _} = Err ->
+                    Err;
+                ok ->
+                    H1 = H#h{
+                        as_metadata = AsMd,
+                        token_endpoint = maps:get(<<"token_endpoint">>, AsMd),
+                        requested_scope = H#h.scopes
+                    },
+                    case ensure_client(rebind(H1, Base), AsMd, Base) of
+                        {ok, H2} -> run_authorization(H2, false);
+                        {error, _} = Err -> Err
+                    end
+            end
+    end.
+
+%%-- Handle plumbing ----------------------------------------------------
+
+opts(#h{insecure = Insecure}) ->
+    #{allow_insecure_oauth => Insecure}.
+
+%% `client_id'/`client_secret' are mirrored into the record fields the
+%% refresh path reads.
+set_client(H, undefined) ->
+    H#h{client = undefined, client_id = undefined, client_secret = undefined};
+set_client(H, Client) ->
+    H#h{
+        client = Client,
+        client_id = maps:get(client_id, Client, undefined),
+        client_secret = maps:get(client_secret, Client, undefined)
+    }.
+
+preregistered(Cfg) ->
+    case maps:get(client_id, Cfg, undefined) of
+        ClientId when is_binary(ClientId), ClientId =/= <<>> ->
+            #{
+                client_id => ClientId,
+                client_secret => maps:get(client_secret, Cfg, undefined),
+                issuer => undefined,
+                token_endpoint_auth_method => maps:get(token_endpoint_auth_method, Cfg, undefined)
+            };
+        _ ->
+            undefined
+    end.
+
+load_store(#h{store = Store} = H) ->
+    H1 =
+        case barrel_mcp_client_auth_store:get(Store, client, undefined) of
+            undefined -> H;
+            Client -> set_client(H, Client)
+        end,
+    case barrel_mcp_client_auth_store:get(Store, tokens, undefined) of
+        undefined ->
+            H1;
+        Tokens ->
+            H1#h{
+                access_token = maps:get(access_token, Tokens, undefined),
+                refresh_token = maps:get(refresh_token, Tokens, undefined),
+                token_endpoint = maps:get(token_endpoint, Tokens, H1#h.token_endpoint),
+                granted_scope = maps:get(scope, Tokens, undefined)
+            }
+    end.
+
+store_client(#h{store = Store, client = Client} = H) ->
+    _ = barrel_mcp_client_auth_store:put(Store, client, Client),
+    H.
+
+store_tokens(#h{store = Store} = H) ->
+    _ = barrel_mcp_client_auth_store:put(Store, tokens, #{
+        access_token => H#h.access_token,
+        refresh_token => H#h.refresh_token,
+        token_endpoint => H#h.token_endpoint,
+        scope => H#h.granted_scope
+    }),
+    H.
+
+%% One parameter of an RFC 6750 challenge, quoted or bare.
+www_param(_Name, undefined) ->
+    undefined;
+www_param(Name, Www) ->
+    case re:run(Www, <<Name/binary, "=\"?([^\",]+)\"?">>, [{capture, all_but_first, binary}]) of
+        {match, [V]} -> V;
+        nomatch -> undefined
+    end.
 
 %%====================================================================
 %% HTTP helpers
@@ -1201,10 +1800,25 @@ do_http_get_json(Url) ->
             Err
     end.
 
+%% `token_endpoint_auth_method' in `Opts' picks how the secret travels:
+%% HTTP Basic (default when there is one), the body, or not at all.
 http_post_form(Url, Form, ClientSecret, ClientId, Opts) ->
     case secure_url(Url, Opts) of
-        ok -> http_post_form(Url, Form, ClientSecret, ClientId);
-        {error, _} = Err -> Err
+        ok ->
+            case maps:get(token_endpoint_auth_method, Opts, undefined) of
+                client_secret_post ->
+                    http_post_form(Url, Form, undefined, ClientId);
+                none ->
+                    http_post_form(
+                        Url, maps:remove(<<"client_secret">>, Form), undefined, ClientId
+                    );
+                _ ->
+                    http_post_form(
+                        Url, maps:remove(<<"client_secret">>, Form), ClientSecret, ClientId
+                    )
+            end;
+        {error, _} = Err ->
+            Err
     end.
 
 http_post_form(Url, Form, ClientSecret, ClientId) when

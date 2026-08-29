@@ -1668,7 +1668,15 @@ open_transport(#data{spec = Spec} = Data) ->
                         auth => Auth,
                         open_event_stream => true,
                         headers => maps:get(http_headers, Spec, []),
-                        legacy_sse_url => maps:get(legacy_sse_url, Spec, undefined)
+                        legacy_sse_url => maps:get(legacy_sse_url, Spec, undefined),
+                        %% A 401 can arrive before any version is
+                        %% negotiated; the auth flow branches on the
+                        %% one the host asked for then.
+                        requested_version =>
+                            case maps:get(protocol_version, Spec, auto) of
+                                auto -> undefined;
+                                Requested -> Requested
+                            end
                     },
                     case barrel_mcp_client_http:connect(self(), Opts) of
                         {ok, Pid} ->
