@@ -51,9 +51,18 @@
 %%%   client_id      => binary(),       %% required if refresh_token set
 %%%   client_secret  => binary(),       %% optional confidential client
 %%%   resource       => binary(),       %% RFC 8707 canonical id
-%%%   scopes         => [binary()]      %% optional
+%%%   scopes         => [binary()],     %% optional
+%%%   allow_insecure_oauth => boolean() %% see below
 %%% }}
 %%% '''
+%%%
+%%% == HTTPS ==
+%%%
+%%% Every authorization-server URL, configured or discovered, must be
+%%% `https' (MCP authorization security considerations, "Communication
+%%% Security"). `allow_insecure_oauth => true' lifts that for a
+%%% plaintext test server. It is noncompliant and never a production
+%%% setting.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_client_auth_oauth).
@@ -67,7 +76,10 @@
 -export([
     parse_www_authenticate/1,
     discover_protected_resource/1,
+    discover_protected_resource/2,
     discover_authorization_server/1,
+    discover_authorization_server/2,
+    secure_url/2,
     gen_code_verifier/0,
     code_challenge/1,
     build_authorization_url/2,
@@ -95,7 +107,8 @@
         client_id => binary(),
         client_secret => binary(),
         resource => binary(),
-        scopes => [binary()]
+        scopes => [binary()],
+        allow_insecure_oauth => boolean()
     }
     | client_credentials_config()
     | enterprise_managed_config().
@@ -107,7 +120,8 @@
     client_secret => binary(),
     client_assertion => binary(),
     resource => binary(),
-    scopes => [binary()]
+    scopes => [binary()],
+    allow_insecure_oauth => boolean()
 }.
 
 -type enterprise_managed_config() :: #{
@@ -128,10 +142,14 @@
     audience := binary(),
     %% MCP server's RFC 9728 resource identifier.
     resource := binary(),
-    scopes => [binary()]
+    scopes => [binary()],
+    allow_insecure_oauth => boolean()
 }.
 
 -record(h, {
+    %% `allow_insecure_oauth' from the config; threaded into every
+    %% token request the handle makes.
+    insecure = false :: boolean(),
     access_token :: binary() | undefined,
     refresh_token :: binary() | undefined,
     token_endpoint :: binary() | undefined,
@@ -154,8 +172,28 @@
 %% Behaviour callbacks
 %%====================================================================
 
-init(#{access_token := AT} = Cfg) when is_binary(AT), AT =/= <<>> ->
+init(Cfg) when is_map(Cfg) ->
+    Insecure = insecure_opt(Cfg),
+    Opts = #{allow_insecure_oauth => Insecure},
+    case secure_urls(configured_endpoints(Cfg), Opts) of
+        ok -> init_mode(Cfg, Insecure);
+        {error, _} = Err -> Err
+    end;
+init(_) ->
+    {error, missing_access_token}.
+
+%% The endpoints a config names directly, bypassing discovery.
+configured_endpoints(Cfg) ->
+    [
+        Url
+     || Key <- [token_endpoint, idp_token_endpoint, as_token_endpoint],
+        Url <- [maps:get(Key, Cfg, undefined)],
+        is_binary(Url)
+    ].
+
+init_mode(#{access_token := AT} = Cfg, Insecure) when is_binary(AT), AT =/= <<>> ->
     {ok, #h{
+        insecure = Insecure,
         access_token = AT,
         refresh_token = maps:get(refresh_token, Cfg, undefined),
         token_endpoint = maps:get(token_endpoint, Cfg, undefined),
@@ -164,18 +202,20 @@ init(#{access_token := AT} = Cfg) when is_binary(AT), AT =/= <<>> ->
         resource = maps:get(resource, Cfg, undefined),
         scopes = maps:get(scopes, Cfg, undefined)
     }};
-%% Client-credentials grant — fetch the token eagerly so init either
+%% Client-credentials grant: fetch the token eagerly so init either
 %% returns a usable handle or fails up front.
-init(
+init_mode(
     #{
         grant_type := client_credentials,
         token_endpoint := TE,
         client_id := CI
-    } = Cfg
+    } = Cfg,
+    Insecure
 ) when
     is_binary(TE), TE =/= <<>>, is_binary(CI), CI =/= <<>>
 ->
     H0 = #h{
+        insecure = Insecure,
         token_endpoint = TE,
         client_id = CI,
         client_secret = maps:get(client_secret, Cfg, undefined),
@@ -188,12 +228,12 @@ init(
         {ok, H1} -> {ok, H1};
         {error, _} = Err -> Err
     end;
-init(#{grant_type := client_credentials}) ->
+init_mode(#{grant_type := client_credentials}, _Insecure) ->
     {error, missing_token_endpoint_or_client_id};
 %% Enterprise-managed authorization (MCP `ext-auth' EMA):
 %% RFC 8693 token-exchange at the IdP -> ID-JAG, then RFC 7523
 %% jwt-bearer at the AS -> short-lived MCP access token.
-init(
+init_mode(
     #{
         grant_type := enterprise_managed,
         idp_token_endpoint := IDP,
@@ -203,7 +243,8 @@ init(
         subject_token_type := STT,
         audience := Aud,
         resource := Res
-    } = Cfg
+    } = Cfg,
+    Insecure
 ) when
     is_binary(IDP),
     IDP =/= <<>>,
@@ -228,6 +269,7 @@ init(
         resource = Res,
         scopes = maps:get(scopes, Cfg, undefined),
         mode = enterprise_managed,
+        insecure = Insecure,
         idp_token_endpoint = IDP,
         subject_token = ST,
         subject_token_type = STT,
@@ -237,9 +279,9 @@ init(
         {ok, H1} -> {ok, H1};
         {error, _} = Err -> Err
     end;
-init(#{grant_type := enterprise_managed}) ->
+init_mode(#{grant_type := enterprise_managed}, _Insecure) ->
     {error, missing_endpoints_or_subject_token};
-init(_) ->
+init_mode(_, _Insecure) ->
     {error, missing_access_token}.
 
 header(#h{access_token = undefined}) ->
@@ -292,7 +334,14 @@ parse_www_authenticate(Header) when is_binary(Header) ->
 -spec discover_protected_resource(binary()) ->
     {ok, map()} | {error, term()}.
 discover_protected_resource(Url) ->
-    case http_get_json(Url) of
+    discover_protected_resource(Url, #{}).
+
+%% @doc {@link discover_protected_resource/1} with options
+%% (`allow_insecure_oauth').
+-spec discover_protected_resource(binary(), map()) ->
+    {ok, map()} | {error, term()}.
+discover_protected_resource(Url, Opts) ->
+    case http_get_json(Url, Opts) of
         {ok,
             #{
                 <<"resource">> := _,
@@ -305,35 +354,116 @@ discover_protected_resource(Url) ->
             Err
     end.
 
-%% @doc Fetch the Authorization Server Metadata for the given issuer
-%% URL. Tries `/.well-known/oauth-authorization-server' first, then
-%% falls back to `/.well-known/openid-configuration'.
+%% @doc Fetch and validate the Authorization Server Metadata for an
+%% issuer URL, trying the well-known locations in the order the MCP
+%% specification requires (authorization-server-discovery, "Authorization
+%% Server Metadata Discovery").
 -spec discover_authorization_server(binary()) ->
     {ok, map()} | {error, term()}.
 discover_authorization_server(Issuer) ->
-    Base = trim_trailing_slash(Issuer),
-    Primary = <<Base/binary, "/.well-known/oauth-authorization-server">>,
-    Fallback = <<Base/binary, "/.well-known/openid-configuration">>,
-    case http_get_json(Primary) of
-        {ok, _} = Ok ->
-            validate_as(Ok);
-        {error, _} ->
-            case http_get_json(Fallback) of
-                {ok, _} = Ok2 -> validate_as(Ok2);
-                Err -> Err
+    discover_authorization_server(Issuer, #{}).
+
+%% @doc {@link discover_authorization_server/1} with options
+%% (`allow_insecure_oauth').
+%%
+%% A URL that cannot be fetched or does not hold a metadata document
+%% falls through to the next one. The first document found is final:
+%% its `issuer' must equal `Issuer', it must advertise `S256' PKCE, and
+%% its endpoints must be `https'. A document failing those is an
+%% error, not a reason to try the next URL: the specification says it
+%% must not be used, and a later URL cannot make it safe.
+-spec discover_authorization_server(binary(), map()) ->
+    {ok, map()} | {error, term()}.
+discover_authorization_server(Issuer, Opts) ->
+    case secure_url(Issuer, Opts) of
+        ok -> try_discovery_urls(discovery_urls(Issuer), Issuer, Opts, undefined);
+        {error, _} = Err -> Err
+    end.
+
+try_discovery_urls([], _Issuer, _Opts, LastErr) ->
+    {error, {as_metadata_not_found, LastErr}};
+try_discovery_urls([Url | Rest], Issuer, Opts, _LastErr) ->
+    case http_get_json(Url, Opts) of
+        {ok,
+            #{
+                <<"issuer">> := _,
+                <<"authorization_endpoint">> := _,
+                <<"token_endpoint">> := _
+            } = Doc} ->
+            validate_as(Doc, Issuer, Opts);
+        {ok, Other} ->
+            try_discovery_urls(Rest, Issuer, Opts, {invalid_as_metadata, Other});
+        {error, Reason} ->
+            try_discovery_urls(Rest, Issuer, Opts, Reason)
+    end.
+
+%% RFC 8414 3.1 path insertion first, then the OpenID variants; an
+%% issuer without a path has only the two root documents.
+discovery_urls(Issuer) ->
+    #{scheme := Scheme, host := Host} = Parsed = uri_string:parse(Issuer),
+    Port =
+        case maps:get(port, Parsed, undefined) of
+            undefined -> <<>>;
+            P -> <<":", (integer_to_binary(P))/binary>>
+        end,
+    Origin = <<Scheme/binary, "://", Host/binary, Port/binary>>,
+    case string:trim(maps:get(path, Parsed, <<>>), trailing, "/") of
+        <<>> ->
+            [
+                <<Origin/binary, "/.well-known/oauth-authorization-server">>,
+                <<Origin/binary, "/.well-known/openid-configuration">>
+            ];
+        Path ->
+            [
+                <<Origin/binary, "/.well-known/oauth-authorization-server", Path/binary>>,
+                <<Origin/binary, "/.well-known/openid-configuration", Path/binary>>,
+                <<Origin/binary, Path/binary, "/.well-known/openid-configuration">>
+            ]
+    end.
+
+validate_as(#{<<"issuer">> := Got} = Doc, Issuer, Opts) ->
+    case Got =:= Issuer of
+        false ->
+            {error, {issuer_mismatch, Got, Issuer}};
+        true ->
+            case pkce_supported(Doc) of
+                ok -> secure_urls(as_endpoints(Doc), Opts, Doc);
+                {error, _} = Err -> Err
             end
     end.
 
-validate_as(
-    {ok,
-        #{
-            <<"authorization_endpoint">> := _,
-            <<"token_endpoint">> := _
-        } = Doc}
-) ->
-    {ok, Doc};
-validate_as({ok, Other}) ->
-    {error, {invalid_as_metadata, Other}}.
+%% security-considerations, "Proof Key for Code Exchange": absent means
+%% no PKCE and the client must refuse.
+pkce_supported(Doc) ->
+    case maps:get(<<"code_challenge_methods_supported">>, Doc, undefined) of
+        undefined ->
+            {error, no_pkce};
+        Methods when is_list(Methods) ->
+            case lists:member(<<"S256">>, Methods) of
+                true -> ok;
+                false -> {error, {no_s256, Methods}}
+            end;
+        Other ->
+            {error, {no_s256, Other}}
+    end.
+
+as_endpoints(Doc) ->
+    [
+        Url
+     || Key <- [
+            <<"authorization_endpoint">>,
+            <<"token_endpoint">>,
+            <<"registration_endpoint">>
+        ],
+        Url <- [maps:get(Key, Doc, undefined)],
+        is_binary(Url)
+    ].
+
+secure_urls(Urls, Opts, Doc) ->
+    case secure_urls(Urls, Opts) of
+        ok -> {ok, Doc};
+        {error, _} = Err -> Err
+    end.
 
 %%====================================================================
 %% PKCE
@@ -473,7 +603,8 @@ exchange_code(TokenEndpoint, Params) ->
         TokenEndpoint,
         Body1,
         maps:get(client_secret, Params, undefined),
-        maps:get(client_id, Params, undefined)
+        maps:get(client_id, Params, undefined),
+        Params
     ).
 
 %% @doc Refresh an access token via the refresh_token grant.
@@ -494,7 +625,8 @@ refresh_token(TokenEndpoint, Params) ->
         TokenEndpoint,
         Body1,
         maps:get(client_secret, Params, undefined),
-        maps:get(client_id, Params, undefined)
+        maps:get(client_id, Params, undefined),
+        Params
     ).
 
 %% @doc Acquire an access token via the OAuth 2.1 client_credentials
@@ -619,6 +751,12 @@ register_client(RegistrationEndpoint, Metadata) ->
 register_client(RegistrationEndpoint, Metadata0, Opts) when
     is_map(Metadata0), is_map(Opts)
 ->
+    case secure_url(RegistrationEndpoint, Opts) of
+        ok -> do_register_client(RegistrationEndpoint, Metadata0, Opts);
+        {error, _} = Err -> Err
+    end.
+
+do_register_client(RegistrationEndpoint, Metadata0, Opts) ->
     Metadata = with_application_type(Metadata0),
     Base = [
         {<<"content-type">>, <<"application/json">>},
@@ -886,14 +1024,16 @@ do_refresh(#h{
     client_id = CI,
     client_secret = CS,
     resource = Res,
-    scopes = Scopes
+    scopes = Scopes,
+    insecure = Insecure
 }) ->
     Params = drop_undefined(#{
         refresh_token => RT,
         client_id => CI,
         client_secret => CS,
         resource => Res,
-        scopes => Scopes
+        scopes => Scopes,
+        allow_insecure_oauth => Insecure
     }),
     refresh_token(TE, Params).
 
@@ -906,7 +1046,8 @@ acquire_via_client_credentials(
         client_secret = CS,
         client_assertion = CA,
         resource = Res,
-        scopes = Scopes
+        scopes = Scopes,
+        insecure = Insecure
     } = H
 ) ->
     Params = drop_undefined(#{
@@ -914,7 +1055,8 @@ acquire_via_client_credentials(
         client_secret => CS,
         client_assertion => CA,
         resource => Res,
-        scopes => Scopes
+        scopes => Scopes,
+        allow_insecure_oauth => Insecure
     }),
     case client_credentials(TE, Params) of
         {ok, R} -> {ok, apply_token_response(H, R)};
@@ -937,7 +1079,8 @@ acquire_via_ema(
         subject_token_type = STT,
         audience = Aud,
         resource = Res,
-        scopes = Scopes
+        scopes = Scopes,
+        insecure = Insecure
     } = H
 ) ->
     Step1 = drop_undefined(#{
@@ -947,7 +1090,8 @@ acquire_via_ema(
         subject_token => ST,
         subject_token_type => STT,
         audience => Aud,
-        resource => Res
+        resource => Res,
+        allow_insecure_oauth => Insecure
     }),
     case token_exchange(IDP, Step1) of
         {ok, IdJag} ->
@@ -957,7 +1101,8 @@ acquire_via_ema(
                 client_assertion => CA,
                 assertion => IdJag,
                 resource => Res,
-                scopes => Scopes
+                scopes => Scopes,
+                allow_insecure_oauth => Insecure
             }),
             case jwt_bearer(AS, Step2) of
                 {ok, R} -> {ok, apply_token_response(H, R)};
@@ -992,7 +1137,45 @@ apply_token_response(H, _) ->
 %% HTTP helpers
 %%====================================================================
 
-http_get_json(Url) ->
+%% @doc The HTTPS policy every authorization-server URL passes through:
+%% configured, discovered, or the discovery URL itself. Only
+%% `allow_insecure_oauth => true' in `Opts' lifts it.
+-spec secure_url(binary(), map()) -> ok | {error, {insecure_url, binary()}}.
+secure_url(Url, Opts) when is_binary(Url) ->
+    case insecure_opt(Opts) of
+        true ->
+            ok;
+        false ->
+            case uri_string:parse(Url) of
+                #{scheme := <<"https">>} -> ok;
+                _ -> {error, {insecure_url, Url}}
+            end
+    end;
+secure_url(Url, _Opts) ->
+    {error, {insecure_url, Url}}.
+
+%% Only the literal `true' opts out; anything else is the default.
+insecure_opt(Map) ->
+    case maps:get(allow_insecure_oauth, Map, false) of
+        true -> true;
+        _ -> false
+    end.
+
+secure_urls([], _Opts) ->
+    ok;
+secure_urls([Url | Rest], Opts) ->
+    case secure_url(Url, Opts) of
+        ok -> secure_urls(Rest, Opts);
+        {error, _} = Err -> Err
+    end.
+
+http_get_json(Url, Opts) ->
+    case secure_url(Url, Opts) of
+        ok -> do_http_get_json(Url);
+        {error, _} = Err -> Err
+    end.
+
+do_http_get_json(Url) ->
     %% Discovery endpoints (RFC 9728 / RFC 8414) are typically served
     %% directly under the same origin as the resource. Following
     %% arbitrary cross-origin redirects from an untrusted server
@@ -1016,6 +1199,12 @@ http_get_json(Url) ->
             {error, {http_error, Status}};
         {error, _} = Err ->
             Err
+    end.
+
+http_post_form(Url, Form, ClientSecret, ClientId, Opts) ->
+    case secure_url(Url, Opts) of
+        ok -> http_post_form(Url, Form, ClientSecret, ClientId);
+        {error, _} = Err -> Err
     end.
 
 http_post_form(Url, Form, ClientSecret, ClientId) when
@@ -1089,12 +1278,6 @@ base64url(Bin) ->
         [global]
     ).
 
-trim_trailing_slash(B) ->
-    case binary:last(B) of
-        $/ -> binary:part(B, 0, byte_size(B) - 1);
-        _ -> B
-    end.
-
 %% The three grants that accept `private_key_jwt' instead of a secret.
 %% `exchange_code/2' and `refresh_token/2' are not among them: they pass
 %% their secret unconditionally, and routing them here would give them
@@ -1105,7 +1288,8 @@ post_token_request(Endpoint, Body0, Optional, Params) ->
         Endpoint,
         Body,
         client_secret(Params),
-        maps:get(client_id, Params, undefined)
+        maps:get(client_id, Params, undefined),
+        Params
     ).
 
 with_assertion(Body, Params) ->

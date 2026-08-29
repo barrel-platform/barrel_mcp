@@ -269,7 +269,9 @@ json_encode(M) -> iolist_to_binary(json:encode(M)).
 
 test_discover_prm() ->
     Url = <<?BASE/binary, "/.well-known/oauth-protected-resource">>,
-    {ok, Doc} = barrel_mcp_client_auth_oauth:discover_protected_resource(Url),
+    {ok, Doc} = barrel_mcp_client_auth_oauth:discover_protected_resource(Url, #{
+        allow_insecure_oauth => true
+    }),
     ?assertEqual(
         <<"http://127.0.0.1:19494/mcp">>,
         maps:get(<<"resource">>, Doc)
@@ -280,7 +282,9 @@ test_discover_prm() ->
     ).
 
 test_discover_as() ->
-    {ok, AS} = barrel_mcp_client_auth_oauth:discover_authorization_server(?BASE),
+    {ok, AS} = barrel_mcp_client_auth_oauth:discover_authorization_server(?BASE, #{
+        allow_insecure_oauth => true
+    }),
     ?assertEqual(
         <<?BASE/binary, "/oauth/token">>,
         maps:get(<<"token_endpoint">>, AS)
@@ -290,6 +294,7 @@ test_refresh_token() ->
     {ok, Resp} = barrel_mcp_client_auth_oauth:refresh_token(
         <<?BASE/binary, "/oauth/token">>,
         #{
+            allow_insecure_oauth => true,
             refresh_token => <<"old-refresh">>,
             client_id => <<"client-1">>,
             resource => <<"http://127.0.0.1:19494/mcp">>
@@ -302,6 +307,7 @@ test_behaviour_refresh() ->
     %% Build the handle that barrel_mcp_client_auth would produce.
     Auth = barrel_mcp_client_auth:new(
         {oauth, #{
+            allow_insecure_oauth => true,
             access_token => <<"old-access">>,
             refresh_token => <<"old-refresh">>,
             token_endpoint => <<?BASE/binary, "/oauth/token">>,
@@ -324,6 +330,7 @@ test_client_credentials() ->
     {ok, Resp} = barrel_mcp_client_auth_oauth:client_credentials(
         <<?BASE/binary, "/oauth/token">>,
         #{
+            allow_insecure_oauth => true,
             client_id => <<"client-1">>,
             client_secret => <<"top-secret">>,
             scopes => [<<"read">>, <<"write">>],
@@ -338,6 +345,7 @@ test_client_credentials_handle() ->
     %% barrel_mcp_client. init/1 must fetch the token eagerly.
     Auth = barrel_mcp_client_auth:new(
         {oauth_client_credentials, #{
+            allow_insecure_oauth => true,
             token_endpoint => <<?BASE/binary, "/oauth/token">>,
             client_id => <<"client-1">>,
             client_secret => <<"top-secret">>,
@@ -356,6 +364,7 @@ test_client_credentials_jwt() ->
     {ok, Resp} = barrel_mcp_client_auth_oauth:client_credentials(
         <<?BASE/binary, "/oauth/token">>,
         #{
+            allow_insecure_oauth => true,
             client_id => <<"client-1">>,
             client_assertion => <<"signed.jwt.token">>,
             resource => <<"http://127.0.0.1:19494/mcp">>
@@ -368,6 +377,7 @@ test_client_credentials_refresh() ->
     %% same grant — no refresh_token involved.
     Auth = barrel_mcp_client_auth:new(
         {oauth_client_credentials, #{
+            allow_insecure_oauth => true,
             token_endpoint => <<?BASE/binary, "/oauth/token">>,
             client_id => <<"client-1">>,
             client_secret => <<"top-secret">>
@@ -395,6 +405,7 @@ test_token_exchange() ->
     {ok, IdJag} = barrel_mcp_client_auth_oauth:token_exchange(
         <<?BASE/binary, "/idp/token">>,
         #{
+            allow_insecure_oauth => true,
             client_id => <<"client-1">>,
             client_secret => <<"top-secret">>,
             subject_token => <<"oidc-id-token">>,
@@ -412,6 +423,7 @@ test_jwt_bearer() ->
     {ok, Resp} = barrel_mcp_client_auth_oauth:jwt_bearer(
         <<?BASE/binary, "/oauth/token">>,
         #{
+            allow_insecure_oauth => true,
             client_id => <<"client-1">>,
             client_secret => <<"top-secret">>,
             assertion => <<"id-jag.signed.jwt">>,
@@ -426,6 +438,7 @@ test_enterprise_managed_handle() ->
     %% then jwt-bearer) and the Authorization header is ready.
     Auth = barrel_mcp_client_auth:new(
         {oauth_enterprise, #{
+            allow_insecure_oauth => true,
             idp_token_endpoint => <<?BASE/binary, "/idp/token">>,
             as_token_endpoint => <<?BASE/binary, "/oauth/token">>,
             client_id => <<"client-1">>,
@@ -447,6 +460,7 @@ test_enterprise_managed_refresh() ->
     %% A 401 in enterprise_managed mode re-walks the chain.
     Auth = barrel_mcp_client_auth:new(
         {oauth_enterprise, #{
+            allow_insecure_oauth => true,
             idp_token_endpoint => <<?BASE/binary, "/idp/token">>,
             as_token_endpoint => <<?BASE/binary, "/oauth/token">>,
             client_id => <<"client-1">>,
@@ -472,6 +486,7 @@ test_enterprise_managed_subject_token_expired() ->
     %% Token from the IdP.
     Result = barrel_mcp_client_auth:new(
         {oauth_enterprise, #{
+            allow_insecure_oauth => true,
             idp_token_endpoint => <<?BASE/binary, "/idp/token">>,
             as_token_endpoint => <<?BASE/binary, "/oauth/token">>,
             client_id => <<"client-1">>,
@@ -500,7 +515,8 @@ test_register_client_public() ->
             <<"grant_types">> => [<<"authorization_code">>],
             <<"response_types">> => [<<"code">>],
             <<"token_endpoint_auth_method">> => <<"none">>
-        }
+        },
+        #{allow_insecure_oauth => true}
     ),
     ?assertEqual(<<"new-client-id">>, maps:get(<<"client_id">>, Resp)),
     ?assertNot(maps:is_key(<<"client_secret">>, Resp)).
@@ -513,7 +529,8 @@ test_register_client_confidential() ->
         #{
             <<"client_name">> => <<"confidential">>,
             <<"grant_types">> => [<<"client_credentials">>]
-        }
+        },
+        #{allow_insecure_oauth => true}
     ),
     ?assertEqual(<<"new-client-id">>, maps:get(<<"client_id">>, Resp)),
     ?assertEqual(<<"new-secret">>, maps:get(<<"client_secret">>, Resp)).
@@ -523,7 +540,8 @@ test_register_client_error() ->
     %% status + body so it can react.
     Result = barrel_mcp_client_auth_oauth:register_client(
         <<?BASE/binary, "/oauth/register">>,
-        #{<<"client_name">> => <<"bad">>}
+        #{<<"client_name">> => <<"bad">>},
+        #{allow_insecure_oauth => true}
     ),
     ?assertMatch({error, {http_error, 400, _}}, Result).
 
@@ -534,7 +552,7 @@ test_register_client_protected() ->
     {ok, Resp} = barrel_mcp_client_auth_oauth:register_client(
         <<?BASE/binary, "/oauth/register">>,
         #{<<"client_name">> => <<"protected">>},
-        #{initial_access_token => <<"init-tok">>}
+        #{initial_access_token => <<"init-tok">>, allow_insecure_oauth => true}
     ),
     ?assertEqual(
         <<"protected-client-id">>,
@@ -546,7 +564,8 @@ test_register_client_protected_unauth() ->
     %% with 401, surfaced as {error, {http_error, 401, _}}.
     Result = barrel_mcp_client_auth_oauth:register_client(
         <<?BASE/binary, "/oauth/register">>,
-        #{<<"client_name">> => <<"protected">>}
+        #{<<"client_name">> => <<"protected">>},
+        #{allow_insecure_oauth => true}
     ),
     ?assertMatch({error, {http_error, 401, _}}, Result).
 
@@ -938,4 +957,187 @@ binding_accepts_binary_keys_test() ->
             #{<<"client_id">> => <<"cid-1">>, <<"issuer">> => <<"https://idp.example">>},
             <<"https://idp.example">>
         )
+    ).
+
+%%====================================================================
+%% Authorization server discovery (2026-07-28 rules)
+%%====================================================================
+
+-define(DPORT, 19495).
+-define(DBASE, <<"http://127.0.0.1:19495">>).
+-define(DTAB, oauth_discovery_mock).
+
+discovery_test_() ->
+    {setup, fun setup_discovery_mock/0, fun cleanup_discovery_mock/1,
+        {timeout, 30, [
+            {"path issuer tries the three well-known URLs in order",
+                fun test_disc_path_issuer_order/0},
+            {"root issuer tries the two root documents", fun test_disc_root_issuer_order/0},
+            {"a 500 falls through to the next URL", fun test_disc_fallthrough_on_500/0},
+            {"a 200 with malformed JSON falls through", fun test_disc_fallthrough_on_bad_json/0},
+            {"an issuer mismatch is terminal", fun test_disc_issuer_mismatch/0},
+            {"missing code_challenge_methods_supported is refused", fun test_disc_no_pkce/0},
+            {"methods without S256 are refused", fun test_disc_no_s256/0},
+            {"a plaintext issuer is refused before any fetch", fun test_disc_insecure_issuer/0},
+            {"a plaintext configured token_endpoint is refused by init",
+                fun test_insecure_token_endpoint/0},
+            {"secure_url accepts https and only https", fun test_secure_url/0}
+        ]}}.
+
+setup_discovery_mock() ->
+    {ok, _} = application:ensure_all_started(hackney),
+    _ = ets:new(?DTAB, [named_table, public, set]),
+    {ok, _} = barrel_mcp_test_http:start(discovery_mock, ?DPORT, fun handle_discovery/1),
+    ok.
+
+cleanup_discovery_mock(_) ->
+    try
+        barrel_mcp_test_http:stop(discovery_mock)
+    catch
+        _:_ -> ok
+    end,
+    _ =
+        try
+            ets:delete(?DTAB)
+        catch
+            _:_ -> ok
+        end,
+    ok.
+
+%% The mock answers from a script the test installs, `#{Path =>
+%% Response}', and logs every path it is asked for.
+handle_discovery(#{path := Path}) ->
+    true = ets:insert(?DTAB, {{log, erlang:unique_integer([monotonic])}, Path}),
+    [{script, Script}] = ets:lookup(?DTAB, script),
+    case maps:get(Path, Script, undefined) of
+        undefined -> {404, json_ct(), <<"{}">>};
+        {Status, Body} when is_binary(Body) -> {Status, json_ct(), Body};
+        Doc when is_map(Doc) -> {200, json_ct(), json_encode(Doc)}
+    end.
+
+script(Script) ->
+    ets:match_delete(?DTAB, {{log, '_'}, '_'}),
+    true = ets:insert(?DTAB, {script, Script}).
+
+requested() ->
+    [P || {_, P} <- lists:sort(ets:match_object(?DTAB, {{log, '_'}, '_'}))].
+
+good_as(Issuer) ->
+    #{
+        <<"issuer">> => Issuer,
+        <<"authorization_endpoint">> => <<Issuer/binary, "/authorize">>,
+        <<"token_endpoint">> => <<Issuer/binary, "/token">>,
+        <<"code_challenge_methods_supported">> => [<<"S256">>]
+    }.
+
+insecure() -> #{allow_insecure_oauth => true}.
+
+test_disc_path_issuer_order() ->
+    Issuer = <<?DBASE/binary, "/tenant1">>,
+    script(#{<<"/tenant1/.well-known/openid-configuration">> => good_as(Issuer)}),
+    {ok, Doc} = barrel_mcp_client_auth_oauth:discover_authorization_server(Issuer, insecure()),
+    ?assertEqual(<<Issuer/binary, "/token">>, maps:get(<<"token_endpoint">>, Doc)),
+    ?assertEqual(
+        [
+            <<"/.well-known/oauth-authorization-server/tenant1">>,
+            <<"/.well-known/openid-configuration/tenant1">>,
+            <<"/tenant1/.well-known/openid-configuration">>
+        ],
+        requested()
+    ).
+
+test_disc_root_issuer_order() ->
+    script(#{<<"/.well-known/openid-configuration">> => good_as(?DBASE)}),
+    {ok, _} = barrel_mcp_client_auth_oauth:discover_authorization_server(?DBASE, insecure()),
+    ?assertEqual(
+        [
+            <<"/.well-known/oauth-authorization-server">>,
+            <<"/.well-known/openid-configuration">>
+        ],
+        requested()
+    ).
+
+test_disc_fallthrough_on_500() ->
+    script(#{
+        <<"/.well-known/oauth-authorization-server">> => {500, <<"boom">>},
+        <<"/.well-known/openid-configuration">> => good_as(?DBASE)
+    }),
+    ?assertMatch(
+        {ok, _},
+        barrel_mcp_client_auth_oauth:discover_authorization_server(?DBASE, insecure())
+    ).
+
+test_disc_fallthrough_on_bad_json() ->
+    script(#{
+        <<"/.well-known/oauth-authorization-server">> => {200, <<"{not json">>},
+        <<"/.well-known/openid-configuration">> => good_as(?DBASE)
+    }),
+    ?assertMatch(
+        {ok, _},
+        barrel_mcp_client_auth_oauth:discover_authorization_server(?DBASE, insecure())
+    ).
+
+test_disc_issuer_mismatch() ->
+    script(#{
+        <<"/.well-known/oauth-authorization-server">> => good_as(<<"https://honest.example">>),
+        <<"/.well-known/openid-configuration">> => good_as(?DBASE)
+    }),
+    ?assertEqual(
+        {error, {issuer_mismatch, <<"https://honest.example">>, ?DBASE}},
+        barrel_mcp_client_auth_oauth:discover_authorization_server(?DBASE, insecure())
+    ),
+    ?assertEqual([<<"/.well-known/oauth-authorization-server">>], requested()).
+
+test_disc_no_pkce() ->
+    Doc = maps:remove(<<"code_challenge_methods_supported">>, good_as(?DBASE)),
+    script(#{<<"/.well-known/oauth-authorization-server">> => Doc}),
+    ?assertEqual(
+        {error, no_pkce},
+        barrel_mcp_client_auth_oauth:discover_authorization_server(?DBASE, insecure())
+    ).
+
+test_disc_no_s256() ->
+    Doc = (good_as(?DBASE))#{<<"code_challenge_methods_supported">> => [<<"plain">>]},
+    script(#{<<"/.well-known/oauth-authorization-server">> => Doc}),
+    ?assertEqual(
+        {error, {no_s256, [<<"plain">>]}},
+        barrel_mcp_client_auth_oauth:discover_authorization_server(?DBASE, insecure())
+    ).
+
+test_disc_insecure_issuer() ->
+    script(#{<<"/.well-known/oauth-authorization-server">> => good_as(?DBASE)}),
+    ?assertEqual(
+        {error, {insecure_url, ?DBASE}},
+        barrel_mcp_client_auth_oauth:discover_authorization_server(?DBASE)
+    ),
+    ?assertEqual([], requested()).
+
+test_insecure_token_endpoint() ->
+    Cfg = #{
+        access_token => <<"tok">>,
+        refresh_token => <<"r">>,
+        client_id => <<"c">>,
+        token_endpoint => <<?DBASE/binary, "/token">>
+    },
+    ?assertEqual(
+        {error, {insecure_url, <<?DBASE/binary, "/token">>}},
+        barrel_mcp_client_auth:new({oauth, Cfg})
+    ),
+    ?assertNotMatch(
+        {error, _}, barrel_mcp_client_auth:new({oauth, Cfg#{allow_insecure_oauth => true}})
+    ).
+
+test_secure_url() ->
+    ?assertEqual(ok, barrel_mcp_client_auth_oauth:secure_url(<<"https://as.example/x">>, #{})),
+    ?assertEqual(
+        {error, {insecure_url, <<"http://as.example/x">>}},
+        barrel_mcp_client_auth_oauth:secure_url(<<"http://as.example/x">>, #{})
+    ),
+    ?assertEqual(
+        {error, {insecure_url, <<"http://localhost/x">>}},
+        barrel_mcp_client_auth_oauth:secure_url(<<"http://localhost/x">>, #{})
+    ),
+    ?assertEqual(ok, barrel_mcp_client_auth_oauth:secure_url(<<"http://localhost/x">>, insecure())),
+    ?assertEqual(
+        {error, {insecure_url, undefined}}, barrel_mcp_client_auth_oauth:secure_url(undefined, #{})
     ).

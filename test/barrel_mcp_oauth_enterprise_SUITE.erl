@@ -126,6 +126,7 @@ ema_chain_unlocks_protected_server(_Config) ->
         transport => {http, McpUrl},
         auth =>
             {oauth_enterprise, #{
+                allow_insecure_oauth => true,
                 idp_token_endpoint => <<AsBase/binary, "/idp/token">>,
                 as_token_endpoint => <<AsBase/binary, "/as/token">>,
                 client_id => <<"client-1">>,
@@ -174,6 +175,7 @@ expired_subject_token_blocks_init(_Config) ->
         transport => {http, McpUrl},
         auth =>
             {oauth_enterprise, #{
+                allow_insecure_oauth => true,
                 idp_token_endpoint => <<AsBase/binary, "/idp/token">>,
                 as_token_endpoint => <<AsBase/binary, "/as/token">>,
                 client_id => <<"client-1">>,

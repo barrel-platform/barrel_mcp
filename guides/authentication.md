@@ -702,6 +702,25 @@ response.
 | Enterprise SSO; user identity must flow to MCP | `enterprise_managed` (`{oauth_enterprise, ...}`) |
 | No `client_id` yet | [Client registration](#client-registration) first, then one of the above |
 
+## Plaintext authorization servers
+
+Every authorization-server URL the client uses, configured or
+discovered, must be `https`. The client refuses anything else with
+`{error, {insecure_url, Url}}` before any request is sent. That is
+the specification's rule, and there is no exception for `localhost`.
+
+For a test against a plaintext mock, pass `allow_insecure_oauth =>
+true` in the `{oauth, ...}` config or in the options map of the
+discovery and grant helpers:
+
+```erlang
+{ok, Doc} = barrel_mcp_client_auth_oauth:discover_authorization_server(
+    <<"http://127.0.0.1:8080">>, #{allow_insecure_oauth => true}
+).
+```
+
+The flag is noncompliant. Never set it outside a test.
+
 ## OAuth Protected Resource Metadata (RFC 9728)
 
 For OAuth-protected deployments, MCP clients auto-discover the

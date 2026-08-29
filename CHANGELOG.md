@@ -7,8 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- Every OAuth authorization-server URL the client uses, configured or
+  discovered, must be `https`; anything else is refused with
+  `{error, {insecure_url, Url}}` before a request is sent. The
+  `allow_insecure_oauth => true` option on the `{oauth, ...}` configs
+  and on the discovery and grant helpers lifts the check for a
+  plaintext test server. It is noncompliant and documented as such.
+
 ### Changed
 
+- `barrel_mcp_client_auth_oauth:discover_authorization_server/1,2`
+  follows the 2026-07-28 discovery rules: path-aware well-known URLs
+  in the specification's order, fall-through on a URL that yields no
+  metadata document, and a terminal error on the first document found
+  when its `issuer` differs from the issuer queried, when it does not
+  advertise `S256` PKCE, or when an endpoint is not `https`.
+- `barrel_mcp_clients` is no longer a process. The client supervisor's
+  child list is the registry, so a crashed client keeps its
+  `ServerId` across the restart. While a restart is still failing,
+  `whereis_client/1` answers `undefined`, `start_client/2` answers
+  `{error, {restarting, Id}}` and `stop_client/1` clears it.
 - A legacy (2024-11-05 through 2025-11-25) `tools/call` over Streamable
   HTTP is answered as an SSE stream whenever the client's `Accept`
   lists `text/event-stream`, which the transport already requires it
