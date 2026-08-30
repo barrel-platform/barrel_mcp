@@ -18,7 +18,11 @@ handshake era, v2 speaks `2026-07-28` and replaced `FastMCP` with
   The handshake-era script also sets the log level and drives
   sampling, elicitation and roots; it runs a second time with
   `--post-only`, never opening the GET stream, so those three server
-  requests must arrive on the call's own response stream. The modern
+  requests must arrive on the call's own response stream. Both scripts
+  also run once more with `--http2 --cacert FILE` against a TLS
+  listener (chain minted by the CT suite), negotiating HTTP/2 by ALPN;
+  the script fails if any response arrived over HTTP/1.1, so the case
+  proves the Streamable transport over h2, standalone stream included. The modern
   one additionally covers:
   - the `server/discover` probe and the `_meta` serverInfo stamp
   - `resultType` on every result and the freshness hints on a
@@ -43,6 +47,8 @@ handshake era, v2 speaks `2026-07-28` and replaced `FastMCP` with
 
 The corresponding CT cases skip when their interpreter is not
 configured, so the default `rebar3 ct` keeps working without Python.
+Each client script dumps every task's stack and exits if it is still
+running after 40 s, so a hang reaches the CT log as a traceback.
 
 ## Conformance runner
 

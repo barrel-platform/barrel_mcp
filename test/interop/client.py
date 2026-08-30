@@ -13,8 +13,12 @@ so every server request has to arrive on a POST's own response stream.
 from __future__ import annotations
 
 import asyncio
+import faulthandler
+import ssl
 import sys
 import traceback
+
+import httpx
 
 from mcp import ClientSession
 from mcp.client.streamable_http import (
@@ -78,7 +82,48 @@ async def no_get_stream(self, _client, _writer) -> None:
     return None
 
 
+#: Set by main(): {"http2": bool, "cacert": str | None}.
+HTTP: dict = {"http2": False, "cacert": None}
+#: Every HTTP version a response arrived over, for the --http2 check.
+SEEN_VERSIONS: set[str] = set()
+
+
+async def note_version(response: httpx.Response) -> None:
+    SEEN_VERSIONS.add(response.http_version)
+
+
+def http_client_factory(headers=None, timeout=None, auth=None) -> httpx.AsyncClient:
+    """An httpx client with the SDK's defaults, TLS verification against
+    the test CA, and HTTP/2 negotiated by ALPN when asked for."""
+    verify: ssl.SSLContext | bool = True
+    if HTTP["cacert"]:
+        verify = ssl.create_default_context(cafile=HTTP["cacert"])
+        verify.check_hostname = False
+        # Python 3.13 verifies strictly by default and then wants an
+        # Authority Key Identifier the minted test chain does not carry.
+        verify.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    return httpx.AsyncClient(
+        headers=headers,
+        timeout=timeout if timeout is not None else httpx.Timeout(30.0, read=300.0),
+        auth=auth,
+        follow_redirects=True,
+        http2=HTTP["http2"],
+        verify=verify,
+        event_hooks={"response": [note_version]},
+    )
+
+
+async def dump_tasks_later(seconds: float) -> None:
+    """faulthandler sees only the event loop; this shows each coroutine."""
+    await asyncio.sleep(seconds)
+    for task in asyncio.all_tasks():
+        task.print_stack(file=sys.stderr)
+    sys.stderr.flush()
+    fail(f"still running after {seconds}s")
+
+
 async def run(url: str, post_only: bool) -> None:
+    asyncio.get_running_loop().create_task(dump_tasks_later(40))
     if post_only:
         StreamableHTTPTransport.handle_get_stream = no_get_stream
     update_event = asyncio.Event()
@@ -110,7 +155,9 @@ async def run(url: str, post_only: bool) -> None:
             ):
                 task_status_seen.append(inner.params.status)
 
-    async with streamable_http_client(url) as (read, write, _):
+    async with http_client_factory() as http, streamable_http_client(
+        url, http_client=http
+    ) as (read, write, _):
         async with ClientSession(
             read, write,
             message_handler=on_message,
@@ -449,15 +496,26 @@ async def run(url: str, post_only: bool) -> None:
 
 
 def main() -> None:
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    flags = set(sys.argv[1:]) - set(args)
-    if len(args) != 1 or flags - {"--post-only"}:
-        fail("usage: client.py <server-url> [--post-only]")
+    # A silent hang is the worst failure to debug from CT: dump every
+    # task's stack and exit before the suite's own timeout hits.
+    faulthandler.dump_traceback_later(45, exit=True)
+    argv = sys.argv[1:]
+    if "--cacert" in argv:
+        i = argv.index("--cacert")
+        HTTP["cacert"] = argv[i + 1]
+        del argv[i : i + 2]
+    args = [a for a in argv if not a.startswith("--")]
+    flags = set(argv) - set(args)
+    if len(args) != 1 or flags - {"--post-only", "--http2"}:
+        fail("usage: client.py <server-url> [--post-only] [--http2] [--cacert FILE]")
+    HTTP["http2"] = "--http2" in flags
     try:
         asyncio.run(run(args[0], "--post-only" in flags))
     except Exception:
         traceback.print_exc()
         fail("unhandled exception")
+    if HTTP["http2"] and SEEN_VERSIONS != {"HTTP/2"}:
+        fail(f"expected every response over HTTP/2, saw {sorted(SEEN_VERSIONS)}")
 
 
 if __name__ == "__main__":
