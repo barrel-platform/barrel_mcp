@@ -216,7 +216,9 @@ case_port(Base, _TC, [], N) -> Base + N.
 %% `Dir' because the listener takes file paths. Returns the `ssl' map
 %% the listener wants plus the CA certs a client can verify against.
 -spec tls_files(file:filename()) ->
-    #{certfile := string(), keyfile := string(), cacerts := [binary()]}.
+    #{
+        certfile := string(), keyfile := string(), cacertfile := string(), cacerts := [binary()]
+    }.
 tls_files(Dir) ->
     _ = application:ensure_all_started(ssl),
     %% The default chain is refused by a TLS 1.3 client
@@ -238,4 +240,8 @@ tls_files(Dir) ->
         CertFile, public_key:pem_encode([{'Certificate', CertDer, not_encrypted}])
     ),
     ok = file:write_file(KeyFile, public_key:pem_encode([{KeyType, KeyDer, not_encrypted}])),
-    #{certfile => CertFile, keyfile => KeyFile, cacerts => CaCerts}.
+    CaFile = filename:join(Dir, "ca-" ++ Tag ++ ".pem"),
+    ok = file:write_file(
+        CaFile, public_key:pem_encode([{'Certificate', Ca, not_encrypted} || Ca <- CaCerts])
+    ),
+    #{certfile => CertFile, keyfile => KeyFile, cacertfile => CaFile, cacerts => CaCerts}.

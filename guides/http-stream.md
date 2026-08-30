@@ -86,6 +86,7 @@ barrel_mcp:start_http_stream(#{
 | `max_connections` | `pos_integer()` | `16384` | Established connections per listener; past it a new socket is accepted and closed. Connections live until the peer closes them (no idle timeout, so a standalone stream is never reaped), which is what this bounds. |
 | `max_requests` | `pos_integer() \| infinity` | `10000` | Requests in flight per listener, streams included; past it a request is answered `503` with `retry-after: 1` before its body is read. `barrel_mcp_http_listener:in_flight/1` reports the count. |
 | `max_body_bytes` | `pos_integer()` | 16 MiB | Request body cap, answered `413`. |
+| `body_timeout_ms` | `pos_integer()` | `60000` | How long a request may take to deliver the body its headers promised, answered `408`. |
 | `resource_metadata` | `map()` | `undefined` | The RFC 9728 document to serve at `/.well-known/oauth-protected-resource` (see the Authentication guide). |
 | `sse_path`, `sse_message_path` | `binary()` | unset | Serve the 2024-11-05 HTTP+SSE pair on the same listener (see Protocol Versions). |
 

@@ -33,7 +33,7 @@
 -define(DEFAULT_MAX_BODY_BYTES, 16 * 1024 * 1024).
 %% Requests in flight per listener; livery's figure.
 -define(DEFAULT_MAX_REQUESTS, 10000).
--define(BODY_TIMEOUT, 60000).
+-define(DEFAULT_BODY_TIMEOUT, 60000).
 -define(HANDSHAKE_TIMEOUT, 30000).
 %% Brief backoff after a non-`closed' accept error so a persistent
 %% system error (e.g. file-descriptor exhaustion, `emfile') throttles
@@ -59,7 +59,7 @@
 %% restarts them on a crash and stops them with the application.
 %%
 %% `ListenOpts': `#{port, ip, ssl, acceptors, max_connections,
-%% max_requests, max_body_bytes}'.
+%% max_requests, max_body_bytes, body_timeout_ms}'.
 %% `ssl' is `undefined' (cleartext) or
 %% `#{certfile, keyfile, cacertfile => _}'.
 %% `EngineConfig' is passed verbatim to {@link barrel_mcp_http_engine:handle/6}.
@@ -119,6 +119,9 @@ listener_init(Parent, Name, ListenOpts, EngineConfig) ->
                         max_requests => maps:get(max_requests, ListenOpts, ?DEFAULT_MAX_REQUESTS),
                         max_body_bytes => maps:get(
                             max_body_bytes, ListenOpts, ?DEFAULT_MAX_BODY_BYTES
+                        ),
+                        body_timeout_ms => maps:get(
+                            body_timeout_ms, ListenOpts, ?DEFAULT_BODY_TIMEOUT
                         ),
                         requests => Requests
                     },
@@ -442,7 +445,7 @@ admit(Proto, Conn, StreamId, Method, Path, Headers, EngineConfig, Limits) ->
     end.
 
 serve_request(Proto, Conn, StreamId, Method, Path, Headers, EngineConfig, Limits) ->
-    case read_request_body(Proto, Conn, StreamId, Method, maps:get(max_body_bytes, Limits)) of
+    case read_request_body(Proto, Conn, StreamId, Method, Limits) of
         {ok, Body} ->
             Responder = responder(Proto, Conn, StreamId),
             {Engine, MRef} = spawn_engine(
@@ -539,14 +542,16 @@ answer(Proto, Conn, StreamId, Status, Headers, Body) ->
         end),
     ok.
 
-read_request_body(Proto, Conn, StreamId, Method, Max) when
+read_request_body(Proto, Conn, StreamId, Method, Limits) when
     Method =:= <<"POST">>; Method =:= <<"PUT">>
 ->
-    read_body(Proto, Conn, StreamId, Max, <<>>);
-read_request_body(_Proto, _Conn, _StreamId, _Method, _Max) ->
+    read_body(Proto, Conn, StreamId, Limits, <<>>);
+read_request_body(_Proto, _Conn, _StreamId, _Method, _Limits) ->
     {ok, <<>>}.
 
-read_body(Proto, Conn, StreamId, Max, Acc) ->
+read_body(
+    Proto, Conn, StreamId, #{max_body_bytes := Max, body_timeout_ms := Timeout} = Limits, Acc
+) ->
     receive
         Msg ->
             case body_message(Proto, Conn, StreamId, Msg) of
@@ -555,16 +560,16 @@ read_body(Proto, Conn, StreamId, Max, Acc) ->
                     case {byte_size(Combined) > Max, End} of
                         {true, _} -> {error, body_too_large};
                         {false, true} -> {ok, Combined};
-                        {false, false} -> read_body(Proto, Conn, StreamId, Max, Combined)
+                        {false, false} -> read_body(Proto, Conn, StreamId, Limits, Combined)
                     end;
                 eof ->
                     {ok, Acc};
                 closed ->
                     {error, closed};
                 other ->
-                    read_body(Proto, Conn, StreamId, Max, Acc)
+                    read_body(Proto, Conn, StreamId, Limits, Acc)
             end
-    after ?BODY_TIMEOUT ->
+    after Timeout ->
         {error, timeout}
     end.
 
@@ -582,14 +587,20 @@ responder(Proto, Conn, StreamId) ->
     #{
         reply => fun(Status, Headers, Body) ->
             Bin = iolist_to_binary(Body),
-            Hdrs = ensure_content_length(Headers, byte_size(Bin)),
+            Hdrs = ensure_content_length(wire_headers(Proto, Headers), byte_size(Bin)),
             _ = Proto:send_response(Conn, StreamId, Status, Hdrs),
             _ = Proto:send_data(Conn, StreamId, Bin, true),
             ok
         end,
         stream_start => fun(Status, Headers) ->
-            _ = Proto:send_response(Conn, StreamId, Status, Headers),
-            ok
+            case Proto:send_response(Conn, StreamId, Status, wire_headers(Proto, Headers)) of
+                ok ->
+                    ok;
+                {error, Reason} ->
+                    %% Nothing the engine writes afterwards can reach
+                    %% the peer; a stream loop would spin on it.
+                    exit({shutdown, {stream_start, Reason}})
+            end
         end,
         stream_chunk => fun(Data) ->
             Proto:send_data(Conn, StreamId, iolist_to_binary(Data), false)
@@ -599,6 +610,23 @@ responder(Proto, Conn, StreamId) ->
             ok
         end
     }.
+
+%% HTTP/2 forbids connection-specific headers (RFC 9113 section 8.2.2)
+%% and h2 refuses the whole response over one.
+wire_headers(h1, Headers) ->
+    Headers;
+wire_headers(h2, Headers) ->
+    [
+        {K, V}
+     || {K, V} <- Headers,
+        not lists:member(string:lowercase(K), [
+            <<"connection">>,
+            <<"keep-alive">>,
+            <<"proxy-connection">>,
+            <<"transfer-encoding">>,
+            <<"upgrade">>
+        ])
+    ].
 
 %% Add an explicit content-length for fixed responses so h1 does not
 %% fall back to chunked framing (and 204/202 bodies stay empty).

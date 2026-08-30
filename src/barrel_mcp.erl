@@ -545,6 +545,7 @@ completion_key(Kind, Outer, Arg) ->
         max_connections => pos_integer(),
         max_requests => pos_integer() | infinity,
         max_body_bytes => pos_integer(),
+        body_timeout_ms => pos_integer(),
         _ => _
     }.
 start_http(Opts) ->
@@ -584,6 +585,7 @@ stop_http() ->
 %%   <dt>max_connections</dt><dd>Established connections per listener (default: 16384)</dd>
 %%   <dt>max_requests</dt><dd>Requests in flight per listener, 503 past it (default: 10000)</dd>
 %%   <dt>max_body_bytes</dt><dd>Request body cap, 413 past it (default: 16 MiB)</dd>
+%%   <dt>body_timeout_ms</dt><dd>Time allowed for a request body to arrive, 408 past it (default: 60000)</dd>
 %% </dl>
 %%
 %% == Example ==
@@ -635,6 +637,7 @@ stop_http() ->
         max_connections => pos_integer(),
         max_requests => pos_integer() | infinity,
         max_body_bytes => pos_integer(),
+        body_timeout_ms => pos_integer(),
         _ => _
     }.
 start_http_stream(Opts) ->

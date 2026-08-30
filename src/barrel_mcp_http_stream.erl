@@ -133,7 +133,7 @@ start_listener(Opts, Loopback, AllowedOrigins, AuthConfig0, SessionEnabled) ->
     EngineConfig = maps:merge(EngineConfig0, legacy_sse_routes(Opts)),
     ListenOpts = maps:merge(
         #{port => Port, ip => Ip, ssl => normalize_ssl(Opts)},
-        maps:with([max_connections, acceptors, max_requests, max_body_bytes], Opts)
+        maps:with([max_connections, acceptors, max_requests, max_body_bytes, body_timeout_ms], Opts)
     ),
     barrel_mcp_listener_sup:start_listener(?STREAM_LISTENER, ListenOpts, EngineConfig).
 

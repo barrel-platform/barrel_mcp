@@ -36,7 +36,13 @@
     max_requests_answers_503/1,
     max_connections_refuses_the_next_socket/1,
     tls_serves_http1_and_http2/1,
-    http2_disconnect_cancels_the_request/1
+    http2_disconnect_cancels_the_request/1,
+    http2_get_stream_receives_events/1,
+    body_timeout_is_408/1,
+    plain_tcp_on_a_tls_port_is_closed/1,
+    port_in_use_is_reported/1,
+    name_in_use_is_refused/1,
+    http2_reset_during_body_releases_the_slot/1
 ]).
 -export([slow_tool/1]).
 
@@ -55,7 +61,13 @@ all() ->
         max_requests_answers_503,
         max_connections_refuses_the_next_socket,
         tls_serves_http1_and_http2,
-        http2_disconnect_cancels_the_request
+        http2_disconnect_cancels_the_request,
+        http2_get_stream_receives_events,
+        body_timeout_is_408,
+        plain_tcp_on_a_tls_port_is_closed,
+        port_in_use_is_reported,
+        name_in_use_is_refused,
+        http2_reset_during_body_releases_the_slot
     ].
 
 %% Where the slow tool reports its lifecycle.
@@ -308,6 +320,115 @@ http2_disconnect_cancels_the_request(Config) ->
     end,
     ok.
 
+%% The standalone stream over HTTP/2: its headers used to be refused
+%% by h2 for carrying `connection: keep-alive', and the engine looped
+%% on a stream the client never saw.
+http2_get_stream_receives_events(Config) ->
+    Port = ?config(port, Config),
+    Dir = ?config(priv_dir, Config),
+    #{cacerts := CaCerts} = Tls = barrel_mcp_test_helpers:tls_files(Dir),
+    {ok, _} = barrel_mcp:start_http_stream(#{port => Port, ssl => maps:without([cacerts], Tls)}),
+    {ok, Conn} = h2_connect(Port, CaCerts),
+    {ok, S1} = h2:request(Conn, <<"POST">>, <<"/mcp">>, h2_headers(Port), init_body()),
+    Sid =
+        receive
+            {h2, Conn, {response, S1, 200, RH}} -> proplists:get_value(<<"mcp-session-id">>, RH)
+        after 5000 -> ct:fail(no_initialize_response)
+        end,
+    true = is_binary(Sid),
+    _ = h2_body(Conn, S1, <<>>),
+    {ok, G} = h2:request(Conn, <<"GET">>, <<"/mcp">>, [
+        {<<"host">>, <<"127.0.0.1">>},
+        {<<"accept">>, <<"text/event-stream">>},
+        {<<"mcp-session-id">>, Sid}
+    ]),
+    receive
+        {h2, Conn, {response, G, 200, GH}} ->
+            ?assertEqual(<<"text/event-stream">>, proplists:get_value(<<"content-type">>, GH))
+    after 5000 -> ct:fail(get_stream_not_opened)
+    end,
+    %% A registration broadcasts list_changed to every open stream.
+    ok = barrel_mcp:reg_tool(<<"late">>, ?MODULE, slow_tool, #{}),
+    receive
+        {h2, Conn, {data, G, Event, _}} ->
+            ?assertNotEqual(nomatch, binary:match(Event, <<"notifications/tools/list_changed">>))
+    after 5000 -> ct:fail(no_event_on_get_stream)
+    end,
+    ok = h2:close(Conn),
+    ok.
+
+%% Headers promise a body that never comes.
+body_timeout_is_408(Config) ->
+    Port = ?config(port, Config),
+    {ok, _} = barrel_mcp:start_http_stream(#{port => Port, body_timeout_ms => 200}),
+    {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, Port, [binary, {active, false}], 5000),
+    ok = gen_tcp:send(Sock, [
+        <<"POST /mcp HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: application/json\r\n">>,
+        <<"accept: application/json\r\ncontent-length: 10\r\n\r\n">>
+    ]),
+    {ok, Reply} = gen_tcp:recv(Sock, 0, 5000),
+    gen_tcp:close(Sock),
+    ?assertMatch(<<"HTTP/1.1 408", _/binary>>, Reply),
+    ok.
+
+%% A failed handshake closes the socket and costs nothing else.
+plain_tcp_on_a_tls_port_is_closed(Config) ->
+    Port = ?config(port, Config),
+    Dir = ?config(priv_dir, Config),
+    Tls = barrel_mcp_test_helpers:tls_files(Dir),
+    {ok, _} = barrel_mcp:start_http_stream(#{
+        port => Port, ssl => maps:with([certfile, keyfile], Tls)
+    }),
+    {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, Port, [binary, {active, false}], 5000),
+    ok = gen_tcp:send(Sock, raw_post(Port, discover_body(1), [])),
+    %% A TLS alert may precede the close; the socket must end closed.
+    ?assertEqual({error, closed}, recv_to_close(Sock)),
+    gen_tcp:close(Sock),
+    ?assert(serves(Port, Tls)),
+    ok.
+
+port_in_use_is_reported(Config) ->
+    Port = ?config(port, Config),
+    {ok, Held} = gen_tcp:listen(Port, [{reuseaddr, false}, {ip, {127, 0, 0, 1}}]),
+    ?assertMatch({error, {eaddrinuse, _}}, barrel_mcp:start_http_stream(#{port => Port})),
+    gen_tcp:close(Held),
+    ok.
+
+%% The unsupervised entry point with a name a listener already holds.
+name_in_use_is_refused(Config) ->
+    Port = ?config(port, Config),
+    {ok, _} = barrel_mcp:start_http_stream(#{port => Port}),
+    ?assertEqual(
+        {error, {already_started, barrel_mcp_http_stream_listener}},
+        barrel_mcp_http_listener:start(barrel_mcp_http_stream_listener, #{port => Port + 50}, #{
+            mode => stream, auth_config => #{provider => barrel_mcp_auth_none}
+        })
+    ),
+    ok.
+
+%% A stream reset while its body is still arriving ends the request
+%% and gives its slot back.
+http2_reset_during_body_releases_the_slot(Config) ->
+    Port = ?config(port, Config),
+    Dir = ?config(priv_dir, Config),
+    #{cacerts := CaCerts} = Tls = barrel_mcp_test_helpers:tls_files(Dir),
+    {ok, _} = barrel_mcp:start_http_stream(#{port => Port, ssl => maps:without([cacerts], Tls)}),
+    Listener = barrel_mcp_http_stream_listener,
+    {ok, Conn} = h2_connect(Port, CaCerts),
+    {ok, Sid} = h2:request(
+        Conn,
+        [{<<":method">>, <<"POST">>}, {<<":path">>, <<"/mcp">>}, {<<":scheme">>, <<"https">>}] ++
+            h2_headers(Port),
+        #{end_stream => false}
+    ),
+    ok = h2:send_data(Conn, Sid, <<"{\"jsonrpc\":">>, false),
+    wait_until(fun() -> barrel_mcp_http_listener:in_flight(Listener) =:= 1 end, 5000),
+    ok = h2:cancel(Conn, Sid),
+    wait_until(fun() -> barrel_mcp_http_listener:in_flight(Listener) =:= 0 end, 5000),
+    ok = h2:close(Conn),
+    ?assert(serves(Port, maps:without([cacerts], Tls), CaCerts)),
+    ok.
+
 slow_tool(_Args) ->
     watch(started),
     timer:sleep(1500),
@@ -352,18 +473,22 @@ discover_body(Id) ->
 %% A legacy initialize, for a session the standalone GET can attach to.
 init_session(Port) ->
     {ok, _} = application:ensure_all_started(hackney),
-    Body = json:encode(#{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => 1,
-        <<"method">> => <<"initialize">>,
-        <<"params">> => #{
-            <<"protocolVersion">> => <<"2025-11-25">>,
-            <<"capabilities">> => #{},
-            <<"clientInfo">> => #{<<"name">> => <<"listener-suite">>, <<"version">> => <<"1">>}
-        }
-    }),
-    {ok, S, H, B} = hackney:request(post, url(Port), json_headers(), Body, [with_body]),
+    {ok, S, H, B} = hackney:request(post, url(Port), json_headers(), init_body(), [with_body]),
     {S, H, B}.
+
+init_body() ->
+    iolist_to_binary(
+        json:encode(#{
+            <<"jsonrpc">> => <<"2.0">>,
+            <<"id">> => 1,
+            <<"method">> => <<"initialize">>,
+            <<"params">> => #{
+                <<"protocolVersion">> => <<"2025-11-25">>,
+                <<"capabilities">> => #{},
+                <<"clientInfo">> => #{<<"name">> => <<"listener-suite">>, <<"version">> => <<"1">>}
+            }
+        })
+    ).
 
 raw_post(Port, Body0, ExtraHeaders) ->
     Body = iolist_to_binary(Body0),
@@ -389,6 +514,12 @@ recv_until(Sock, Done, Timeout, Acc) ->
                 {ok, Data} -> recv_until(Sock, Done, Timeout, <<Acc/binary, Data/binary>>);
                 {error, _} -> Acc
             end
+    end.
+
+recv_to_close(Sock) ->
+    case gen_tcp:recv(Sock, 0, 5000) of
+        {ok, _Alert} -> recv_to_close(Sock);
+        {error, _} = E -> E
     end.
 
 count(Pattern, Bin) ->
@@ -426,6 +557,20 @@ h2_body(Conn, Sid, Acc) ->
         {h2, Conn, {data, Sid, Data, false}} -> h2_body(Conn, Sid, <<Acc/binary, Data/binary>>)
     after 5000 ->
         Acc
+    end.
+
+%% Over TLS with HTTP/1.1, then HTTP/2.
+serves(Port, #{cacerts := CaCerts}) ->
+    serves(Port, undefined, CaCerts).
+
+serves(Port, _Tls, CaCerts) ->
+    {ok, S1} = ssl:connect("127.0.0.1", Port, tls_client_opts(CaCerts, <<"http/1.1">>), 5000),
+    ok = ssl:send(S1, raw_post(Port, discover_body(1), [])),
+    {ok, R1} = ssl:recv(S1, 0, 5000),
+    ssl:close(S1),
+    case R1 of
+        <<"HTTP/1.1 200", _/binary>> -> true;
+        _ -> false
     end.
 
 %% Prove the port is actually being served, not just that a process

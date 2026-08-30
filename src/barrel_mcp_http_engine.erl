@@ -1658,8 +1658,7 @@ stream_get_sse_session(Headers, Responder, Config, SessionId, AuthInfo) ->
                     Config,
                     #{
                         <<"content-type">> => <<"text/event-stream">>,
-                        <<"cache-control">> => <<"no-cache">>,
-                        <<"connection">> => <<"keep-alive">>
+                        <<"cache-control">> => <<"no-cache">>
                     }
                 ),
                 SessionId
@@ -1773,7 +1772,6 @@ legacy_sse_open(Headers, Responder, Config) ->
         Hdrs = cors_headers(Headers, Config, #{
             <<"content-type">> => <<"text/event-stream">>,
             <<"cache-control">> => <<"no-cache">>,
-            <<"connection">> => <<"keep-alive">>,
             <<"x-accel-buffering">> => <<"no">>
         }),
         stream_start(Responder, 200, Hdrs),
