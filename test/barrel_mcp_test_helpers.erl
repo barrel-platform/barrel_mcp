@@ -19,6 +19,7 @@
 -export([init_params/0, init_params/1, init_params/2, init_body/0, init_body/1, init_body/2]).
 -export([erl_executable/0, child_args/1, child_args/2]).
 -export([case_port/3]).
+-export([tls_files/1]).
 
 %%====================================================================
 %% Waiting
@@ -206,3 +207,35 @@ case_port(Base, TC, All) ->
 case_port(Base, TC, [TC | _], N) -> Base + N;
 case_port(Base, TC, [_ | Rest], N) -> case_port(Base, TC, Rest, N + 1);
 case_port(Base, _TC, [], N) -> Base + N.
+
+%%====================================================================
+%% TLS
+%%====================================================================
+
+%% @doc A throwaway certificate chain for a TLS listener, written under
+%% `Dir' because the listener takes file paths. Returns the `ssl' map
+%% the listener wants plus the CA certs a client can verify against.
+-spec tls_files(file:filename()) ->
+    #{certfile := string(), keyfile := string(), cacerts := [binary()]}.
+tls_files(Dir) ->
+    _ = application:ensure_all_started(ssl),
+    %% The default chain is refused by a TLS 1.3 client
+    %% (`unable_to_supply_acceptable_cert'); P-256 with SHA-256 is not.
+    Cert = [{key, {namedCurve, secp256r1}}, {digest, sha256}],
+    Chains = #{root => Cert, intermediates => [], peer => Cert},
+    #{server_config := Server} = public_key:pkix_test_data(#{
+        server_chain => Chains, client_chain => Chains
+    }),
+    CertDer = proplists:get_value(cert, Server),
+    {KeyType, KeyDer} = proplists:get_value(key, Server),
+    CaCerts = proplists:get_value(cacerts, Server),
+    %% Unique names: ssl caches PEM files by path, so a rewritten file
+    %% would serve the previous case's key with this case's cert.
+    Tag = integer_to_list(erlang:unique_integer([positive])),
+    CertFile = filename:join(Dir, "server-cert-" ++ Tag ++ ".pem"),
+    KeyFile = filename:join(Dir, "server-key-" ++ Tag ++ ".pem"),
+    ok = file:write_file(
+        CertFile, public_key:pem_encode([{'Certificate', CertDer, not_encrypted}])
+    ),
+    ok = file:write_file(KeyFile, public_key:pem_encode([{KeyType, KeyDer, not_encrypted}])),
+    #{certfile => CertFile, keyfile => KeyFile, cacerts => CaCerts}.
