@@ -190,7 +190,7 @@ body_over_cap_is_413(Config) ->
     {ok, R1} = ssl:recv(S1, 0, 5000),
     ssl:close(S1),
     ?assertMatch(<<"HTTP/1.1 413", _/binary>>, R1),
-    {ok, Conn} = h2:connect("127.0.0.1", Port, #{transport => ssl, cacerts => CaCerts}),
+    {ok, Conn} = h2_connect(Port, CaCerts),
     {ok, Sid} = h2:request(Conn, <<"POST">>, <<"/mcp">>, h2_headers(Port), Big),
     Status =
         receive
@@ -270,7 +270,7 @@ tls_serves_http1_and_http2(Config) ->
     {ok, R1} = ssl:recv(S1, 0, 5000),
     ssl:close(S1),
     ?assertMatch(<<"HTTP/1.1 200", _/binary>>, R1),
-    {ok, Conn} = h2:connect("127.0.0.1", Port, #{transport => ssl, cacerts => CaCerts}),
+    {ok, Conn} = h2_connect(Port, CaCerts),
     {ok, Sid} = h2:request(Conn, <<"POST">>, <<"/mcp">>, h2_headers(Port), discover_body(2)),
     receive
         {h2, Conn, {response, Sid, 200, _}} -> ok
@@ -278,7 +278,7 @@ tls_serves_http1_and_http2(Config) ->
     end,
     Body = h2_body(Conn, Sid, <<>>),
     ok = h2:close(Conn),
-    ?assertMatch(#{<<"result">> := #{<<"protocolVersion">> := _}}, json:decode(Body)),
+    ?assertMatch(#{<<"result">> := #{<<"capabilities">> := _}}, json:decode(Body)),
     ok.
 
 %% "MUST treat a client disconnect as cancellation of that request"
@@ -292,10 +292,13 @@ http2_disconnect_cancels_the_request(Config) ->
     Body = iolist_to_binary(
         json:encode(barrel_mcp_test_helpers:modern_request(1, <<"tools/call">>, Params))
     ),
-    Headers = h2_headers(Port) ++ barrel_mcp_headers:standard(<<"tools/call">>, Params),
+    Headers =
+        h2_headers(Port) ++
+            [{<<"mcp-protocol-version">>, <<"2026-07-28">>}] ++
+            barrel_mcp_headers:standard(<<"tools/call">>, Params),
     true = register(?WATCH, self()),
     try
-        {ok, Conn} = h2:connect("127.0.0.1", Port, #{transport => ssl, cacerts => CaCerts}),
+        {ok, Conn} = h2_connect(Port, CaCerts),
         {ok, _Sid} = h2:request(Conn, <<"POST">>, <<"/mcp">>, Headers, Body),
         ok = await_watch(started, 5000),
         ok = h2:close(Conn),
@@ -338,11 +341,13 @@ json_headers() ->
     ].
 
 discover_body(Id) ->
-    json:encode(#{
-        <<"jsonrpc">> => <<"2.0">>,
-        <<"id">> => Id,
-        <<"method">> => <<"server/discover">>
-    }).
+    iolist_to_binary(
+        json:encode(#{
+            <<"jsonrpc">> => <<"2.0">>,
+            <<"id">> => Id,
+            <<"method">> => <<"server/discover">>
+        })
+    ).
 
 %% A legacy initialize, for a session the standalone GET can attach to.
 init_session(Port) ->
@@ -398,6 +403,15 @@ tls_client_opts(CaCerts, Alpn) ->
         {server_name_indication, disable},
         {alpn_advertised_protocols, [Alpn]}
     ].
+
+%% Verifies the minted chain; the hostname check is off because the
+%% certificate names the machine, not 127.0.0.1.
+h2_connect(Port, CaCerts) ->
+    h2:connect("127.0.0.1", Port, #{
+        transport => ssl,
+        cacerts => CaCerts,
+        ssl_opts => [{server_name_indication, disable}]
+    }).
 
 h2_headers(Port) ->
     [
