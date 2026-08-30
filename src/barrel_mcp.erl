@@ -580,7 +580,7 @@ stop_http() ->
 %%   <dt>auth</dt><dd>Authentication configuration (see {@link barrel_mcp_auth})</dd>
 %%   <dt>session_enabled</dt><dd>Enable session management (default: true)</dd>
 %%   <dt>ssl</dt><dd>SSL/TLS configuration for HTTPS: certfile, keyfile, cacertfile (optional)</dd>
-%%   <dt>acceptors</dt><dd>Accept loops (default: `max(2, schedulers)')</dd>
+%%   <dt>acceptors</dt><dd>Accept loops (default: max(2, schedulers))</dd>
 %%   <dt>max_connections</dt><dd>Established connections per listener (default: 16384)</dd>
 %%   <dt>max_requests</dt><dd>Requests in flight per listener, 503 past it (default: 10000)</dd>
 %%   <dt>max_body_bytes</dt><dd>Request body cap, 413 past it (default: 16 MiB)</dd>
