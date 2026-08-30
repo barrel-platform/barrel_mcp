@@ -82,6 +82,12 @@ barrel_mcp:start_http_stream(#{
 | `allow_missing_origin` | `boolean()` | `true` on loopback, `false` otherwise | Whether to accept requests with no `Origin` header. Non-browser clients typically don't send one. |
 | `sse_buffer_size` | `pos_integer()` | `256` | Per-session ring buffer of recent SSE events for `Last-Event-ID` replay. |
 | `subscription_keepalive_ms` | `pos_integer()` | `15000` | How often a quiet `subscriptions/listen` stream emits a keep-alive comment. Also the upper bound on how long a departed subscriber lingers: nothing reads the socket while the stream is held open, so a gone peer is only noticed on the next write. |
+| `acceptors` | `pos_integer()` | `max(2, schedulers)` | Accept loops on the listen socket. |
+| `max_connections` | `pos_integer()` | `16384` | Established connections per listener; past it a new socket is accepted and closed. Connections live until the peer closes them (no idle timeout, so a standalone stream is never reaped), which is what this bounds. |
+| `max_requests` | `pos_integer() \| infinity` | `10000` | Requests in flight per listener, streams included; past it a request is answered `503` with `retry-after: 1` before its body is read. `barrel_mcp_http_listener:in_flight/1` reports the count. |
+| `max_body_bytes` | `pos_integer()` | 16 MiB | Request body cap, answered `413`. |
+| `resource_metadata` | `map()` | `undefined` | The RFC 9728 document to serve at `/.well-known/oauth-protected-resource` (see the Authentication guide). |
+| `sse_path`, `sse_message_path` | `binary()` | unset | Serve the 2024-11-05 HTTP+SSE pair on the same listener (see Protocol Versions). |
 
 ### Security defaults
 
@@ -465,12 +471,36 @@ process cannot tamper with the table.
 - **Use `start_http`** for simple JSON-RPC clients
 - **Use `start_stdio`** for Claude Desktop integration
 
+## Running behind livery
+
+The built-in listener is the batteries for a service that runs
+nothing else: one port, HTTP/1.1 and HTTP/2 by ALPN, connection and
+request caps. It has no graceful drain, no metrics or health
+endpoints, no HTTP/3, no rate limiting and no access log. A
+production deployment that wants those mounts the engine in
+[livery](https://github.com/benoitc/livery), which ships the
+`livery_mcp` handler over the same `barrel_mcp_http_engine`:
+
+```erl
+Router = livery_router:compile([
+    {<<"POST">>,   <<"/mcp">>, livery_mcp:handler()},
+    {<<"GET">>,    <<"/mcp">>, livery_mcp:handler()},
+    {<<"DELETE">>, <<"/mcp">>, livery_mcp:handler()}
+]),
+livery:start_service(#{https => #{...}, router => Router}).
+```
+
+Tools, resources and prompts are registered through `barrel_mcp` as
+usual; they live in the shared registry whichever listener serves
+them. Do not start `barrel_mcp:start_http_stream/1` as well: livery
+owns the port.
+
 ## Embedding in another HTTP server
 
 The built-in `h1`/`h2` server is one binding over a transport-neutral
-engine, `barrel_mcp_http_engine`. If you already run an HTTP server
-(for example the Livery web framework) you can serve MCP through it by
-calling the engine directly, with no second listener.
+engine, `barrel_mcp_http_engine`; `livery_mcp` is another. If you run
+a different HTTP server you can serve MCP through it by calling the
+engine directly, with no second listener.
 
 For each request, read the method, path, headers and body, then call:
 

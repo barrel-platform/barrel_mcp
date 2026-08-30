@@ -513,7 +513,7 @@ completion_key(Kind, Outer, Arg) ->
 %%
 %% <ul>
 %%   <li>`port' - Port number (default: 9090)</li>
-%%   <li>`ip' - IP address to bind (default: `{0, 0, 0, 0}')</li>
+%%   <li>`ip' - IP address to bind (default: `{127, 0, 0, 1}')</li>
 %%   <li>`auth' - Authentication configuration (see {@link barrel_mcp_auth})</li>
 %% </ul>
 %%
@@ -540,7 +540,12 @@ completion_key(Kind, Outer, Arg) ->
     Opts :: #{
         port => pos_integer(),
         ip => inet:ip_address(),
-        auth => map()
+        auth => map(),
+        acceptors => pos_integer(),
+        max_connections => pos_integer(),
+        max_requests => pos_integer() | infinity,
+        max_body_bytes => pos_integer(),
+        _ => _
     }.
 start_http(Opts) ->
     barrel_mcp_http:start(Opts).
@@ -571,10 +576,14 @@ stop_http() ->
 %%
 %% <dl>
 %%   <dt>port</dt><dd>Port number (default: 9090)</dd>
-%%   <dt>ip</dt><dd>IP address to bind (default: {0, 0, 0, 0})</dd>
+%%   <dt>ip</dt><dd>IP address to bind (default: {127, 0, 0, 1}). A public bind needs allowed_origins.</dd>
 %%   <dt>auth</dt><dd>Authentication configuration (see {@link barrel_mcp_auth})</dd>
 %%   <dt>session_enabled</dt><dd>Enable session management (default: true)</dd>
 %%   <dt>ssl</dt><dd>SSL/TLS configuration for HTTPS: certfile, keyfile, cacertfile (optional)</dd>
+%%   <dt>acceptors</dt><dd>Accept loops (default: `max(2, schedulers)')</dd>
+%%   <dt>max_connections</dt><dd>Established connections per listener (default: 16384)</dd>
+%%   <dt>max_requests</dt><dd>Requests in flight per listener, 503 past it (default: 10000)</dd>
+%%   <dt>max_body_bytes</dt><dd>Request body cap, 413 past it (default: 16 MiB)</dd>
 %% </dl>
 %%
 %% == Example ==
@@ -621,7 +630,12 @@ stop_http() ->
             certfile := string(),
             keyfile := string(),
             cacertfile => string()
-        }
+        },
+        acceptors => pos_integer(),
+        max_connections => pos_integer(),
+        max_requests => pos_integer() | infinity,
+        max_body_bytes => pos_integer(),
+        _ => _
     }.
 start_http_stream(Opts) ->
     barrel_mcp_http_stream:start(Opts).

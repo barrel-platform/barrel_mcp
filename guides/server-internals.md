@@ -18,7 +18,7 @@ barrel_mcp                      public facade: register, start, stop
   |- barrel_mcp_http            simple HTTP (POST only) listener config
   |- barrel_mcp_stdio           stdio transport (own process tree)
   `- barrel_mcp_listener_sup    one child per listener
-       `- barrel_mcp_http_listener   h1/h2 acceptors, connections, request processes
+       `- barrel_mcp_http_listener   acceptors, caps, the per-request translator over h1/h2
             `- barrel_mcp_http_engine    HTTP verbs, sessions, SSE, auth, CORS, tool calls
                  `- barrel_mcp_protocol     JSON-RPC envelopes, era gating, method handlers
                       |- barrel_mcp_ctx            per-request context, era, _meta validation
@@ -61,7 +61,7 @@ barrel_mcp_sup                   one_for_one, 5 restarts / 10 s
 Listener names are `barrel_mcp_http_stream_listener` and
 `barrel_mcp_http_simple_listener`. When `barrel_mcp_listener_sup` is
 not running (the library embedded without its application), the
-listener is started unsupervised by `barrel_mcp_listener_sup:supervised_start`'s
+listener is started unsupervised by `barrel_mcp_listener_sup:start_listener`'s
 fallback.
 
 `barrel_mcp_stdio` is not under the tree: `start/0` runs it
@@ -80,16 +80,32 @@ the live pool.
 Each accepted socket gets a connection process (`spawn`, then the
 connection links itself to the listener), counted against
 `max_connections` (default 16384) through an atomics counter that a
-monitor releases on exit. The connection negotiates h1 or h2 and
-spawns one request process per request with
-`spawn_opt([link, monitor])` (`spawn_handler/7`): h1 serves requests
-one at a time, h2 one process per stream. A request process that
-crashes is answered 500 by the connection, except for `shutdown`,
-`{shutdown, _}` and `{noproc, {gen_statem, call, _}}`, which are a
-peer that went away.
+monitor releases on exit. On a TLS bind that process runs the
+handshake and reads the ALPN result; then it hands the socket to the
+wire library, `h1:serve_socket/2` or `h2:serve_socket/2`, and waits
+for the library's connection process to end. From there the library
+owns the connection: framing, pipelining order, one process per
+request (h1, serial) or per stream (h2, concurrent), and the 500 for
+a handler that crashes.
+
+The function the library invokes in that per-request process is our
+translator (`barrel_mcp_http_listener:handler`). It registers as the
+stream handler (h2 only), admits the request against `max_requests`
+(503 with `retry-after` past the cap), collects the body from the
+library's messages against `max_body_bytes` (413), then runs the
+engine in a child spawned with `spawn_opt([link, monitor])` and, until
+that child ends, turns `{h1_stream, _, {stream_reset, _}}`,
+`{h2, _, {stream_reset, _, _}}` and `{h2, _, {closed, _}}` into the
+engine's `mcp_disconnect`. The child traps exits, so a translator
+killed outright reaches the engine as `{'EXIT', _, _}`, which its
+stream loops also handle. A crash in the engine is logged and
+answered 500 by the child itself, except for `shutdown`,
+`{shutdown, _}` and a `gen_statem` call to a connection already gone,
+which are a peer that went away.
 
 When the listener stops it closes the socket and exits `shutdown`,
-which reaches every connection and request over the links.
+which reaches every connection and, through the library's link, every
+socket and request.
 
 ## 3. Process model of a request
 
@@ -332,7 +348,7 @@ with `start_link/0`.
 | Session rows, pending requests, in-flight workers | `src/barrel_mcp_session.erl` |
 | Task table, TTL, `input_required` | `src/barrel_mcp_tasks.erl` |
 | Inline-or-task hand-off | `src/barrel_mcp_task_relay.erl` |
-| Acceptors, connections, h1/h2 | `src/barrel_mcp_http_listener.erl` |
+| Acceptors, caps, the translator over h1/h2 | `src/barrel_mcp_http_listener.erl` |
 | stdio framing and worker pool | `src/barrel_mcp_stdio.erl` |
 | Server auth providers and principals | `src/barrel_mcp_auth.erl`, `src/barrel_mcp_auth_*.erl` |
 | Revisions and the era function | `src/barrel_mcp_version.erl`, `include/barrel_mcp.hrl` |
@@ -349,7 +365,8 @@ area:
 | session ownership, Origin, headers, response codes | `test/barrel_mcp_http_stream_security_SUITE.erl` |
 | cancellation, replay, spec additions | `test/barrel_mcp_spec_additives_SUITE.erl` |
 | subscriptions | `test/barrel_mcp_subscriptions_SUITE.erl` |
-| listener and embedding | `test/barrel_mcp_http_engine_embed_tests.erl`, `test/barrel_mcp_http_stream_tests.erl` |
+| listener: supervision, TLS and HTTP/2, the caps | `test/barrel_mcp_listener_sup_SUITE.erl` |
+| embedding | `test/barrel_mcp_http_engine_embed_tests.erl`, `test/barrel_mcp_http_stream_tests.erl` |
 | auth providers, principals | `test/barrel_mcp_auth_tests.erl`, `test/barrel_mcp_principal_tests.erl` |
 | stdio | `test/barrel_mcp_stdio_SUITE.erl` |
 | the official runner, both modes | `test/barrel_mcp_conformance_SUITE.erl` |
