@@ -524,17 +524,14 @@ test_resume_after_retry() ->
             "transfer-encoding: chunked\r\n\r\n"
         ]),
         Prime =
-            <<"id: event-7\nretry: 400\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{}}\n\n">>,
+            <<"id: event-7\nretry: 1500\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{}}\n\n">>,
         ok = gen_tcp:send(S1, [
             io_lib:format("~.16b\r\n", [byte_size(Prime)]), Prime, "\r\n0\r\n\r\n"
         ]),
-        Closed = erlang:monotonic_time(millisecond),
         ok = gen_tcp:close(S1),
-        %% 2. The resumption GET: carries the id, arrives after the delay.
-        {ok, S2} = gen_tcp:accept(L, 10000),
-        Arrived = erlang:monotonic_time(millisecond),
-        {ok, Head} = gen_tcp:recv(S2, 0, 5000),
-        Test ! {resumed, Head, Arrived - Closed},
+        %% 2. The resumption GET, which carries the id.
+        {S2, Head} = accept_resumption(L),
+        Test ! {resumed, Head},
         Answer =
             <<"id: event-8\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"resumed\":true}}\n\n">>,
         ok = gen_tcp:send(S2, [
@@ -554,16 +551,41 @@ test_resume_after_retry() ->
     {ok, Pid} = barrel_mcp_client_http:connect(self(), #{
         url => url(?RESUME_PORT, "/mcp"), open_event_stream => false
     }),
+    Started = erlang:monotonic_time(millisecond),
     ok = barrel_mcp_client_http:send(Pid, request(1)),
     receive
-        {resumed, Head, Elapsed} ->
+        {resumed, Head} ->
+            Elapsed = erlang:monotonic_time(millisecond) - Started,
             ?assertNotEqual(nomatch, binary:match(Head, <<"GET /mcp">>)),
             ?assertNotEqual(nomatch, binary:match(Head, <<"last-event-id: event-7">>)),
-            ?assert(Elapsed >= 350)
-    after 10000 -> error(no_resumption)
+            %% One clock, and the delay is armed after this send, so
+            %% load can only inflate the measurement. 1500 is what the
+            %% server asked for, above the 1000 ms fallback: passing
+            %% means the `retry:' field was read, not defaulted.
+            ?assert(Elapsed >= 1500)
+    after 20000 -> error(no_resumption)
     end,
     ?assertEqual(1, next_response()),
     barrel_mcp_client_http:close(Pid).
+
+%% hackney opens spare connections to a host it could not pool one
+%% for, and they send nothing. Take sockets until the resumption GET
+%% actually arrives instead of trusting the next one to be it.
+accept_resumption(L) ->
+    {ok, S} = gen_tcp:accept(L, 20000),
+    case gen_tcp:recv(S, 0, 2000) of
+        {ok, Head} ->
+            case binary:match(Head, <<"last-event-id:">>) of
+                nomatch ->
+                    ok = gen_tcp:close(S),
+                    accept_resumption(L);
+                _ ->
+                    {S, Head}
+            end;
+        {error, _} ->
+            ok = gen_tcp:close(S),
+            accept_resumption(L)
+    end.
 
 %% The stream forwards notifications too; wait for the response.
 next_response() ->
