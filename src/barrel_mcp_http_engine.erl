@@ -51,7 +51,7 @@
 %%%   <li>Modern requests: header and body agreement, stateless
 %%%       dispatch, SSE response streams, `subscriptions/listen'.</li>
 %%%   <li>Async tool calls: `handle_async_tool_call/7' decides the
-%%%       tool-call mode for HTTP (inline, task, escalate, refuse) and
+%%%       tool-call mode (`barrel_mcp_tasks:mode/2') and
 %%%       waits for the worker; the legacy immediate-task path is
 %%%       `handle_long_running_call/10'.</li>
 %%%   <li>Session resolution: `lookup_session/5', `owned_session/2',
@@ -881,17 +881,7 @@ handle_async_tool_call(
     %% refused when the tool insists. A legacy client gets a task at
     %% once; a modern one gets a task only when the tool takes longer
     %% than the inline window (barrel_mcp_task_relay).
-    Support = barrel_mcp_registry:task_support(ToolName),
-    Enabled = tasks_available(RequestCtx),
-    Modern = RequestCtx =/= undefined andalso barrel_mcp_ctx:is_modern(RequestCtx),
-    TaskMode =
-        case {Support, Enabled} of
-            {forbidden, _} -> inline;
-            {optional, false} -> inline;
-            {required, false} -> refuse;
-            {_, true} when Modern -> escalate;
-            {_, true} -> task
-        end,
+    TaskMode = barrel_mcp_tasks:mode(ToolName, RequestCtx),
     Meta = maps:get(<<"_meta">>, Params, #{}),
     ProgressToken = maps:get(<<"progressToken">>, Meta, undefined),
     Self = self(),
@@ -904,7 +894,7 @@ handle_async_tool_call(
                 200,
                 barrel_mcp_protocol:missing_tasks_capability(RequestId)
             );
-        task ->
+        {task, immediate} ->
             handle_long_running_call(
                 Headers,
                 Responder,
@@ -917,7 +907,7 @@ handle_async_tool_call(
                 Spawn,
                 AuthInfo
             );
-        _ when TaskMode =:= inline; TaskMode =:= escalate ->
+        _ when TaskMode =:= inline; TaskMode =:= {task, escalate} ->
             %% Opting into progress or logging turns the reply into an
             %% SSE stream, opened before the tool runs.
             LogLevel = request_log_level(Reply),
@@ -939,7 +929,7 @@ handle_async_tool_call(
                 end,
             Relay =
                 case TaskMode of
-                    escalate -> barrel_mcp_task_relay:start();
+                    {task, escalate} -> barrel_mcp_task_relay:start();
                     inline -> undefined
                 end,
             Ctx = #{
@@ -1224,11 +1214,8 @@ wait_inline_or_escalate(Relay, WorkerPid, RequestId, ToolName, Reply, OnProgress
             Outcome
     end.
 
-%% `tasks_available/1' and `task_owner/1' live in the protocol core so
-%% stdio decides the same way this transport does.
-tasks_available(undefined) -> false;
-tasks_available(Ctx) -> barrel_mcp_protocol:tasks_enabled(Ctx).
-
+%% `task_owner/1' lives in the protocol core so stdio decides the same
+%% way this transport does.
 task_owner(undefined) -> undefined;
 task_owner(Ctx) -> barrel_mcp_protocol:task_owner(Ctx).
 
