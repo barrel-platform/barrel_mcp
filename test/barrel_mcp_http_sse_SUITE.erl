@@ -32,7 +32,8 @@
     stream_close_ends_the_session/1,
     stream_close_kills_the_running_tool/1,
     discover_is_refused_on_the_pair/1,
-    client_falls_back_to_the_sse_pair/1
+    client_falls_back_to_the_sse_pair/1,
+    quiet_stream_is_kept_alive/1
 ]).
 
 -export([echo_tool/1, watched_slow_tool/1]).
@@ -53,7 +54,8 @@ all() ->
         stream_close_ends_the_session,
         stream_close_kills_the_running_tool,
         discover_is_refused_on_the_pair,
-        client_falls_back_to_the_sse_pair
+        client_falls_back_to_the_sse_pair,
+        quiet_stream_is_kept_alive
     ].
 
 init_per_suite(Config) ->
@@ -74,6 +76,16 @@ end_per_suite(_Config) ->
     application:stop(barrel_mcp),
     ok.
 
+init_per_testcase(quiet_stream_is_kept_alive, Config) ->
+    Port = barrel_mcp_test_helpers:case_port(?PORT, quiet_stream_is_kept_alive, all()),
+    {ok, _} = barrel_mcp:start_http_stream(#{
+        port => Port,
+        session_enabled => true,
+        sse_path => <<?SSE>>,
+        sse_message_path => <<?MSG>>,
+        sse_keepalive_ms => 200
+    }),
+    [{port, Port} | Config];
 init_per_testcase(routes_are_off_unless_configured, Config) ->
     Port = ?PORT + 50,
     {ok, _} = barrel_mcp:start_http_stream(#{port => Port, session_enabled => true}),
@@ -96,6 +108,41 @@ end_per_testcase(_TC, _Config) ->
     end,
     timer:sleep(50),
     ok.
+
+%% Nothing else is written on an idle stream, so without the comment a
+%% peer that went away without closing would never be noticed.
+quiet_stream_is_kept_alive(Config) ->
+    Port = ?config(port, Config),
+    {ok, Sock} = gen_tcp:connect(
+        {127, 0, 0, 1}, Port, [binary, {active, false}, {packet, raw}], 5000
+    ),
+    ok = gen_tcp:send(Sock, [
+        <<"GET " ?SSE " HTTP/1.1\r\n">>,
+        <<"Host: 127.0.0.1\r\n">>,
+        <<"Accept: text/event-stream\r\n\r\n">>
+    ]),
+    ?assert(waits_for_comment(Sock, 5000)),
+    ok = gen_tcp:close(Sock),
+    ok.
+
+%% The endpoint event arrives first; keep reading until a bare SSE
+%% comment shows up.
+waits_for_comment(_Sock, Budget) when Budget =< 0 ->
+    false;
+waits_for_comment(Sock, Budget) ->
+    Started = erlang:monotonic_time(millisecond),
+    case gen_tcp:recv(Sock, 0, Budget) of
+        {ok, Data} ->
+            case binary:match(Data, <<":\r\n">>) of
+                nomatch ->
+                    Spent = erlang:monotonic_time(millisecond) - Started,
+                    waits_for_comment(Sock, Budget - max(Spent, 1));
+                _ ->
+                    true
+            end;
+        {error, _} ->
+            false
+    end.
 
 echo_tool(Args) ->
     <<"Echo: ", (maps:get(<<"input">>, Args, <<"none">>))/binary>>.

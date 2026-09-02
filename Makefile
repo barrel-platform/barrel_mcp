@@ -27,9 +27,13 @@ examples-setup:
 	    ln -snf ../../.. "$$ex/_checkouts/barrel_mcp"; \
 	done
 
+# The examples have no lock of their own: they inherit this project's
+# dependency ranges through `_checkouts', so an in-range bump here
+# leaves whatever they already unpacked in place. Build them fresh.
 examples-test: examples-setup
 	@for ex in examples/*/; do \
 	    echo "==> $$ex"; \
+	    rm -rf "$$ex"_build; \
 	    (cd "$$ex" && rebar3 ct) || exit 1; \
 	done
 

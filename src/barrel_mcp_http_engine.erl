@@ -51,7 +51,7 @@
 %%%   <li>Modern requests: header and body agreement, stateless
 %%%       dispatch, SSE response streams, `subscriptions/listen'.</li>
 %%%   <li>Async tool calls: `handle_async_tool_call/7' decides the
-%%%       tool-call mode for HTTP (inline, task, escalate, refuse) and
+%%%       tool-call mode (`barrel_mcp_tasks:mode/2') and
 %%%       waits for the worker; the legacy immediate-task path is
 %%%       `handle_long_running_call/10'.</li>
 %%%   <li>Session resolution: `lookup_session/5', `owned_session/2',
@@ -104,6 +104,7 @@
     allow_missing_origin => boolean(),
     sse_buffer_size => pos_integer(),
     subscription_keepalive_ms => pos_integer(),
+    sse_keepalive_ms => pos_integer(),
     resource_metadata => undefined | map(),
     _ => _
 }.
@@ -112,6 +113,11 @@
 
 %% Cap incoming SSE response size mirrors the client-side cap.
 -define(MAX_RESP_BYTES, 16 * 1024 * 1024).
+%% How stale a session's `last_activity' may get before a request
+%% rewrites it. Only the TTL sweep reads it, a minute apart, against a
+%% TTL of half an hour.
+-define(ACTIVITY_RESOLUTION, 15000).
+-define(DEFAULT_KEEPALIVE_MS, 15000).
 
 %%====================================================================
 %% Entry point
@@ -691,8 +697,14 @@ end_subscription(Responder, SubId) ->
     _ = stream_end(Responder),
     ok.
 
+%% One cadence for every stream we hold open.
+%% `subscription_keepalive_ms' is the older name and still answers for
+%% a host that set it.
 keepalive_interval(Config) ->
-    maps:get(subscription_keepalive_ms, Config, 15000).
+    case maps:get(sse_keepalive_ms, Config, undefined) of
+        undefined -> maps:get(subscription_keepalive_ms, Config, ?DEFAULT_KEEPALIVE_MS);
+        Ms -> Ms
+    end.
 
 %% The 2026-07-28 transport binding pins a few JSON-RPC errors to an
 %% HTTP status so an intermediary can act on them without parsing the
@@ -759,11 +771,7 @@ handle_inbound_request(Headers, Responder, Config, SessionEnabled, Request, Auth
     end.
 
 handle_dispatch(Headers, Responder, Config, SessionId, Request, AuthInfo) ->
-    _ =
-        case SessionId of
-            undefined -> ok;
-            _ -> barrel_mcp_session:update_activity(SessionId)
-        end,
+    _ = touch_session(SessionId),
     Method = maps:get(<<"method">>, Request, undefined),
     case validate_protocol_version(Headers, SessionId, Method) of
         {error, ProtoErr} ->
@@ -873,17 +881,7 @@ handle_async_tool_call(
     %% refused when the tool insists. A legacy client gets a task at
     %% once; a modern one gets a task only when the tool takes longer
     %% than the inline window (barrel_mcp_task_relay).
-    Support = barrel_mcp_registry:task_support(ToolName),
-    Enabled = tasks_available(RequestCtx),
-    Modern = RequestCtx =/= undefined andalso barrel_mcp_ctx:is_modern(RequestCtx),
-    TaskMode =
-        case {Support, Enabled} of
-            {forbidden, _} -> inline;
-            {optional, false} -> inline;
-            {required, false} -> refuse;
-            {_, true} when Modern -> escalate;
-            {_, true} -> task
-        end,
+    TaskMode = barrel_mcp_tasks:mode(ToolName, RequestCtx),
     Meta = maps:get(<<"_meta">>, Params, #{}),
     ProgressToken = maps:get(<<"progressToken">>, Meta, undefined),
     Self = self(),
@@ -896,7 +894,7 @@ handle_async_tool_call(
                 200,
                 barrel_mcp_protocol:missing_tasks_capability(RequestId)
             );
-        task ->
+        {task, immediate} ->
             handle_long_running_call(
                 Headers,
                 Responder,
@@ -909,7 +907,7 @@ handle_async_tool_call(
                 Spawn,
                 AuthInfo
             );
-        _ when TaskMode =:= inline; TaskMode =:= escalate ->
+        _ when TaskMode =:= inline; TaskMode =:= {task, escalate} ->
             %% Opting into progress or logging turns the reply into an
             %% SSE stream, opened before the tool runs.
             LogLevel = request_log_level(Reply),
@@ -931,7 +929,7 @@ handle_async_tool_call(
                 end,
             Relay =
                 case TaskMode of
-                    escalate -> barrel_mcp_task_relay:start();
+                    {task, escalate} -> barrel_mcp_task_relay:start();
                     inline -> undefined
                 end,
             Ctx = #{
@@ -1216,11 +1214,8 @@ wait_inline_or_escalate(Relay, WorkerPid, RequestId, ToolName, Reply, OnProgress
             Outcome
     end.
 
-%% `tasks_available/1' and `task_owner/1' live in the protocol core so
-%% stdio decides the same way this transport does.
-tasks_available(undefined) -> false;
-tasks_available(Ctx) -> barrel_mcp_protocol:tasks_enabled(Ctx).
-
+%% `task_owner/1' lives in the protocol core so stdio decides the same
+%% way this transport does.
 task_owner(undefined) -> undefined;
 task_owner(Ctx) -> barrel_mcp_protocol:task_owner(Ctx).
 
@@ -1563,6 +1558,20 @@ owned_session(SessionId, AuthInfo) ->
             end
     end.
 
+%% The timestamp feeds nothing but the TTL sweep, so rewriting it on
+%% every request buys a round-trip and no accuracy.
+touch_session(undefined) ->
+    ok;
+touch_session(SessionId) ->
+    Now = erlang:system_time(millisecond),
+    case barrel_mcp_session:last_activity(SessionId) of
+        {ok, LA} when Now - LA < ?ACTIVITY_RESOLUTION ->
+            ok;
+        _ ->
+            _ = barrel_mcp_session:update_activity(SessionId),
+            ok
+    end.
+
 %% What this connection settled on, preferring the header the client
 %% sends on every post-initialize request and falling back to what the
 %% session recorded at the handshake.
@@ -1594,10 +1603,21 @@ supported_version(Version, SessionId) ->
 
 %% A version arriving on a request outlives it: later requests on the
 %% same session may omit the header.
-remember_version(undefined, _Version) ->
-    ok;
 remember_version(SessionId, Version) ->
-    _ = barrel_mcp_session:set_protocol_version(SessionId, Version),
+    store_version(SessionId, Version).
+
+%% After the handshake every request carries the version the session
+%% already holds, so read before writing: the read is an ETS lookup,
+%% the write a call into the session manager.
+store_version(SessionId, Version) when is_binary(SessionId), is_binary(Version) ->
+    case barrel_mcp_session:get_protocol_version(SessionId) of
+        {ok, Version} ->
+            ok;
+        _ ->
+            _ = barrel_mcp_session:set_protocol_version(SessionId, Version),
+            ok
+    end;
+store_version(_SessionId, _Version) ->
     ok.
 
 unsupported_version_message(Version) ->
@@ -1618,8 +1638,7 @@ maybe_capture_initialize_version(
 ) when
     is_binary(SessionId)
 ->
-    _ = barrel_mcp_session:set_protocol_version(SessionId, Version),
-    ok;
+    store_version(SessionId, Version);
 maybe_capture_initialize_version(_, _, _) ->
     ok.
 
@@ -1670,7 +1689,7 @@ stream_get_sse_session(Headers, Responder, Config, SessionId, AuthInfo) ->
                 header(<<"last-event-id">>, Headers, undefined)
             ),
             _ = barrel_mcp_session:set_sse_pid(SessionId, self()),
-            sse_loop(Responder, SessionId);
+            sse_loop(Responder, SessionId, keepalive_interval(Config));
         {error, unknown_session} ->
             reply(
                 Responder,
@@ -1683,7 +1702,7 @@ stream_get_sse_session(Headers, Responder, Config, SessionId, AuthInfo) ->
 %% Long-lived SSE pump. Runs in the per-request process until the
 %% session is terminated, the client disconnects (`mcp_disconnect'
 %% from the binding) or a chunk write fails.
-sse_loop(Responder, SessionId) ->
+sse_loop(Responder, SessionId, Keepalive) ->
     receive
         session_terminated ->
             sse_cleanup(Responder, SessionId);
@@ -1695,7 +1714,7 @@ sse_loop(Responder, SessionId) ->
             case push_sse_event(Responder, EventId, Data) of
                 ok ->
                     _ = barrel_mcp_session:record_sse_event(SessionId, EventId, Data),
-                    sse_loop(Responder, SessionId);
+                    sse_loop(Responder, SessionId, Keepalive);
                 {error, _} ->
                     sse_cleanup(Responder, SessionId)
             end;
@@ -1704,12 +1723,21 @@ sse_loop(Responder, SessionId) ->
             case push_sse_event(Responder, EventId, Message) of
                 ok ->
                     _ = barrel_mcp_session:record_sse_event(SessionId, EventId, Message),
-                    sse_loop(Responder, SessionId);
+                    sse_loop(Responder, SessionId, Keepalive);
                 {error, _} ->
                     sse_cleanup(Responder, SessionId)
             end;
         _Other ->
-            sse_loop(Responder, SessionId)
+            sse_loop(Responder, SessionId, Keepalive)
+    after Keepalive ->
+        %% An SSE comment. Nothing else is ever written on a quiet
+        %% stream, so this is both what stops an intermediary dropping
+        %% it and what turns a peer that vanished without a FIN into a
+        %% write error instead of a session held open for ever.
+        case stream_chunk(Responder, <<":\r\n">>) of
+            ok -> sse_loop(Responder, SessionId, Keepalive);
+            {error, _} -> sse_cleanup(Responder, SessionId)
+        end
     end.
 
 sse_cleanup(Responder, SessionId) ->
@@ -1778,7 +1806,7 @@ legacy_sse_open(Headers, Responder, Config) ->
         _ = stream_chunk(Responder, endpoint_event(SessionId, Config)),
         _ = barrel_mcp_session:set_sse_pid(SessionId, self()),
         try
-            sse_loop(Responder, SessionId)
+            sse_loop(Responder, SessionId, keepalive_interval(Config))
         after
             %% The stream is the session, and the last write on the way
             %% out goes to a socket the peer has already closed. Letting

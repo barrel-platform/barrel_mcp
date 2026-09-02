@@ -6,10 +6,12 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--import(barrel_mcp_test_helpers, [wait_ready/2]).
+-import(barrel_mcp_test_helpers, [wait_ready/2, wait_until/2]).
 
 -export([slow_handler/1]).
 
+%% Where the parked tool reports in and waits for its release.
+-define(GATE, barrel_mcp_progress_gate).
 -define(PORT, 19393).
 -define(URL, <<"http://127.0.0.1:19393/mcp">>).
 
@@ -41,7 +43,11 @@ cleanup_loopback(_) ->
 
 test_ping_keeps_alive() ->
     {ok, Pid} = start_client(#{ping_interval => 100}),
-    timer:sleep(450),
+    Before = request_id(Pid),
+    %% Wait for pings to be sent rather than sleeping past a cadence:
+    %% every outbound request, ping included, consumes an id.
+    wait_until(fun() -> request_id(Pid) >= Before + 3 end, 5000),
+    ?assert(request_id(Pid) >= Before + 3),
     ?assert(is_process_alive(Pid)),
     %% A regular request still works while pings interleave.
     {ok, _} = barrel_mcp_client:server_info(Pid),
@@ -49,7 +55,11 @@ test_ping_keeps_alive() ->
 
 test_ping_disabled_by_default() ->
     {ok, Pid} = start_client(#{}),
+    Before = request_id(Pid),
+    %% Proving a negative needs a window. Nothing may consume an id in
+    %% it; load can only make a stray ping more likely to be caught.
     timer:sleep(300),
+    ?assertEqual(Before, request_id(Pid)),
     ?assert(is_process_alive(Pid)),
     barrel_mcp_client:close(Pid).
 
@@ -60,6 +70,7 @@ test_progress_lifecycle() ->
     {ok, Pid} = start_client(#{}),
     Self = self(),
     Tok = <<"prog-lifecycle-1">>,
+    true = register(?GATE, self()),
     Caller = spawn_link(fun() ->
         Res = barrel_mcp_client:call_tool(
             Pid,
@@ -69,8 +80,19 @@ test_progress_lifecycle() ->
         ),
         Self ! {settled, Res}
     end),
-    %% Wait until the token is visible in the gen_statem's progress map.
-    wait_progress_present(Pid, Tok, 50),
+    try
+        Worker =
+            receive
+                {parked, W} -> W
+            after 5000 -> error(tool_never_ran)
+            end,
+        %% The token is visible in the gen_statem's progress map for as
+        %% long as the tool stays parked.
+        wait_progress_present(Pid, Tok, 50),
+        Worker ! release
+    after
+        unregister(?GATE)
+    end,
     receive
         {settled, {ok, _}} -> ok
     after 5000 ->
@@ -97,10 +119,20 @@ start_client(Extras) ->
     wait_ready(Pid, 30),
     {ok, Pid}.
 
-%% slow tool handler, gives the test time to inspect the progress
-%% map before the response settles.
+%% Parks until the test releases it, so the window in which the
+%% progress entry is observable is as long as the test needs instead of
+%% a sleep the poller has to land inside.
 slow_handler(_Args) ->
-    timer:sleep(200),
+    case whereis(?GATE) of
+        undefined ->
+            ok;
+        Gate ->
+            Gate ! {parked, self()},
+            receive
+                release -> ok
+            after 10000 -> ok
+            end
+    end,
     <<"done">>.
 
 wait_progress_present(_Pid, _Tok, 0) ->
@@ -124,6 +156,11 @@ wait_progress_absent(Pid, Tok, N) ->
         _ ->
             ok
     end.
+
+%% Same record-layout contract as progress_map/1 below.
+request_id(Pid) ->
+    {_State, Data} = sys:get_state(Pid),
+    element(4, Data).
 
 progress_map(Pid) ->
     {_State, Data} = sys:get_state(Pid),

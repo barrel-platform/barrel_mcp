@@ -123,14 +123,17 @@ url(Message, Url, Ctx, Extra) when is_binary(Message), is_binary(Url) ->
 
 %% 2026-07-28 removed `elicitationId'; 2025-11-25 requires it
 %% (`elicitation.mdx:345').
-with_elicitation_id(Params, _Host, Ctx) when map_get(era, Ctx) =:= modern ->
-    {ok, Params};
 with_elicitation_id(Params, Host, Ctx) ->
-    Principal = barrel_mcp_ctx:principal(Ctx),
-    SessionId = barrel_mcp_ctx:session_id(Ctx),
-    case gen_server:call(?MODULE, {create, Principal, SessionId, Host}) of
-        {ok, Id} -> {ok, Params#{<<"elicitationId">> => Id}};
-        {error, _} = Err -> Err
+    case barrel_mcp_ctx:is_modern(Ctx) of
+        true ->
+            {ok, Params};
+        false ->
+            Principal = barrel_mcp_ctx:principal(Ctx),
+            SessionId = barrel_mcp_ctx:session_id(Ctx),
+            case gen_server:call(?MODULE, {create, Principal, SessionId, Host}) of
+                {ok, Id} -> {ok, Params#{<<"elicitationId">> => Id}};
+                {error, _} = Err -> Err
+            end
     end.
 
 %%====================================================================
