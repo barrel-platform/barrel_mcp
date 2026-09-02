@@ -312,9 +312,14 @@ outbound_notifications_are_bounded(_Config) ->
     try
         barrel_mcp_stdio_io:stall(Dev),
         [Server ! {stdio_notify, a_notification(N)} || N <- lists:seq(1, 50)],
-        %% handle_call is the barrier: it is answered behind everything
-        %% already in the mailbox, so the drops have all happened.
+        %% handle_call only proves the notifications were queued: the
+        %% coordinator drains them one at a time through a spawned
+        %% process, so the drops are still happening behind it. Wait
+        %% for the queue to empty, or the writer resumes mid-drain and
+        %% frees room for more than the cap.
         ok = gen_server:call(Server, sync),
+        wait_until(fun() -> drained(Server) end, 5000),
+        ?assert(drained(Server)),
         barrel_mcp_stdio_io:resume(Dev),
 
         Seen = [barrel_mcp_stdio_io:next_line(Dev) || _ <- lists:seq(1, Cap)],
@@ -328,6 +333,13 @@ outbound_notifications_are_bounded(_Config) ->
     after
         stop_server(Dev, Server)
     end.
+
+%% `notifying' and `notif_len' of the coordinator's state record: it
+%% has drained when nothing is queued and nothing is in flight. New
+%% fields go at the end of that record, or these read the wrong ones.
+drained(Server) ->
+    State = sys:get_state(Server),
+    element(13, State) =:= 0 andalso element(14, State) =:= 0.
 
 legacy_subscribe_is_served(_Config) ->
     ok = barrel_mcp:reg_resource(<<"watched">>, ?MODULE, a_resource, #{uri => ?WATCHED}),
