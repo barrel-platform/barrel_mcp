@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `barrel_mcp_auth_bearer` refuses `audience => any` unless a
+  `verifier` fun is configured, returning
+  `{error, audience_any_requires_verifier}`. `any` skips the `aud`
+  check entirely, including a token that carries none, so something
+  else has to check the recipient; that is what the option's warning
+  has always said and nothing enforced.
+
+### Added
+
+- `url_policy` on the OAuth client config: a
+  `fun((binary()) -> ok | {error, term()})` every URL the handle is
+  about to fetch passes through, whether it came from the host's own
+  config or from a document the server served. Without one the handle
+  fetches any `https` URL the server names, as before.
+- `sse_keepalive_ms` (default 15000): how often any stream the server
+  holds open emits an SSE comment. `subscription_keepalive_ms` remains
+  as the older name for it.
+
+### Changed
+
+- A `resource_metadata` URL in a `WWW-Authenticate` header is used
+  only when it is on the same origin as the MCP server, which is
+  where RFC 9728 section 5.1 puts it. Anywhere else it is dropped and
+  the well-known paths on the server's own origin answer instead.
+- A legacy request no longer rewrites the session values it already
+  holds: the negotiated version is read before being written, the
+  engine no longer repeats the write the protocol just made on
+  `initialize`, and the activity timestamp is refreshed at the
+  resolution the TTL sweep actually reads it at.
+
+### Fixed
+
+- A quiet standalone SSE stream is kept alive. Nothing was ever
+  written on one, so a peer that went away without closing left its
+  process, its session and its `sse_pid` in place indefinitely, and an
+  intermediary was free to drop the connection.
+- A listener whose port is still being released by a just-killed
+  predecessor retries the bind briefly instead of spending one of the
+  supervisor's three restarts per minute.
+
 ### Added
 
 - `max_requests` listen option (default 10000): requests in flight per

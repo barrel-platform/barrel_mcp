@@ -35,7 +35,8 @@ barrel_mcp:start_http(#{
             issuer => <<"https://auth.example.com">>,
 
             %% Required: the resource this server is. Tokens issued for
-            %% another audience are rejected. `any` opts out (noncompliant)
+            %% another audience are rejected. `any` hands the check to
+            %% a `verifier` and is refused without one (noncompliant)
             %% for a verifier that checks the recipient itself.
             audience => <<"https://api.example.com">>,
 
