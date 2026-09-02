@@ -43,7 +43,9 @@
     modern_erlang_client_against_python_server/1,
     modern_erlang_client_drives_input_required/1,
     sse_python_client_against_erlang_server/1,
-    stdio_python_client_against_erlang_server/1
+    stdio_python_client_against_erlang_server/1,
+    python_client_over_http2/1,
+    modern_python_client_over_http2/1
 ]).
 
 %% Tool / resource / prompt handlers exported for the registry.
@@ -86,7 +88,9 @@ all() ->
         modern_erlang_client_against_python_server,
         modern_erlang_client_drives_input_required,
         sse_python_client_against_erlang_server,
-        stdio_python_client_against_erlang_server
+        stdio_python_client_against_erlang_server,
+        python_client_over_http2,
+        modern_python_client_over_http2
     ].
 
 %% The two SDK generations live in separate virtualenvs: v1 speaks the
@@ -133,33 +137,58 @@ post_only_python_client_against_erlang_server(Config) ->
         legacy_direction_a(Python, ["--post-only"])
     end).
 
+%% Both SDK generations over TLS and HTTP/2: the same scripts, told to
+%% negotiate h2 by ALPN and to verify the listener's chain. The script
+%% fails on its own if any response arrived over HTTP/1.1.
+python_client_over_http2(Config) ->
+    with_python(python, Config, "INTEROP_PYTHON", fun(Python) ->
+        #{cacertfile := Ca} = Tls = barrel_mcp_test_helpers:tls_files(?config(priv_dir, Config)),
+        legacy_direction_a(Python, ["--http2", "--cacert", Ca], #{
+            ssl => maps:with([certfile, keyfile], Tls)
+        })
+    end).
+
+modern_python_client_over_http2(Config) ->
+    with_python(python_modern, Config, "INTEROP_PYTHON_MODERN", fun(Python) ->
+        #{cacertfile := Ca} = Tls = barrel_mcp_test_helpers:tls_files(?config(priv_dir, Config)),
+        modern_direction_a(Python, ["--http2", "--cacert", Ca], #{
+            ssl => maps:with([certfile, keyfile], Tls)
+        })
+    end).
+
 legacy_direction_a(Python) ->
     legacy_direction_a(Python, []).
 
 legacy_direction_a(Python, Flags) ->
+    legacy_direction_a(Python, Flags, #{}).
+
+legacy_direction_a(Python, Flags, Extra) ->
     ok = ensure_fixture(),
-    {ok, _} = barrel_mcp:start_http_stream(#{
+    {ok, _} = barrel_mcp:start_http_stream(Extra#{
         port => ?PORT,
         session_enabled => true
     }),
-    Url = io_lib:format("http://127.0.0.1:~B/mcp", [?PORT]),
+    Url = io_lib:format("~s://127.0.0.1:~B/mcp", [scheme(Extra), ?PORT]),
     Script = filename:join(["test", "interop", "client.py"]),
     Cwd = root_dir(),
     Args = [Script, lists:flatten(Url) | Flags],
-    {Status, Output} = run_python(Python, Args, Cwd),
-    case Status of
-        0 ->
-            true = string:find(Output, "OK") =/= nomatch,
-            ok;
-        _ ->
-            ct:fail({python_client_failed, Status, Output})
-    end,
     try
-        barrel_mcp:stop_http_stream()
-    catch
-        _:_ -> ok
+        {Status, Output} = run_python(Python, Args, Cwd),
+        case Status of
+            0 ->
+                true = string:find(Output, "OK") =/= nomatch,
+                ok;
+            _ ->
+                ct:fail({python_client_failed, Status, Output})
+        end
+    after
+        try
+            barrel_mcp:stop_http_stream()
+        catch
+            _:_ -> ok
+        end,
+        cleanup_fixture()
     end,
-    cleanup_fixture(),
     ok.
 
 %%====================================================================
@@ -321,12 +350,15 @@ child_args() ->
         ["-eval", "barrel_mcp_stdio_child:start()"].
 
 modern_direction_a(Python) ->
+    modern_direction_a(Python, [], #{}).
+
+modern_direction_a(Python, Flags, Extra) ->
     ok = ensure_modern_fixture(),
-    {ok, _} = barrel_mcp:start_http_stream(#{port => ?MODERN_PORT}),
-    Url = lists:flatten(io_lib:format("http://127.0.0.1:~B/mcp", [?MODERN_PORT])),
+    {ok, _} = barrel_mcp:start_http_stream(Extra#{port => ?MODERN_PORT}),
+    Url = lists:flatten(io_lib:format("~s://127.0.0.1:~B/mcp", [scheme(Extra), ?MODERN_PORT])),
     Script = filename:join(["test", "interop", "client_modern.py"]),
     try
-        case run_python(Python, [Script, Url], root_dir()) of
+        case run_python(Python, [Script, Url | Flags], root_dir()) of
             {0, Output} ->
                 ?assertNotEqual(nomatch, string:find(Output, "OK"));
             {Status, Output} ->
@@ -1136,6 +1168,9 @@ with_python(Key, Config, Var, Fun) ->
         undefined -> {skip, Var ++ " not set; run `make interop-test`"};
         Python -> Fun(Python)
     end.
+
+scheme(#{ssl := _}) -> "https";
+scheme(_) -> "http".
 
 root_dir() ->
     %% CT runs from a deep _build directory; resolve to the project

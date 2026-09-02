@@ -15,14 +15,53 @@ about us.
 
 from __future__ import annotations
 
+import faulthandler
+import ssl
 import sys
 import traceback
 
 import anyio
+import httpx2
 from mcp import InputRequiredRoundsExceededError, MCPError, types
 from mcp.client import Client
+from mcp.client.streamable_http import streamable_http_client
 from mcp.client.subscriptions import ResourceUpdated
 from mcp.types.version import LATEST_MODERN_VERSION
+
+
+#: Set by main(): {"http2": bool, "cacert": str | None}.
+HTTP: dict = {"http2": False, "cacert": None}
+#: Every HTTP version a response arrived over, for the --http2 check.
+SEEN_VERSIONS: set[str] = set()
+
+
+async def note_version(response: httpx2.Response) -> None:
+    SEEN_VERSIONS.add(response.http_version)
+
+
+def http_client() -> httpx2.AsyncClient:
+    verify: ssl.SSLContext | bool = True
+    if HTTP["cacert"]:
+        verify = ssl.create_default_context(cafile=HTTP["cacert"])
+        verify.check_hostname = False
+        # Python 3.13 verifies strictly by default and then wants an
+        # Authority Key Identifier the minted test chain does not carry.
+        verify.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    return httpx2.AsyncClient(
+        timeout=httpx2.Timeout(30.0, read=300.0),
+        follow_redirects=True,
+        http2=HTTP["http2"],
+        verify=verify,
+        event_hooks={"response": [note_version]},
+    )
+
+
+def server(url: str):
+    """What `Client` connects to: the bare URL, or a transport over an
+    HTTP client configured for TLS and HTTP/2 when the flags ask."""
+    if not HTTP["http2"] and not HTTP["cacert"]:
+        return url
+    return streamable_http_client(url, http_client=http_client())
 
 
 EXPECTED_TOOL = "echo"
@@ -46,7 +85,7 @@ async def elicit(context, params: types.ElicitRequestParams):
 
 async def probe(url: str) -> None:
     """`auto` must land on the modern era via server/discover."""
-    async with Client(url, mode="auto") as client:
+    async with Client(server(url), mode="auto") as client:
         if client.protocol_version != LATEST_MODERN_VERSION:
             fail(f"probe negotiated {client.protocol_version!r}")
         if client.server_info is None:
@@ -122,7 +161,7 @@ async def undeclared_capability_is_refused(url: str) -> None:
     the same tool has to fail with MissingRequiredClientCapability
     rather than reach a client that cannot answer.
     """
-    async with Client(url, mode="auto", raise_exceptions=True) as client:
+    async with Client(server(url), mode="auto", raise_exceptions=True) as client:
         try:
             await client.call_tool("confirm", {})
         except BaseException as exc:  # noqa: BLE001 - group-wrapped by anyio
@@ -196,7 +235,7 @@ async def mirrored_header_round_trip(client: Client) -> None:
 async def input_rounds_are_capped(url: str) -> None:
     """A server that keeps asking has to be stopped by the client."""
     async with Client(
-        url,
+        server(url),
         mode="auto",
         elicitation_callback=elicit,
         input_required_max_rounds=3,
@@ -284,13 +323,13 @@ async def logs_are_opt_in(url: str) -> None:
 
         return handler
 
-    async with Client(url, mode="auto", logging_callback=collect(quiet)) as client:
+    async with Client(server(url), mode="auto", logging_callback=collect(quiet)) as client:
         await client.call_tool("noisy", {})
     if quiet:
         fail(f"a client that never opted in received {quiet}")
 
     async with Client(
-        url, mode="auto", log_level="info", logging_callback=collect(loud)
+        server(url), mode="auto", log_level="info", logging_callback=collect(loud)
     ) as client:
         await client.call_tool("noisy", {})
     # `debug` is below the level we asked for.
@@ -300,7 +339,7 @@ async def logs_are_opt_in(url: str) -> None:
 
 async def run(url: str) -> None:
     await probe(url)
-    async with Client(url, mode="auto", elicitation_callback=elicit) as client:
+    async with Client(server(url), mode="auto", elicitation_callback=elicit) as client:
         await catalogue(client)
         await pages_are_walked(client)
         await results_are_stamped(client)
@@ -317,15 +356,27 @@ async def run(url: str) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        fail("usage: client_modern.py <server-url>")
+    # A silent hang is the worst failure to debug from CT: dump every
+    # task's stack and exit before the suite's own timeout hits.
+    faulthandler.dump_traceback_later(45, exit=True)
+    argv = sys.argv[1:]
+    if "--cacert" in argv:
+        i = argv.index("--cacert")
+        HTTP["cacert"] = argv[i + 1]
+        del argv[i : i + 2]
+    HTTP["http2"] = "--http2" in argv
+    args = [a for a in argv if a != "--http2"]
+    if len(args) != 1:
+        fail("usage: client_modern.py <server-url> [--http2] [--cacert FILE]")
     try:
-        anyio.run(run, sys.argv[1])
+        anyio.run(run, args[0])
     except SystemExit:
         raise
     except Exception:
         traceback.print_exc()
         fail("unhandled exception")
+    if HTTP["http2"] and SEEN_VERSIONS != {"HTTP/2"}:
+        fail(f"expected every response over HTTP/2, saw {sorted(SEEN_VERSIONS)}")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `max_requests` listen option (default 10000): requests in flight per
+  listener, streams included; past it a request is answered 503 with
+  `retry-after: 1` before its body is read.
+  `barrel_mcp_http_listener:in_flight/1` reports the count.
+- `max_body_bytes` listen option (default 16 MiB); a body past it is
+  answered 413 instead of being dropped to an empty body.
+- `body_timeout_ms` listen option (default 60000); a body that does
+  not arrive in time is answered 408.
+- Tests for TLS, ALPN and HTTP/2 on the built-in listener, with a
+  chain minted by `public_key:pkix_test_data/1`: both protocols on one
+  port, the standalone stream and a disconnect over HTTP/2, both caps,
+  a reset mid-body, a plain-TCP client on a TLS port, a port or a name
+  already taken.
+- The Python interop drives both SDK generations over TLS and HTTP/2
+  (`--http2 --cacert` on the client scripts; the scripts fail if any
+  response arrived over HTTP/1.1), and each script dumps every task's
+  stack and exits if it is still running after 40 s, so a hang is a
+  traceback rather than a silent timeout.
+
+### Changed
+
+- The built-in listener hands each accepted socket to
+  `h1:serve_socket/2` or `h2:serve_socket/2` after the TLS handshake
+  and ALPN, instead of running its own connection loops over
+  `h1_connection` and `h2_connection`. The wire library owns framing,
+  pipelining order and the per-request process; the listener keeps
+  the acceptors, the caps and a per-request translator that feeds the
+  engine and forwards resets as `mcp_disconnect`.
+- Depends on `h1` 0.9.1: a chunked request body split between the CR
+  and LF of a chunk-size line was answered 400.
+
+### Fixed
+
+- HTTP/2 requests lost their body: the listener's h2 loop never
+  received the DATA frames, so every POST was answered 400 and the
+  answer itself failed on a connection already gone.
+- The standalone SSE stream and the 2024-11-05 stream could not be
+  opened over HTTP/2: their headers carried `connection: keep-alive`,
+  which HTTP/2 forbids, h2 refused the response, and the engine looped
+  on a stream the client never saw. The header is gone, the h2
+  responder strips connection-specific headers, and a refused
+  `stream_start` ends the request.
+
 ## [3.0.1] - 2026-08-30
 
 ### Changed

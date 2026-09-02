@@ -67,7 +67,7 @@ start_listener(Opts, Port, Ip, Loopback, AllowedOrigins, AuthConfig0) ->
     },
     ListenOpts = maps:merge(
         #{port => Port, ip => Ip, ssl => normalize_ssl(Opts)},
-        maps:with([max_connections, acceptors], Opts)
+        maps:with([max_connections, acceptors, max_requests, max_body_bytes, body_timeout_ms], Opts)
     ),
     barrel_mcp_listener_sup:start_listener(?HTTP_LISTENER, ListenOpts, EngineConfig).
 
