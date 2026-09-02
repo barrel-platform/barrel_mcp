@@ -775,6 +775,53 @@ issues as `token_type: DPoP` is presented with the `DPoP` scheme, and a
 proof carrying the nonce. The key lives in the handle and is never
 stored.
 
+## What the handle fetches
+
+A 401 hands the client a `WWW-Authenticate` header, and that header
+names a document, which names an authorization server, which names a
+token endpoint. Everything after the first hop is chosen by the server
+you are talking to. Two rules bound it:
+
+- The `resource_metadata` URL must be on the same origin as the MCP
+  server (RFC 9728 section 5.1). A URL anywhere else is dropped and
+  the well-known paths on the server's own origin are used instead.
+- Everything else is only required to be `https`. The authorization
+  server legitimately lives on another host, so there is no origin
+  rule to apply, and the token endpoint it names is where the
+  authorization code, the refresh token and the client secret go.
+
+`url_policy` is where you narrow that second rule. Every URL the
+handle is about to fetch passes through it, whether it came from your
+config or from a document the server served:
+
+```erlang
+Allowed = [<<"https://login.example.com">>, <<"https://mcp.example.com">>],
+Policy = fun(Url) ->
+    #{host := Host, scheme := Scheme} = uri_string:parse(Url),
+    Origin = <<Scheme/binary, "://", Host/binary>>,
+    case lists:member(Origin, Allowed) of
+        true -> ok;
+        false -> {error, {origin_not_allowed, Origin}}
+    end
+end,
+
+{oauth, #{
+    redirect_uri => <<"http://127.0.0.1:8765/callback">>,
+    authorize => fun open_browser/1,
+    url_policy => Policy
+}}
+```
+
+Anything the fun returns other than `ok` is a refusal, reported as
+`{refused_url, Url, Reason}` inside the error for the stage that was
+refused. With no policy the handle fetches any `https` URL the server
+names, which is the default because an allow-list is deployment
+knowledge the library does not have.
+
+At minimum, refuse link-local and cloud metadata addresses
+(`169.254.0.0/16`, `fd00:ec2::254`) and anything resolving inside your
+own network. Redirects are never followed on any of these requests.
+
 ## Plaintext authorization servers
 
 Every authorization-server URL the client uses, configured or
