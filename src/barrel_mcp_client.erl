@@ -1556,7 +1556,7 @@ build_initialize_params(#data{spec = Spec}) ->
         Spec,
         #{
             <<"name">> => <<"barrel_mcp_client">>,
-            <<"version">> => <<"3.0.1">>
+            <<"version">> => barrel_mcp:version()
         }
     ),
     ClientInfo = normalize_keys(ClientInfo0),

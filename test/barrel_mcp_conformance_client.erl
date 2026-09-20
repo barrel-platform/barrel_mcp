@@ -47,7 +47,7 @@ run() ->
     Spec = #{
         transport => {http, Url},
         protocol_version => Version,
-        client_info => #{name => <<"barrel_mcp-conformance">>, version => <<"3.0.1">>},
+        client_info => #{name => <<"barrel_mcp-conformance">>, version => barrel_mcp:version()},
         capabilities => #{
             roots => #{listChanged => true},
             sampling => #{},

@@ -3,7 +3,7 @@
 Design notes for features that are **not yet implemented** and likely
 worth doing. Each entry is sized to be picked up as one focused PR.
 
-**Nothing is pending as of 3.0.0.** The last entry here, Dynamic Client
+**Nothing is pending as of 4.0.0.** The last entry here, Dynamic Client
 Registration (RFC 7591), shipped and has since been deprecated by the
 specification in favour of Client ID Metadata Documents, which shipped
 alongside it. See [Client registration](../guides/authentication.md#client-registration).

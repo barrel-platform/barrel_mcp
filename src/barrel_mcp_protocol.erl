@@ -677,7 +677,7 @@ server_info_meta() ->
 server_info() ->
     #{
         <<"name">> => application:get_env(barrel_mcp, server_name, <<"barrel">>),
-        <<"version">> => application:get_env(barrel_mcp, server_version, <<"1.0.0">>)
+        <<"version">> => application:get_env(barrel_mcp, server_version, barrel_mcp:version())
     }.
 
 %% What an `initialize' response advertises, for the revision that was
