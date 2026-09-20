@@ -5,7 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [4.0.0] - 2026-09-20
+
+### Upgrading from 3.0.1
+
+One thing to check, and only if you configured the bearer provider
+with `audience => any`:
+
+- With a `verifier` fun, nothing changes: `any` still hands the
+  recipient check to it.
+- Without one, `init/1` now returns
+  `{error, audience_any_requires_verifier}` and the listener does not
+  start. Name the resource instead, which is what a token is issued
+  for: `audience => <<"https://your-server/mcp">>`.
+
+Everything else is additive. The listener gained three caps
+(`max_requests`, `max_body_bytes`, `body_timeout_ms`) with defaults
+that do not change how an existing deployment behaves, and the OAuth
+client's `url_policy` is opt-in.
 
 ### Breaking
 
@@ -27,35 +44,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holds open emits an SSE comment. `subscription_keepalive_ms` remains
   as the older name for it.
 
-### Changed
-
-- A `resource_metadata` URL in a `WWW-Authenticate` header is used
-  only when it is on the same origin as the MCP server, which is
-  where RFC 9728 section 5.1 puts it. Anywhere else it is dropped and
-  the well-known paths on the server's own origin answer instead.
-- A legacy request no longer rewrites the session values it already
-  holds: the negotiated version is read before being written, the
-  engine no longer repeats the write the protocol just made on
-  `initialize`, and the activity timestamp is refreshed at the
-  resolution the TTL sweep actually reads it at.
-
-### Fixed
-
-- A session holding an open SSE stream is no longer swept as idle.
-  Only the POST path refreshes the activity timestamp, so a client
-  that held its stream and went quiet lost its session on a healthy
-  server after `session_ttl`, had its stream killed, and got 404 on
-  its next request. A client that does not re-handshake on that 404
-  is stuck until it reconnects.
-- A quiet standalone SSE stream is kept alive. Nothing was ever
-  written on one, so a peer that went away without closing left its
-  process, its session and its `sse_pid` in place indefinitely, and an
-  intermediary was free to drop the connection.
-- A listener whose port is still being released by a just-killed
-  predecessor retries the bind briefly instead of spending one of the
-  supervisor's three restarts per minute.
-
-### Added
 
 - `max_requests` listen option (default 10000): requests in flight per
   listener, streams included; past it a request is answered 503 with
@@ -78,6 +66,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The version is written in one place, `barrel_mcp.app.src`.
+  `barrel_mcp:version/0` reads it, and the `server_version`
+  application environment key is now an override rather than a second
+  copy: unset, the `serverInfo` stamp carries the library's own
+  version.
+- A `resource_metadata` URL in a `WWW-Authenticate` header is used
+  only when it is on the same origin as the MCP server, which is
+  where RFC 9728 section 5.1 puts it. Anywhere else it is dropped and
+  the well-known paths on the server's own origin answer instead.
+- A legacy request no longer rewrites the session values it already
+  holds: the negotiated version is read before being written, the
+  engine no longer repeats the write the protocol just made on
+  `initialize`, and the activity timestamp is refreshed at the
+  resolution the TTL sweep actually reads it at.
+
+
 - The built-in listener hands each accepted socket to
   `h1:serve_socket/2` or `h2:serve_socket/2` after the TLS handshake
   and ALPN, instead of running its own connection loops over
@@ -90,6 +94,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A session holding an open SSE stream is no longer swept as idle.
+  Only the POST path refreshes the activity timestamp, so a client
+  that held its stream and went quiet lost its session on a healthy
+  server after `session_ttl`, had its stream killed, and got 404 on
+  its next request. A client that does not re-handshake on that 404
+  is stuck until it reconnects.
+- A quiet standalone SSE stream is kept alive. Nothing was ever
+  written on one, so a peer that went away without closing left its
+  process, its session and its `sse_pid` in place indefinitely, and an
+  intermediary was free to drop the connection.
+- A listener whose port is still being released by a just-killed
+  predecessor retries the bind briefly instead of spending one of the
+  supervisor's three restarts per minute.
+
+
 - HTTP/2 requests lost their body: the listener's h2 loop never
   received the DATA frames, so every POST was answered 400 and the
   answer itself failed on a connection already gone.
@@ -99,6 +118,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on a stream the client never saw. The header is gone, the h2
   responder strips connection-specific headers, and a refused
   `stream_start` ends the request.
+- `barrel_mcp_client:subscribe/2` in the modern era returned as soon
+  as the `subscriptions/listen` request was on the wire. The server
+  registers the filter in a different process from the one running the
+  next request, so a change triggered right after subscribe returned
+  could be emitted with nobody subscribed and the notification lost.
+  It now returns once the server has acknowledged the filter, and
+  answers anyway after five seconds if nothing acknowledges it.
 
 ## [3.0.1] - 2026-08-30
 

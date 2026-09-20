@@ -49,6 +49,8 @@
 -include("barrel_mcp.hrl").
 
 %% Tool API
+-export([version/0]).
+
 -export([
     reg_tool/4,
     unreg_tool/1,
@@ -135,6 +137,16 @@
     whereis_client/1,
     list_clients/0
 ]).
+
+%% @doc This library's version, as its application resource states it.
+%% One place says it; everything else reads it from here.
+-spec version() -> binary().
+version() ->
+    _ = application:load(barrel_mcp),
+    case application:get_key(barrel_mcp, vsn) of
+        {ok, Vsn} -> list_to_binary(Vsn);
+        undefined -> <<"0.0.0">>
+    end.
 
 %%====================================================================
 %% Tool API
