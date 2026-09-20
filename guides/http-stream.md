@@ -201,7 +201,7 @@ unaffected by everything in this section.
 When `session_enabled` is `true` (default), the server tracks client sessions:
 
 - Each client receives an `Mcp-Session-Id` header in responses
-- Sessions expire after 30 minutes of inactivity (configurable via `session_ttl` env)
+- Sessions expire after 30 minutes of inactivity (configurable via `session_ttl` env). A session holding an open SSE stream is not idle, however long the client has gone without posting: only the POST path refreshes the timestamp, and the peer is demonstrably still there. The stream's keepalive (`sse_keepalive_ms`) is what notices a peer that went away, after which the session ages out normally.
 - GET requests open SSE streams for server notifications
 - DELETE requests terminate sessions
 

@@ -41,6 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A session holding an open SSE stream is no longer swept as idle.
+  Only the POST path refreshes the activity timestamp, so a client
+  that held its stream and went quiet lost its session on a healthy
+  server after `session_ttl`, had its stream killed, and got 404 on
+  its next request. A client that does not re-handshake on that 404
+  is stuck until it reconnects.
 - A quiet standalone SSE stream is kept alive. Nothing was ever
   written on one, so a peer that went away without closing left its
   process, its session and its `sse_pid` in place indefinitely, and an

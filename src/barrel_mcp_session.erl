@@ -677,6 +677,18 @@ notify_progress(SessionId, Token, Progress, Total) ->
 cleanup_expired(TTL) ->
     gen_server:call(?MODULE, {cleanup_expired, TTL}).
 
+%% Idle means nothing has come in and nobody is listening. A session
+%% whose stream is still held is neither: the peer is connected,
+%% however long it has gone without posting, and only the POST path
+%% refreshes the timestamp. The stream's keepalive is what notices a
+%% peer that went away, and it clears `sse_pid' on the way out so the
+%% session ages out then.
+expired(#mcp_session{last_activity = LA, sse_pid = Pid}, Cutoff) ->
+    LA < Cutoff andalso not holding_stream(Pid).
+
+holding_stream(Pid) when is_pid(Pid) -> is_process_alive(Pid);
+holding_stream(_) -> false.
+
 %% Trim a newest-first list to at most `Max' entries.
 trim(List, Max) when length(List) =< Max -> List;
 trim(List, Max) -> lists:sublist(List, Max).
@@ -924,13 +936,11 @@ handle_call({cleanup_expired, TTL}, _From, State) ->
     Now = erlang:system_time(millisecond),
     Cutoff = Now - TTL,
     Expired = ets:foldl(
-        fun
-            ({Id, #mcp_session{last_activity = LA}}, Acc) when
-                LA < Cutoff
-            ->
-                [Id | Acc];
-            (_, Acc) ->
-                Acc
+        fun({Id, Session}, Acc) ->
+            case expired(Session, Cutoff) of
+                true -> [Id | Acc];
+                false -> Acc
+            end
         end,
         [],
         ?SESSION_TABLE
@@ -952,13 +962,11 @@ handle_info(cleanup, State) ->
     Now = erlang:system_time(millisecond),
     Cutoff = Now - TTL,
     Expired = ets:foldl(
-        fun
-            ({Id, #mcp_session{last_activity = LA}}, Acc) when
-                LA < Cutoff
-            ->
-                [Id | Acc];
-            (_, Acc) ->
-                Acc
+        fun({Id, Session}, Acc) ->
+            case expired(Session, Cutoff) of
+                true -> [Id | Acc];
+                false -> Acc
+            end
         end,
         [],
         ?SESSION_TABLE
