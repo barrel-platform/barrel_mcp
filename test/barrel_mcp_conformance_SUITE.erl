@@ -620,8 +620,8 @@ with_logging(_, Ctx) ->
     ok = barrel_mcp:log(Ctx, info, <<"Tool execution completed">>),
     <<"Tool with logging executed">>.
 
-%% Legacy sampling: the session's channel. Modern callers use the
-%% input_required tools instead.
+%% Legacy sampling, over this request's own stream. Modern callers use
+%% the input_required tools instead.
 sampling(#{<<"prompt">> := Prompt}, Ctx) ->
     Params = #{
         <<"messages">> => [
@@ -632,7 +632,7 @@ sampling(#{<<"prompt">> := Prompt}, Ctx) ->
         ],
         <<"maxTokens">> => 100
     },
-    case barrel_mcp:sampling_create_message(session(Ctx), Params, #{timeout_ms => 5000}) of
+    case barrel_mcp:sampling_create_message(session(Ctx), Params, ask_opts(Ctx)) of
         {ok, Result, _} ->
             Text = maps:get(<<"text">>, maps:get(<<"content">>, Result, #{}), <<>>),
             <<"LLM response: ", Text/binary>>;
@@ -656,7 +656,7 @@ elicitation(#{<<"message">> := Message}, Ctx) ->
             <<"required">> => [<<"username">>, <<"email">>]
         }
     },
-    case barrel_mcp:elicit_create(session(Ctx), Params, #{timeout_ms => 5000}) of
+    case barrel_mcp:elicit_create(session(Ctx), Params, ask_opts(Ctx)) of
         {ok, Result} ->
             Action = maps:get(<<"action">>, Result, <<"unknown">>),
             Content = maps:get(<<"content">>, Result, #{}),
@@ -730,13 +730,20 @@ elicitation_enums(_, Ctx) ->
 %% A blocking elicitation over whatever channel this request has.
 ask_client(Message, Schema, Ctx) ->
     Params = #{<<"message">> => Message, <<"requestedSchema">> => Schema},
-    Opts = #{timeout_ms => 5000, channel => maps:get(channel, Ctx, undefined)},
+    Opts = ask_opts(Ctx),
     case barrel_mcp:elicit_create(session(Ctx), Params, Opts) of
         {ok, Result} ->
             text(io_lib:format("User response: ~s", [json:encode(Result)]));
         {error, Reason} ->
             {tool_error, [text(io_lib:format("elicitation failed: ~p", [Reason]))]}
     end.
+
+%% Every ask goes over the stream this request already has. Falling
+%% back to the session's standalone stream would make delivery depend
+%% on whether the client has opened one yet, and losing that race
+%% looks exactly like the server never asking.
+ask_opts(Ctx) ->
+    #{timeout_ms => 5000, channel => maps:get(channel, Ctx, undefined)}.
 
 %% MRTR: round one asks, round two answers with what came back.
 input_required_elicitation(_, Ctx) ->
