@@ -5,8 +5,9 @@
 // (SEP-2663 moved it into the tasks extension), so a task handle can
 // never pass. The upstream patch validates a `resultType: "task"`
 // result against the extension's own schema; this applies the same
-// rule to the pinned bundle with the extension's CreateTaskResult
-// requirements written out (ext-tasks schema/draft/schema.json).
+// rule to the pinned bundle, compiling the vendored copy of that
+// schema (test/schema_vectors/ext-tasks/schema.json) with the ajv the
+// runner already depends on.
 //
 // Idempotent. Refuses to run when the anchor is not found, which is
 // what an upstream release changing the validator looks like: then
@@ -32,21 +33,35 @@ const anchor =
 const replacement =
   'if(o.result!==void 0){if(o.result?.resultType===`task`&&!(`CreateTaskResult`in r.defs)){let bmErrs=__barrelTaskResultErrors(o.result,n);if(bmErrs.length>0)return bmErrs;return i(a(`JSONRPCResultResponse`,`JSONRPCResponse`),t)}let e=o.result?.resultType===`input_required`&&`InputRequiredResult`in r.defs?`InputRequiredResult`:n===void 0?void 0:r.resultDefs.get(n);';
 
+const schemaPath = path.join(
+  __dirname,
+  '..',
+  'schema_vectors',
+  'ext-tasks',
+  'schema.json'
+);
+const extTasksSchema = fs.readFileSync(schemaPath, 'utf8');
+
 const helper = `${marker}
+let __barrelTaskValidator;
 function __barrelTaskResultErrors(result, method) {
-  const errs = [];
-  const tag = (m) => errs.push(m + " (result of '" + method + "', tasks extension)");
-  if (typeof result.taskId !== 'string') tag("CreateTaskResult: must have required property 'taskId'");
-  const statuses = ['working', 'input_required', 'completed', 'failed', 'cancelled'];
-  if (!statuses.includes(result.status)) tag("CreateTaskResult/status: must be one of " + statuses.join(', '));
-  for (const k of ['createdAt', 'lastUpdatedAt']) {
-    if (typeof result[k] !== 'string') tag("CreateTaskResult: must have required property '" + k + "'");
+  if (__barrelTaskValidator === undefined) {
+    const Ajv2020 = require('ajv/dist/2020');
+    const addFormats = require('ajv-formats');
+    const ajv = new Ajv2020({ strict: false, allErrors: true });
+    addFormats(ajv);
+    ajv.addFormat('byte', true);
+    ajv.addSchema(${extTasksSchema}, 'barrel-ext-tasks');
+    __barrelTaskValidator = ajv.compile({
+      $ref: 'barrel-ext-tasks#/$defs/CreateTaskResult'
+    });
   }
-  if (!('ttlMs' in result)) tag("CreateTaskResult: must have required property 'ttlMs'");
-  else if (result.ttlMs !== null && !Number.isInteger(result.ttlMs)) tag('CreateTaskResult/ttlMs: must be integer or null');
-  if ('pollIntervalMs' in result && !Number.isInteger(result.pollIntervalMs)) tag('CreateTaskResult/pollIntervalMs: must be integer');
-  if ('statusMessage' in result && typeof result.statusMessage !== 'string') tag('CreateTaskResult/statusMessage: must be string');
-  return errs;
+  if (__barrelTaskValidator(result)) return [];
+  return (__barrelTaskValidator.errors || []).map(
+    (e) =>
+      "CreateTaskResult" + (e.instancePath || "") + ": " + e.message +
+      " (result of '" + method + "', tasks extension)"
+  );
 }
 `;
 

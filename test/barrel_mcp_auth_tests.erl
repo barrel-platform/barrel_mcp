@@ -6,6 +6,10 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
+%% What these tokens are for. The provider requires an audience, so
+%% every minted token carries one unless the case overrides it.
+-define(AUD, <<"https://mcp.test/mcp">>).
+
 %%====================================================================
 %% Test Fixtures
 %%====================================================================
@@ -122,7 +126,7 @@ test_bearer_hs256_valid() ->
         Secret
     ),
 
-    {ok, State} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => any}),
+    {ok, State} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => ?AUD}),
     Request = #{headers => #{<<"authorization">> => <<"Bearer ", Token/binary>>}},
     {ok, AuthInfo} = barrel_mcp_auth_bearer:authenticate(Request, State),
     ?assertEqual(<<"user123">>, maps:get(subject, AuthInfo)).
@@ -138,14 +142,16 @@ test_bearer_expired() ->
         Secret
     ),
 
-    {ok, State} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => any}),
+    {ok, State} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => ?AUD}),
     Request = #{headers => #{<<"authorization">> => <<"Bearer ", Token/binary>>}},
     ?assertEqual({error, expired_token}, barrel_mcp_auth_bearer:authenticate(Request, State)).
 
 test_bearer_wrong_secret() ->
     Token = create_hs256_jwt(#{<<"sub">> => <<"user123">>}, <<"secret1">>),
 
-    {ok, State} = barrel_mcp_auth_bearer:init(#{secret => <<"different-secret">>, audience => any}),
+    {ok, State} = barrel_mcp_auth_bearer:init(#{
+        secret => <<"different-secret">>, audience => ?AUD
+    }),
     Request = #{headers => #{<<"authorization">> => <<"Bearer ", Token/binary>>}},
     ?assertEqual({error, invalid_token}, barrel_mcp_auth_bearer:authenticate(Request, State)).
 
@@ -182,7 +188,7 @@ test_bearer_issuer() ->
     {ok, State1} = barrel_mcp_auth_bearer:init(#{
         secret => Secret,
         issuer => <<"https://auth.example.com">>,
-        audience => any
+        audience => ?AUD
     }),
     Request = #{headers => #{<<"authorization">> => <<"Bearer ", Token/binary>>}},
     {ok, _} = barrel_mcp_auth_bearer:authenticate(Request, State1),
@@ -191,7 +197,7 @@ test_bearer_issuer() ->
     {ok, State2} = barrel_mcp_auth_bearer:init(#{
         secret => Secret,
         issuer => <<"https://other.example.com">>,
-        audience => any
+        audience => ?AUD
     }),
     ?assertEqual({error, invalid_token}, barrel_mcp_auth_bearer:authenticate(Request, State2)).
 
@@ -230,7 +236,7 @@ test_bearer_scopes() ->
         Secret
     ),
 
-    {ok, State} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => any}),
+    {ok, State} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => ?AUD}),
     Request = #{headers => #{<<"authorization">> => <<"Bearer ", Token/binary>>}},
     {ok, AuthInfo} = barrel_mcp_auth_bearer:authenticate(Request, State),
     Scopes = maps:get(scopes, AuthInfo),
@@ -328,7 +334,7 @@ test_scope_check_pass() ->
         Secret
     ),
 
-    {ok, ProviderState} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => any}),
+    {ok, ProviderState} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => ?AUD}),
     Config = #{
         provider => barrel_mcp_auth_bearer,
         provider_state => ProviderState,
@@ -348,7 +354,7 @@ test_scope_check_fail() ->
         Secret
     ),
 
-    {ok, ProviderState} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => any}),
+    {ok, ProviderState} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => ?AUD}),
     Config = #{
         provider => barrel_mcp_auth_bearer,
         provider_state => ProviderState,
@@ -380,7 +386,8 @@ test_scope_check_fail_closed() ->
 %% Helper Functions
 %%====================================================================
 
-create_hs256_jwt(Claims, Secret) ->
+create_hs256_jwt(Claims0, Secret) ->
+    Claims = maps:merge(#{<<"aud">> => ?AUD}, Claims0),
     Header = #{<<"alg">> => <<"HS256">>, <<"typ">> => <<"JWT">>},
     HeaderB64 = base64url_encode(iolist_to_binary(json:encode(Header))),
     ClaimsB64 = base64url_encode(iolist_to_binary(json:encode(Claims))),
@@ -435,25 +442,44 @@ bearer_init_requires_audience_test() ->
         barrel_mcp_auth_bearer:init(#{secret => <<"s">>})
     ).
 
+%% `any' hands the recipient check to the verifier, so a token minted
+%% for someone else passes only because the verifier let it through.
 bearer_audience_any_accepts_foreign_aud_test() ->
+    Verifier = fun(_Token) ->
+        {ok, #{<<"sub">> => <<"u">>, <<"aud">> => <<"https://someone.else">>}}
+    end,
+    {ok, State} = barrel_mcp_auth_bearer:init(#{verifier => Verifier, audience => any}),
+    Request = #{headers => #{<<"authorization">> => <<"Bearer opaque">>}},
+    ?assertMatch({ok, _}, barrel_mcp_auth_bearer:authenticate(Request, State)).
+
+%% Without one nothing checks the recipient at all: `any' skips the
+%% claim even when the token carries none.
+bearer_audience_any_needs_a_verifier_test() ->
+    ?assertEqual(
+        {error, audience_any_requires_verifier},
+        barrel_mcp_auth_bearer:init(#{secret => <<"s">>, audience => any})
+    ).
+
+%% A token for another resource is refused when an audience is named.
+bearer_rejects_foreign_aud_test() ->
     Secret = <<"test-secret">>,
     Token = create_hs256_jwt(
         #{<<"sub">> => <<"u">>, <<"aud">> => <<"https://someone.else">>}, Secret
     ),
-    {ok, State} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => any}),
+    {ok, State} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => ?AUD}),
     Request = #{headers => #{<<"authorization">> => <<"Bearer ", Token/binary>>}},
-    ?assertMatch({ok, _}, barrel_mcp_auth_bearer:authenticate(Request, State)).
+    ?assertEqual({error, invalid_token}, barrel_mcp_auth_bearer:authenticate(Request, State)).
 
 bearer_rejects_non_integer_exp_test() ->
     Secret = <<"test-secret">>,
     Token = create_hs256_jwt(#{<<"sub">> => <<"u">>, <<"exp">> => <<"later">>}, Secret),
-    {ok, State} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => any}),
+    {ok, State} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => ?AUD}),
     Request = #{headers => #{<<"authorization">> => <<"Bearer ", Token/binary>>}},
     ?assertEqual({error, invalid_token}, barrel_mcp_auth_bearer:authenticate(Request, State)).
 
 bearer_rejects_non_integer_nbf_test() ->
     Secret = <<"test-secret">>,
     Token = create_hs256_jwt(#{<<"sub">> => <<"u">>, <<"nbf">> => <<"now">>}, Secret),
-    {ok, State} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => any}),
+    {ok, State} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => ?AUD}),
     Request = #{headers => #{<<"authorization">> => <<"Bearer ", Token/binary>>}},
     ?assertEqual({error, invalid_token}, barrel_mcp_auth_bearer:authenticate(Request, State)).

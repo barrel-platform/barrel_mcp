@@ -38,6 +38,10 @@ flow_test_() ->
             {"PRM falls back to the root document", fun test_prm_root_fallback/0},
             {"a PRM resource that does not cover the server is refused",
                 fun test_resource_mismatch/0},
+            {"a resource_metadata URL on another origin is never fetched",
+                fun test_foreign_prm_is_not_fetched/0},
+            {"a host's url_policy refuses a URL before it is fetched",
+                fun test_url_policy_refuses/0},
             {"scope: challenge, then PRM, then config, then omitted", fun test_scope_selection/0},
             {"offline_access only when the AS lists it", fun test_offline_access/0},
             {"403 insufficient_scope steps up with the union", fun test_step_up/0},
@@ -285,6 +289,41 @@ run(Extra, Script, Challenge) ->
 %%====================================================================
 %% Cases
 %%====================================================================
+
+%% RFC 9728 5.1: the document belongs to the resource server. A URL on
+%% any other origin is the server naming a host of its choosing, so it
+%% is dropped before anything reaches the network and the well-known
+%% path on the server's own origin answers instead.
+test_foreign_prm_is_not_fetched() ->
+    Test = self(),
+    Policy = fun(Url) ->
+        Test ! {tried, Url},
+        ok
+    end,
+    Foreign =
+        <<"Bearer resource_metadata=\"", ?BASE2/binary, "/.well-known/oauth-protected-resource\"">>,
+    {ok, H} = run(#{url_policy => Policy}, #{}, challenge(401, Foreign)),
+    ?assertEqual(<<"at-1">>, bearer(H)),
+    Tried = drain_tried([]),
+    ?assertEqual([], [U || U <- Tried, binary:match(U, ?BASE2) =/= nomatch]),
+    ?assertNotEqual([], [U || U <- Tried, binary:match(U, ?BASE) =/= nomatch]).
+
+%% The hook a host hangs its own egress rules on. Every URL the handle
+%% is about to fetch passes it, configured or server-supplied.
+test_url_policy_refuses() ->
+    Policy = fun(_Url) -> {error, blocked} end,
+    %% Reported by the stage that was refused, with the host's own
+    %% reason inside it.
+    ?assertMatch(
+        {error, {no_prm, {refused_url, _, blocked}}},
+        run(#{url_policy => Policy}, #{}, challenge(401, www()))
+    ).
+
+drain_tried(Acc) ->
+    receive
+        {tried, Url} -> drain_tried([Url | Acc])
+    after 0 -> lists:reverse(Acc)
+    end.
 
 test_happy_path() ->
     {ok, H} = run(#{}, #{}, challenge(401, www())),

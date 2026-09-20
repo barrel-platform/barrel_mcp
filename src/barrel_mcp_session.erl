@@ -49,6 +49,7 @@
     delete/1,
     generate_id/0,
     list/0,
+    last_activity/1,
     cleanup_expired/1,
     %% Capability tracking (set during MCP `initialize').
     set_client_capabilities/2,
@@ -239,6 +240,16 @@ get_principal(SessionId) ->
 -spec set_protocol_version(binary(), binary()) -> ok | {error, not_found}.
 set_protocol_version(SessionId, Version) when is_binary(Version) ->
     gen_server:call(?MODULE, {set_protocol_version, SessionId, Version}).
+
+%% @doc When the session was last seen. For callers deciding whether
+%% the stored value is stale enough to be worth rewriting: the read is
+%% an ETS lookup, the write is a call into this process.
+-spec last_activity(binary()) -> {ok, integer()} | {error, not_found}.
+last_activity(SessionId) ->
+    case ets:lookup(?SESSION_TABLE, SessionId) of
+        [{_, #mcp_session{last_activity = LA}}] -> {ok, LA};
+        [] -> {error, not_found}
+    end.
 
 %% @doc Look up the negotiated protocol version for a session.
 -spec get_protocol_version(binary()) -> {ok, binary()} | {error, not_found}.

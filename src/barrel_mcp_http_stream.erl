@@ -53,9 +53,13 @@
 %%   <li>`allowed_origins': `[binary()] | any'.</li>
 %%   <li>`allow_missing_origin': accept requests with no `Origin'
 %%       header. Defaults to `true' on loopback, `false' otherwise.</li>
-%%   <li>`subscription_keepalive_ms': how often a quiet
-%%       `subscriptions/listen' stream emits an SSE comment so
-%%       intermediaries do not drop it. Defaults to 15000.
+%%   <li>`sse_keepalive_ms': how often any quiet stream we hold open
+%%       emits an SSE comment. Defaults to 15000. Besides keeping
+%%       intermediaries from dropping the stream, it is what notices a
+%%       peer that went away without closing: nothing else is written
+%%       on an idle stream, so nothing else would fail.</li>
+%%   <li>`subscription_keepalive_ms': the older name, and what a
+%%       `subscriptions/listen' stream falls back to. Defaults to 15000.
 %%
 %%       It doubles as the upper bound on how long a subscriber that
 %%       went away lingers: nothing reads the socket while a stream is
@@ -77,6 +81,7 @@
         allowed_origins => [binary()] | any,
         allow_missing_origin => boolean(),
         subscription_keepalive_ms => pos_integer(),
+        sse_keepalive_ms => pos_integer(),
         sse_path => binary(),
         sse_message_path => binary(),
         max_connections => pos_integer()
@@ -128,6 +133,11 @@ start_listener(Opts, Loopback, AllowedOrigins, AuthConfig0, SessionEnabled) ->
             subscription_keepalive_ms,
             Opts,
             application:get_env(barrel_mcp, subscription_keepalive_ms, 15000)
+        ),
+        sse_keepalive_ms => maps:get(
+            sse_keepalive_ms,
+            Opts,
+            application:get_env(barrel_mcp, sse_keepalive_ms, undefined)
         )
     },
     EngineConfig = maps:merge(EngineConfig0, legacy_sse_routes(Opts)),

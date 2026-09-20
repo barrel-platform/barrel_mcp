@@ -118,11 +118,22 @@ restarts_after_crash(Config) ->
     {ok, Pid} = barrel_mcp:start_http_stream(#{port => Port}),
     ?assert(serves(Port)),
     exit(Pid, kill),
+    %% `whereis' answers as soon as the replacement registers, which is
+    %% before it has spawned an acceptor. Wait for the pool instead.
     wait_until(
         fun() ->
             case whereis(barrel_mcp_http_stream_listener) of
-                undefined -> false;
-                New -> New =/= Pid
+                undefined ->
+                    false;
+                New when New =/= Pid ->
+                    try barrel_mcp_http_listener:acceptors(New) of
+                        [_ | _] = Pids -> lists:all(fun is_process_alive/1, Pids);
+                        _ -> false
+                    catch
+                        _:_ -> false
+                    end;
+                _ ->
+                    false
             end
         end,
         5000

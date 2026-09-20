@@ -12,6 +12,16 @@ schema that changed under us would turn an unrelated commit red.
 
 Only `2026-07-28` ships examples; the legacy revisions have none.
 
+## The tasks extension
+
+- Source: https://github.com/modelcontextprotocol/ext-tasks
+- Commit: `e4345978be1f602f1fc48d89051e8559dd5302a6`
+- Contents: `ext-tasks/schema.json` is that repository's
+  `schema/draft/schema.json`. SEP-2663 moved `CreateTaskResult` out of
+  the core schema and into this one, so it is what the conformance
+  runner has to validate a task handle against
+  (`test/conformance/patch-runner.js`).
+
 ## Updating
 
 Deliberate, never automatic:

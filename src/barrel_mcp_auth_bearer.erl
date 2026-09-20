@@ -54,20 +54,28 @@
 %% Audience Binding"). The literal `any' opts out for a `verifier'
 %% that checks the intended recipient itself; it is logged as
 %% noncompliant.
--spec init(map()) -> {ok, map()} | {error, {missing_option, audience}}.
+-spec init(map()) ->
+    {ok, map()}
+    | {error, {missing_option, audience} | audience_any_requires_verifier}.
 init(Opts) ->
+    Verifier = maps:get(verifier, Opts, undefined),
     case maps:get(audience, Opts, undefined) of
         undefined ->
             {error, {missing_option, audience}};
+        any when not is_function(Verifier, 1) ->
+            %% `any' skips the `aud' check entirely, including a token
+            %% that carries none. That is only defensible when
+            %% something else checks the recipient, so insist on the
+            %% verifier the warning has always named.
+            {error, audience_any_requires_verifier};
         Audience ->
             Audience =:= any andalso
                 logger:warning(
-                    "barrel_mcp_auth_bearer: audience => any accepts tokens "
-                    "issued for other resources; noncompliant outside a "
-                    "verifier that checks the recipient"
+                    "barrel_mcp_auth_bearer: audience => any leaves the "
+                    "recipient check to the configured verifier"
                 ),
             State = #{
-                verifier => maps:get(verifier, Opts, undefined),
+                verifier => Verifier,
                 secret => maps:get(secret, Opts, undefined),
                 issuer => maps:get(issuer, Opts, undefined),
                 audience => Audience,

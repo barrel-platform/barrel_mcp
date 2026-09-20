@@ -26,8 +26,9 @@
 %%%   <li>Era dispatch: `dispatch/4' → `dispatch_versioned/4' →
 %%%       `dispatch_valid/4'; `serves/2' says which methods an era
 %%%       has; `finalize/2' decorates a result for its era.</li>
-%%%   <li>Tasks: the task collector, `task_plan/2' (the mode rule for
-%%%       every transport but Streamable HTTP), `create_task_result/3'.</li>
+%%%   <li>Tasks: the task collector and `create_task_result/3'. The
+%%%       rule deciding what a call becomes is
+%%%       `barrel_mcp_tasks:mode/2', which every transport asks.</li>
 %%%   <li>Multi round-trip requests: `input_required' rounds and the
 %%%       sealed `request_state'.</li>
 %%%   <li>Request handlers: one `handle_request/4' clause per method.</li>
@@ -882,13 +883,7 @@ task_owner(Ctx) ->
 %% Legacy clients negotiated tasks in the handshake instead.
 -spec tasks_enabled(barrel_mcp_ctx:ctx()) -> boolean().
 tasks_enabled(Ctx) ->
-    case barrel_mcp_ctx:is_modern(Ctx) of
-        true -> barrel_mcp_ctx:supports_extension(Ctx, ?MCP_EXT_TASKS);
-        false -> true
-    end.
-
-task_support(Name) ->
-    barrel_mcp_registry:task_support(Name).
+    barrel_mcp_tasks:enabled(Ctx).
 
 %% @doc Run a tool's outcome into its task rather than back to the
 %% caller, which has already been handed the task id.
@@ -1911,38 +1906,16 @@ with_execution(Listed, Handler, Ctx) ->
 drive_async_plan(Plan, Timeout, AuthInfo, OnSpawn) ->
     Ctx = maps:get(ctx, Plan, undefined),
     RequestId = maps:get(request_id, Plan),
-    case task_plan(Plan, Ctx) of
-        {required, _ToolName} ->
+    ToolName = maps:get(tool_name, Plan, undefined),
+    case barrel_mcp_tasks:mode(ToolName, Ctx) of
+        refuse ->
             finalize(missing_tasks_capability(RequestId), Ctx);
-        {task, ToolName} ->
-            case barrel_mcp_ctx:is_modern(Ctx) of
-                true ->
-                    finalize(drive_inline_then_task(Plan, ToolName, Ctx, AuthInfo, OnSpawn), Ctx);
-                false ->
-                    finalize(drive_as_task(Plan, ToolName, Ctx, AuthInfo), Ctx)
-            end;
+        {task, escalate} ->
+            finalize(drive_inline_then_task(Plan, ToolName, Ctx, AuthInfo, OnSpawn), Ctx);
+        {task, immediate} ->
+            finalize(drive_as_task(Plan, ToolName, Ctx, AuthInfo), Ctx);
         inline ->
             finalize(run_async_plan(Plan, Timeout, AuthInfo, OnSpawn), Ctx)
-    end.
-
-%% What a call becomes: `inline' for a tool without task support, or
-%% one the client cannot poll and does not require a task for; `{task,
-%% Name}' when it can; `{required, Name}' when the tool insists and the
-%% client did not declare the extension. Without a request context (a
-%% hand-built plan) there is nothing to decide from.
-task_plan(_Plan, undefined) ->
-    inline;
-task_plan(Plan, Ctx) ->
-    case maps:get(tool_name, Plan, undefined) of
-        undefined ->
-            inline;
-        Name ->
-            case {task_support(Name), tasks_enabled(Ctx)} of
-                {forbidden, _} -> inline;
-                {optional, false} -> inline;
-                {required, false} -> {required, Name};
-                {_, true} -> {task, Name}
-            end
     end.
 
 %% tasks.md "Task Creation": a task-supporting tool may still answer

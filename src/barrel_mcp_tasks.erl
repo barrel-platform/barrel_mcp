@@ -41,10 +41,14 @@
 %%%-------------------------------------------------------------------
 -module(barrel_mcp_tasks).
 
+-include("barrel_mcp.hrl").
+
 -behaviour(gen_server).
 
 -export([
     start_link/0,
+    mode/2,
+    enabled/1,
     create/3,
     get/2,
     get/3,
@@ -147,6 +151,51 @@
 %%====================================================================
 %% Public API
 %%====================================================================
+
+%% @doc Whether a call to `ToolName' runs inline, becomes a task, or is
+%% refused, given what the tool declared and what the client can be
+%% handed. Every transport asks this; only the answer's shape differs.
+%%
+%% <ul>
+%%   <li>`forbidden', or the client never declared the extension and
+%%       the tool only said `optional': `inline'.</li>
+%%   <li>`required' without the extension: `refuse', which the caller
+%%       renders as the missing-capability error.</li>
+%%   <li>otherwise a task: `{task, escalate}' in the modern era, where
+%%       the call is answered in place if the tool beats the inline
+%%       window, and `{task, immediate}' in the handshake era, where
+%%       the handle goes back at once.</li>
+%% </ul>
+-spec mode(binary() | undefined, barrel_mcp_ctx:ctx() | undefined) ->
+    inline | refuse | {task, escalate} | {task, immediate}.
+mode(undefined, _Ctx) ->
+    inline;
+mode(_ToolName, undefined) ->
+    inline;
+mode(ToolName, Ctx) ->
+    case {barrel_mcp_registry:task_support(ToolName), enabled(Ctx)} of
+        {forbidden, _} ->
+            inline;
+        {optional, false} ->
+            inline;
+        {required, false} ->
+            refuse;
+        {_, true} ->
+            case barrel_mcp_ctx:is_modern(Ctx) of
+                true -> {task, escalate};
+                false -> {task, immediate}
+            end
+    end.
+
+%% @doc Whether this client can be handed a task at all. A modern one
+%% must have declared the extension; a legacy one negotiated tasks in
+%% the handshake.
+-spec enabled(barrel_mcp_ctx:ctx()) -> boolean().
+enabled(Ctx) ->
+    case barrel_mcp_ctx:is_modern(Ctx) of
+        true -> barrel_mcp_ctx:supports_extension(Ctx, ?MCP_EXT_TASKS);
+        false -> true
+    end.
 
 %% @doc Start the task table owner, registered as `barrel_mcp_tasks'.
 start_link() ->

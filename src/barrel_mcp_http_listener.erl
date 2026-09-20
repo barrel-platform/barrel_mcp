@@ -46,6 +46,13 @@
 %% clients) could exhaust file descriptors and memory. Override with
 %% the `max_connections' listen option.
 -define(DEFAULT_MAX_CONNECTIONS, 16384).
+%% A supervised restart races the emulator reaping the dead listener's
+%% socket, so the port can read as taken for a few milliseconds after
+%% a crash. Bounded on purpose: a port someone else holds must still
+%% fail, and fail fast enough that the supervisor's low restart
+%% intensity still means something.
+-define(BIND_RETRIES, 3).
+-define(BIND_RETRY_BACKOFF, 100).
 
 %%====================================================================
 %% API
@@ -251,7 +258,7 @@ listen(ListenOpts) ->
     ],
     case maps:get(ssl, ListenOpts, undefined) of
         undefined ->
-            case gen_tcp:listen(Port, Base) of
+            case bind(fun() -> gen_tcp:listen(Port, Base) end) of
                 {ok, LSock} -> {ok, gen_tcp, LSock};
                 {error, _} = E -> E
             end;
@@ -269,10 +276,24 @@ listen(ListenOpts) ->
                         {alpn_preferred_protocols, [<<"h2">>, <<"http/1.1">>]},
                         {versions, ['tlsv1.2', 'tlsv1.3']}
                     ] ++ CaOpts,
-            case ssl:listen(Port, TlsOpts) of
+            case bind(fun() -> ssl:listen(Port, TlsOpts) end) of
                 {ok, LSock} -> {ok, ssl, LSock};
                 {error, _} = E -> E
             end
+    end.
+
+bind(Listen) ->
+    bind(Listen, ?BIND_RETRIES).
+
+bind(Listen, 0) ->
+    Listen();
+bind(Listen, N) ->
+    case Listen() of
+        {error, eaddrinuse} ->
+            timer:sleep(?BIND_RETRY_BACKOFF),
+            bind(Listen, N - 1);
+        Other ->
+            Other
     end.
 
 close_listen(gen_tcp, LSock) ->

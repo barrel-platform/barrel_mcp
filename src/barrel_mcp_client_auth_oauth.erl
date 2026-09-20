@@ -55,6 +55,7 @@
 %%%   scopes         => [binary()],
 %%%   resource       => binary(),
 %%%   store          => {module(), term()}, %% barrel_mcp_client_auth_store
+%%%   url_policy     => fun((binary()) -> ok | {error, term()}),
 %%%   allow_insecure_oauth => boolean()
 %%% }}
 %%% '''
@@ -204,6 +205,9 @@
     %% `allow_insecure_oauth' from the config; threaded into every
     %% token request the handle makes.
     insecure = false :: boolean(),
+    %% What a host allows the handle to fetch. Applies to every URL,
+    %% but only a server-supplied one can be a surprise.
+    url_policy :: fun((binary()) -> ok | {error, term()}) | undefined,
     access_token :: binary() | undefined,
     refresh_token :: binary() | undefined,
     token_endpoint :: binary() | undefined,
@@ -253,11 +257,12 @@
 
 init(Cfg) when is_map(Cfg) ->
     Insecure = insecure_opt(Cfg),
-    Opts = #{allow_insecure_oauth => Insecure},
+    Policy = url_policy_opt(Cfg),
+    Opts = #{allow_insecure_oauth => Insecure, url_policy => Policy},
     case secure_urls(configured_endpoints(Cfg), Opts) of
         ok ->
             case init_mode(Cfg, Insecure) of
-                {ok, H} -> with_credentials(H, Cfg);
+                {ok, H} -> with_credentials(H#h{url_policy = Policy}, Cfg);
                 {error, _} = Err -> Err
             end;
         {error, _} = Err ->
@@ -991,7 +996,7 @@ do_register_client(RegistrationEndpoint, Metadata0, Opts) ->
             RegistrationEndpoint,
             Headers,
             Body,
-            [with_body]
+            [with_body, {follow_redirect, false}]
         )
     of
         {ok, Status, _Hdrs, Resp} when
@@ -1566,8 +1571,17 @@ prm_urls(Www, ServerUrl) ->
     #{origin := Origin, path := Path} = split_url(ServerUrl),
     FromHeader =
         case parse_www_authenticate(Www) of
-            undefined -> [];
-            Url -> [Url]
+            undefined ->
+                [];
+            Url ->
+                %% RFC 9728 5.1: the document belongs to the resource
+                %% server. Anywhere else is the server pointing us at a
+                %% host of its choosing, so drop it and use the
+                %% well-known paths below.
+                case split_url(Url) of
+                    #{origin := Origin} -> [Url];
+                    _ -> []
+                end
         end,
     Guessed =
         case Path of
@@ -1962,8 +1976,8 @@ legacy_flow(H, _Challenge) ->
 
 %%-- Handle plumbing ----------------------------------------------------
 
-opts(#h{insecure = Insecure}) ->
-    #{allow_insecure_oauth => Insecure}.
+opts(#h{insecure = Insecure, url_policy = Policy}) ->
+    #{allow_insecure_oauth => Insecure, url_policy => Policy}.
 
 %% `client_id'/`client_secret' are mirrored into the record fields the
 %% refresh path reads.
@@ -2036,8 +2050,17 @@ www_param(Name, Www) ->
 %% @doc The HTTPS policy every authorization-server URL passes through:
 %% configured, discovered, or the discovery URL itself. Only
 %% `allow_insecure_oauth => true' in `Opts' lifts it.
--spec secure_url(binary(), map()) -> ok | {error, {insecure_url, binary()}}.
+-spec secure_url(binary(), map()) ->
+    ok | {error, {insecure_url, binary()} | {refused_url, binary(), term()}}.
 secure_url(Url, Opts) when is_binary(Url) ->
+    case scheme_allowed(Url, Opts) of
+        ok -> policy_allows(Url, Opts);
+        {error, _} = Err -> Err
+    end;
+secure_url(Url, _Opts) ->
+    {error, {insecure_url, Url}}.
+
+scheme_allowed(Url, Opts) ->
     case insecure_opt(Opts) of
         true ->
             ok;
@@ -2046,9 +2069,27 @@ secure_url(Url, Opts) when is_binary(Url) ->
                 #{scheme := <<"https">>} -> ok;
                 _ -> {error, {insecure_url, Url}}
             end
-    end;
-secure_url(Url, _Opts) ->
-    {error, {insecure_url, Url}}.
+    end.
+
+%% The host's own rule, if it set one. Anything but `ok' is a refusal:
+%% a policy that answers something unexpected must not open the door.
+policy_allows(Url, Opts) ->
+    case maps:get(url_policy, Opts, undefined) of
+        Fun when is_function(Fun, 1) ->
+            case Fun(Url) of
+                ok -> ok;
+                {error, Reason} -> {error, {refused_url, Url, Reason}};
+                Other -> {error, {refused_url, Url, Other}}
+            end;
+        _ ->
+            ok
+    end.
+
+url_policy_opt(Cfg) ->
+    case maps:get(url_policy, Cfg, undefined) of
+        Fun when is_function(Fun, 1) -> Fun;
+        _ -> undefined
+    end.
 
 %% Only the literal `true' opts out; anything else is the default.
 insecure_opt(Map) ->
@@ -2155,7 +2196,7 @@ post_form(Url, Headers, Form, Dpop, Attempt) ->
                 [{<<"dpop">>, dpop_proof(Key, <<"POST">>, Url, Nonce, undefined)} | Headers]
         end,
     Body = urlencode(Form),
-    case hackney:request(post, Url, Hs, Body, [with_body]) of
+    case hackney:request(post, Url, Hs, Body, [with_body, {follow_redirect, false}]) of
         {ok, 200, _Hdrs, RB} ->
             try json:decode(RB) of
                 Map when is_map(Map) ->
