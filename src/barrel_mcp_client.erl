@@ -154,6 +154,10 @@
 -define(DEFAULT_MAX_INPUT_ROUNDS, 5).
 -define(DEFAULT_INIT_TIMEOUT, 30000).
 -define(DEFAULT_PING_TIMEOUT, 5000).
+%% How long `subscribe/2' waits for the server to acknowledge the
+%% filter before answering anyway. A server that never acknowledges is
+%% no worse off than it was.
+-define(SUBSCRIPTION_ACK_TIMEOUT, 5000).
 -define(DEFAULT_PING_FAILURE_THRESHOLD, 3).
 
 -record(pending, {
@@ -214,7 +218,11 @@
     %% The id of the `subscriptions/listen' request holding the current
     %% stdio subscription. It has no request timeout: the response is
     %% what ends the subscription, and that may be hours away.
-    sub_id :: integer() | undefined
+    sub_id :: integer() | undefined,
+    %% Callers of `subscribe/2' parked until the server acknowledges
+    %% the filter. Appended, like `mrtr' above, because a test reads
+    %% this record by position.
+    sub_waiters = [] :: [gen_statem:from()]
 }).
 
 %%====================================================================
@@ -690,8 +698,15 @@ ready(cast, notify_roots_list_changed, Data) ->
 %% era keeps `subscribe/2' looking the same to callers.
 %%
 ready({call, From}, {subscribe, Uri, Pid}, #data{era = modern} = Data) ->
-    Data1 = add_sub(Uri, Pid, Data),
-    {keep_state, refresh_subscription(Data1), [{reply, From, modern}]};
+    %% Opening the stream is what registers interest, and the server
+    %% does that in a different process from the one running the next
+    %% request. Wait for it to say so, or a change triggered right
+    %% after this returns is emitted with nobody subscribed.
+    Data1 = refresh_subscription(add_sub(Uri, Pid, Data)),
+    Waiters = Data1#data.sub_waiters,
+    {keep_state, Data1#data{sub_waiters = [From | Waiters]}, [
+        {{timeout, sub_ack}, ?SUBSCRIPTION_ACK_TIMEOUT, sub_ack}
+    ]};
 ready({call, From}, {subscribe, _Uri, _Pid}, _Data) ->
     {keep_state_and_data, [{reply, From, legacy}]};
 ready({call, From}, {unsubscribe, Uri, Pid}, #data{era = modern} = Data) ->
@@ -706,6 +721,10 @@ ready(cast, {remove_subscriber, Uri, Pid}, Data) ->
 ready(cast, {async_reply, Tag, Result}, Data) ->
     {Data1, Actions} = deliver_async_reply(Tag, Result, Data),
     {keep_state, Data1, Actions};
+ready({timeout, sub_ack}, sub_ack, Data) ->
+    %% No acknowledgement came. Answer anyway: a caller is no worse off
+    %% than before it was waited for.
+    {keep_state, settle_subscription(Data)};
 ready({timeout, {req, Id}}, request_timeout, Data) ->
     timeout_pending(Id, Data);
 ready({timeout, {round, Ref}}, round_timeout, Data) ->
@@ -1011,6 +1030,16 @@ handle_server_notification(
     Uri = maps:get(<<"uri">>, Params, <<>>),
     notify_subscribers(Uri, Params, Data),
     dispatch_notification(Method, Params, Data);
+%% The server registers the filter before it acknowledges, so this is
+%% the first moment a caller of `subscribe/2' can safely trigger the
+%% change it wants to see.
+handle_server_notification(
+    <<"notifications/subscriptions/acknowledged">> = Method,
+    Params,
+    _State,
+    Data
+) ->
+    dispatch_notification(Method, Params, settle_subscription(Data));
 handle_server_notification(
     <<"notifications/progress">> = Method,
     Params,
@@ -1034,6 +1063,13 @@ handle_server_notification(
     end;
 handle_server_notification(Method, Params, _State, Data) ->
     dispatch_notification(Method, Params, Data).
+
+%% Answer everyone waiting on the acknowledgement, once.
+settle_subscription(#data{sub_waiters = []} = Data) ->
+    Data;
+settle_subscription(#data{sub_waiters = Waiters} = Data) ->
+    _ = [gen_statem:reply(From, modern) || From <- Waiters],
+    Data#data{sub_waiters = []}.
 
 dispatch_notification(
     Method,
