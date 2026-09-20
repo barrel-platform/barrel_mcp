@@ -294,6 +294,12 @@ on `initialize` (Streamable), `legacy_sse_open/3` (2024-11-05 pair),
 | `client_capabilities` | `barrel_mcp_protocol:initialize` |
 | `protocol_version` | `initialize/3`; `remember_version/2` and `maybe_capture_initialize_version/3` in the engine |
 | `sse_pid` | `stream_get_sse_session/5`, `sse_cleanup/2`, `legacy_sse_open/3`, `barrel_mcp_stdio:bind_session` (legacy era only) |
+
+A session is swept when it has been idle past `session_ttl` **and**
+holds no stream. Only the POST path refreshes `last_activity`, so
+without that second condition a connected client that simply went
+quiet would lose its session; the stream's keepalive is what notices
+a peer that actually went away.
 | `sse_buffer`, `sse_buffer_max` | `record_sse_event` from the engine's SSE helpers; the max from `lookup_session/5` (`sse_buffer_size`, default 256) |
 | `log_level` | `logging/setLevel` handler |
 | `principal` | `lookup_session/5`, `legacy_sse_open/3` |

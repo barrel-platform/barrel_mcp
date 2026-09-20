@@ -513,7 +513,7 @@ test_resume_after_retry() ->
     Test = self(),
     spawn_link(fun() ->
         {ok, L} = gen_tcp:listen(?RESUME_PORT, [
-            binary, {active, false}, {reuseaddr, true}, {packet, raw}
+            binary, {active, false}, {reuseaddr, true}, {packet, raw}, {linger, {true, 5}}
         ]),
         Test ! listening,
         %% 1. The POST: prime the stream with an id and a retry, close it.
@@ -528,7 +528,10 @@ test_resume_after_retry() ->
         ok = gen_tcp:send(S1, [
             io_lib:format("~.16b\r\n", [byte_size(Prime)]), Prime, "\r\n0\r\n\r\n"
         ]),
-        ok = gen_tcp:close(S1),
+        %% Half-close: a plain close can drop what is still in flight,
+        %% and a client that never sees the terminal chunk never sees
+        %% the id it would resume from, so no resumption is scheduled.
+        ok = gen_tcp:shutdown(S1, write),
         %% 2. The resumption GET, which carries the id.
         {S2, Head} = accept_resumption(L),
         Test ! {resumed, Head},
@@ -562,24 +565,50 @@ test_resume_after_retry() ->
     barrel_mcp_client_http:close(Pid).
 
 %% hackney opens spare connections to a host it could not pool one
-%% for, and they send nothing. Take sockets until the resumption GET
-%% actually arrives instead of trusting the next one to be it. The
+%% for, and they send nothing ever. Hold every connection open and
+%% pick the one that speaks, rather than giving each a deadline to
+%% speak by: under load the resumption GET is slow to arrive, not
+%% absent, and closing it as a stray is what used to fail here. The
 %% delay the server asked for is deliberately not asserted: a wall
 %% clock under a loaded run says nothing about which value was used.
 accept_resumption(L) ->
-    {ok, S} = gen_tcp:accept(L, 20000),
-    case gen_tcp:recv(S, 0, 300) of
-        {ok, Head} ->
+    Parent = self(),
+    Acceptor = spawn_link(fun() -> accept_forever(L, Parent) end),
+    try
+        await_resumption(20000)
+    after
+        unlink(Acceptor),
+        exit(Acceptor, kill)
+    end.
+
+accept_forever(L, Parent) ->
+    case gen_tcp:accept(L, 30000) of
+        {ok, S} ->
+            ok = gen_tcp:controlling_process(S, Parent),
+            Parent ! {accepted, S},
+            accept_forever(L, Parent);
+        {error, _} ->
+            ok
+    end.
+
+await_resumption(Timeout) ->
+    receive
+        {accepted, S} ->
+            ok = inet:setopts(S, [{active, once}]),
+            await_resumption(Timeout);
+        {tcp, S, Head} ->
             case binary:match(Head, <<"last-event-id:">>) of
                 nomatch ->
-                    ok = gen_tcp:close(S),
-                    accept_resumption(L);
+                    ok = inet:setopts(S, [{active, once}]),
+                    await_resumption(Timeout);
                 _ ->
+                    ok = inet:setopts(S, [{active, false}]),
                     {S, Head}
             end;
-        {error, _} ->
-            ok = gen_tcp:close(S),
-            accept_resumption(L)
+        {tcp_closed, _} ->
+            await_resumption(Timeout)
+    after Timeout ->
+        error(no_resumption_get)
     end.
 
 %% The stream forwards notifications too; wait for the response.

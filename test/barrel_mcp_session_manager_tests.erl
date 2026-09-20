@@ -23,6 +23,8 @@ session_manager_test_() ->
         {"Delete drops the session's resource subscriptions",
             fun test_delete_drops_subscriptions/0},
         {"The TTL sweep drops them too", fun test_sweep_drops_subscriptions/0},
+        {"A session holding a stream is not idle", fun test_held_stream_is_not_idle/0},
+        {"A session whose stream is gone still expires", fun test_lost_stream_expires/0},
         {"Delete drops the session's in-flight records", fun test_delete_drops_in_flight/0},
         {"Delete fails a caller waiting on the client", fun test_delete_fails_pending/0}
     ]}.
@@ -144,6 +146,45 @@ test_cleanup_expired() ->
     %% Sessions should be gone
     ?assertEqual({error, not_found}, barrel_mcp_session:get(Id1)),
     ?assertEqual({error, not_found}, barrel_mcp_session:get(Id2)).
+
+%% Only the POST path refreshes the timestamp, so a client that holds
+%% its stream open and goes quiet used to be swept on a healthy
+%% server, its stream killed and its next request answered 404.
+test_held_stream_is_not_idle() ->
+    {ok, Id} = barrel_mcp_session:create(#{}),
+    Stream = spawn(fun() ->
+        receive
+            stop -> ok
+        end
+    end),
+    ok = barrel_mcp_session:set_sse_pid(Id, Stream),
+    timer:sleep(50),
+    ?assertEqual(0, barrel_mcp_session:cleanup_expired(1)),
+    ?assertMatch({ok, _}, barrel_mcp_session:get(Id)),
+    Stream ! stop.
+
+%% And the peer that went away is still reaped: the stream's keepalive
+%% clears `sse_pid' when its write fails, and a dead one does not
+%% count either.
+test_lost_stream_expires() ->
+    {ok, Id} = barrel_mcp_session:create(#{}),
+    Stream = spawn(fun() -> ok end),
+    ok = barrel_mcp_session:set_sse_pid(Id, Stream),
+    wait_dead(Stream, 50),
+    timer:sleep(50),
+    ?assert(barrel_mcp_session:cleanup_expired(1) >= 1),
+    ?assertEqual({error, not_found}, barrel_mcp_session:get(Id)).
+
+wait_dead(_Pid, 0) ->
+    ok;
+wait_dead(Pid, N) ->
+    case is_process_alive(Pid) of
+        false ->
+            ok;
+        true ->
+            timer:sleep(10),
+            wait_dead(Pid, N - 1)
+    end.
 
 %% A session's rows in the other three tables are keyed by its id and
 %% nothing else expires them, so deleting it has to take them along.
