@@ -252,7 +252,8 @@ simple_post_authenticated(Headers, Body, Responder, Config, AuthInfo) ->
     case barrel_mcp_protocol:decode(Body) of
         {ok, Request} ->
             RequestWithAuth = with_auth(Request, AuthInfo),
-            case barrel_mcp_protocol:handle(RequestWithAuth) of
+            State = #{auth_info => AuthInfo, auth_config => auth_config(Config)},
+            case barrel_mcp_protocol:handle(RequestWithAuth, State) of
                 no_response ->
                     reply(Responder, 204, cors_headers(Headers, Config, #{}), <<>>);
                 {async, Plan} ->
@@ -357,6 +358,7 @@ stream_post_batch(Headers, Responder, Config, SessionEnabled, Batch, AuthInfo) -
         end,
     ProtocolState = #{
         auth_info => AuthInfo,
+        auth_config => auth_config(Config),
         protocol_version => negotiated_version(Headers, SessionId),
         session_id => SessionId
     },
@@ -527,6 +529,7 @@ dispatch_modern_request(Headers, Responder, Config, Request, AuthInfo, Transport
             with_auth(Request, AuthInfo),
             #{
                 auth_info => AuthInfo,
+                auth_config => auth_config(Config),
                 streaming => true,
                 transport_version => Transport
             }
@@ -796,6 +799,7 @@ handle_dispatch(Headers, Responder, Config, SessionId, Request, AuthInfo) ->
             %% than only the session id it is recorded against.
             ProtocolState = ProtocolState0#{
                 auth_info => AuthInfo,
+                auth_config => auth_config(Config),
                 protocol_version => negotiated_version(Headers, SessionId)
             },
             case
@@ -1880,6 +1884,7 @@ legacy_dispatch(SessionId, Headers, Body, Responder, Config, AuthInfo) ->
             %% into a stateless path the pair cannot serve.
             ProtocolState = #{
                 auth_info => AuthInfo,
+                auth_config => auth_config(Config),
                 protocol_version => negotiated_version(Headers, SessionId),
                 transport_version => legacy_transport_version(Headers, SessionId),
                 session_id => SessionId
@@ -2434,6 +2439,8 @@ ensure_session_manager() ->
 %% always yields an info map (auth_none included), so there is no
 %% untagged path.
 with_auth(Request, AuthInfo) -> Request#{<<"_auth">> => AuthInfo}.
+
+auth_config(Config) -> maps:get(auth_config, Config, undefined).
 
 session_header(Headers) ->
     header(<<"mcp-session-id">>, Headers, undefined).

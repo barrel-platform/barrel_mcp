@@ -99,6 +99,22 @@ After connecting, initialize to exchange capabilities:
 %% }
 ```
 
+### Send `_meta` with a call
+
+Use the `meta` option when the server needs request metadata that is
+not an argument, such as an idempotency key. It is sent as
+`params._meta`, and the tool handler receives it as `meta` in its
+ctx.
+
+```erlang
+{ok, Result} = barrel_mcp_client:call_tool(Pid, <<"charge">>, Args, #{
+    meta => #{<<"idempotencyKey">> => <<"order-42">>}
+}).
+```
+
+A `progress_token` given together with `meta` is merged into it, and
+the token wins if `meta` also sets `progressToken`.
+
 ### Error Handling
 
 ```erlang

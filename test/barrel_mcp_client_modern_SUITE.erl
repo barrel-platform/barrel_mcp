@@ -28,6 +28,7 @@
     tools_round_trip/1,
     resources_and_prompts/1,
     caller_progress_token_survives/1,
+    caller_meta_reaches_the_handler/1,
     unknown_version_is_refused/1,
     legacy_pin_still_handshakes/1,
     auto_probes_into_modern/1,
@@ -74,7 +75,7 @@
 -export([confirm_tool/2, insatiable_tool/2, region_tool/1, connect_tool/2]).
 -export([bad_url_server/1, tool_catalogue_server/1]).
 -export([a_template/1, a_completion/2, no_subscribe_server/1]).
--export([eliciting_tool/2]).
+-export([eliciting_tool/2, meta_tool/2]).
 
 -define(BASE_PORT, 22000).
 -define(MODERN, <<"2026-07-28">>).
@@ -86,6 +87,7 @@ all() ->
         tools_round_trip,
         resources_and_prompts,
         caller_progress_token_survives,
+        caller_meta_reaches_the_handler,
         unknown_version_is_refused,
         legacy_pin_still_handshakes,
         auto_probes_into_modern,
@@ -140,6 +142,9 @@ init_per_suite(Config) ->
     ok = barrel_mcp:reg_tool(<<"insatiable">>, ?MODULE, insatiable_tool, #{
         description => <<"Never satisfied">>
     }),
+    ok = barrel_mcp:reg_tool(<<"meta">>, ?MODULE, meta_tool, #{
+        description => <<"Answers the caller's _meta keys it was asked about">>
+    }),
     ok = barrel_mcp:reg_tool(<<"connect">>, ?MODULE, connect_tool, #{
         description => <<"Sends the user out of band to authorise">>
     }),
@@ -169,6 +174,7 @@ end_per_suite(_Config) ->
     barrel_mcp_registry:unreg(tool, <<"confirm">>),
     barrel_mcp_registry:unreg(tool, <<"insatiable">>),
     barrel_mcp_registry:unreg(tool, <<"connect">>),
+    barrel_mcp_registry:unreg(tool, <<"meta">>),
     barrel_mcp_registry:unreg(tool, <<"regional">>),
     barrel_mcp_registry:unreg(resource, <<"res">>),
     barrel_mcp_registry:unreg(prompt, <<"greet">>),
@@ -204,6 +210,10 @@ echo_tool(Args) ->
     <<"Echo: ", (maps:get(<<"input">>, Args, <<"none">>))/binary>>.
 
 a_resource(_Args) -> <<"resource body">>.
+
+meta_tool(_Args, Ctx) ->
+    Meta = maps:get(meta, Ctx, #{}),
+    iolist_to_binary(json:encode(maps:with([<<"k">>, <<"progressToken">>], Meta))).
 
 region_tool(Args) ->
     maps:get(<<"region">>, Args, <<"none">>).
@@ -336,6 +346,30 @@ caller_progress_token_survives(Config) ->
     [Block] = maps:get(<<"content">>, Result),
     ?assertEqual(<<"Echo: tok">>, maps:get(<<"text">>, Block)),
     close(Client).
+
+%% `meta' reaches the handler as sent, in both eras, and merges with a
+%% progress token rather than replacing it.
+caller_meta_reaches_the_handler(Config) ->
+    lists:foreach(
+        fun(Version) ->
+            Client = connect(Config, Version),
+            ?assertEqual(
+                #{<<"k">> => <<"v">>},
+                meta_seen(Client, #{meta => #{<<"k">> => <<"v">>}})
+            ),
+            ?assertEqual(
+                #{<<"k">> => <<"v">>, <<"progressToken">> => <<"t-2">>},
+                meta_seen(Client, #{meta => #{<<"k">> => <<"v">>}, progress_token => <<"t-2">>})
+            ),
+            close(Client)
+        end,
+        [?MODERN, <<"2025-11-25">>]
+    ).
+
+meta_seen(Client, Opts) ->
+    {ok, Result} = barrel_mcp_client:call_tool(Client, <<"meta">>, #{}, Opts),
+    [#{<<"text">> := Text}] = maps:get(<<"content">>, Result),
+    json:decode(Text).
 
 %% Pinning a revision this release does not implement is refused at
 %% start rather than quietly opening a handshake and settling for

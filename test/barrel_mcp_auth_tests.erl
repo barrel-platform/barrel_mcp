@@ -483,3 +483,33 @@ bearer_rejects_non_integer_nbf_test() ->
     {ok, State} = barrel_mcp_auth_bearer:init(#{secret => Secret, audience => ?AUD}),
     Request = #{headers => #{<<"authorization">> => <<"Bearer ", Token/binary>>}},
     ?assertEqual({error, invalid_token}, barrel_mcp_auth_bearer:authenticate(Request, State)).
+
+%%====================================================================
+%% visible/4
+%%====================================================================
+
+visible_config() ->
+    #{provider => barrel_mcp_visible_provider, provider_state => #{}}.
+
+visible_without_config_test() ->
+    ?assert(barrel_mcp_auth:visible(undefined, tool, {<<"av_001">>, #{}}, #{subject => <<"a">>})).
+
+visible_without_caller_test() ->
+    ?assert(barrel_mcp_auth:visible(visible_config(), tool, {<<"av_001">>, #{}}, undefined)).
+
+visible_without_callback_test() ->
+    Config = #{provider => barrel_mcp_auth_none},
+    ?assert(barrel_mcp_auth:visible(Config, tool, {<<"av_001">>, #{}}, #{subject => <<"a">>})).
+
+visible_asks_the_provider_test() ->
+    Info = #{subject => <<"a">>},
+    ?assert(barrel_mcp_auth:visible(visible_config(), prompt, {<<"av_000">>, #{}}, Info)),
+    ?assertNot(barrel_mcp_auth:visible(visible_config(), prompt, {<<"av_001">>, #{}}, Info)).
+
+visible_raise_hides_test() ->
+    Info = #{subject => <<"all">>},
+    ?assertNot(barrel_mcp_auth:visible(visible_config(), tool, {<<"av_boom">>, #{}}, Info)).
+
+visible_non_boolean_hides_test() ->
+    Info = #{subject => <<"all">>},
+    ?assertNot(barrel_mcp_auth:visible(visible_config(), tool, {<<"av_maybe">>, #{}}, Info)).

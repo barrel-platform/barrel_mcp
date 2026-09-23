@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.0] - 2026-09-23
+
+Everything is additive. A server whose auth provider does not export
+`visible/4` lists exactly what it listed on 4.0.x, on every transport.
+
+### Added
+
+- Optional `barrel_mcp_auth` callback `visible/4`: whether a caller
+  sees a tool, resource, resource template or prompt in a list
+  response. Entries are filtered before pagination. Calls and reads
+  are not affected. A raise or a non-boolean hides the entry.
+- `barrel_mcp_auth:visible/4`, the dispatch, and
+  `barrel_mcp_ctx:auth_config/1`.
+- `barrel_mcp_auth_custom` forwards `visible/4` to its module when the
+  module exports it.
+- `barrel_mcp_client:call_tool/4` accepts `meta => map()`, sent as
+  `params._meta` and merged with `progress_token`.
+
+### Fixed
+
+- The simple HTTP transport now passes the caller's auth info to the
+  protocol core. Modern tasks and `requestState` created over it are
+  owned by the caller's principal instead of `anonymous`.
+
 ## [4.0.0] - 2026-09-20
 
 ### Upgrading from 3.0.1

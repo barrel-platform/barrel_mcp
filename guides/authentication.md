@@ -364,6 +364,21 @@ introspect_token(Token, #{introspect_url := Url} = State) ->
     end.
 ```
 
+### Per-caller listings
+
+Export the optional `visible/4` callback when callers of one endpoint
+should list different tools, resources, templates or prompts:
+
+```erlang
+visible(Kind, {Name, _Handler}, #{scopes := Scopes}, _State) ->
+    lists:member(<<(atom_to_binary(Kind))/binary, ":", Name/binary>>, Scopes).
+```
+
+It filters list responses only, before pagination; calls are not
+checked. See
+[Show each caller its own entries](custom-authentication.md#show-each-caller-its-own-entries)
+for the notes, including why `cache_scope` must stay `private`.
+
 ## Accessing Auth Info in Handlers
 
 After successful authentication, auth info is available in the request:

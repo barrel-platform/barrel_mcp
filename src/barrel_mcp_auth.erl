@@ -70,7 +70,8 @@
     extract_api_key/2,
     extract_basic_auth/1,
     auth_headers/1,
-    principal/2
+    principal/2,
+    visible/4
 ]).
 
 %% Types
@@ -156,7 +157,17 @@
 -callback principal(AuthInfo :: auth_info(), State :: term()) ->
     {ok, term()} | {error, no_subject}.
 
--optional_callbacks([init/1, auth_headers/1, principal/2]).
+%% Optional: whether this caller sees a registry entry in a list
+%% response. Hiding is not an access check: the handler still refuses.
+%% Without this callback every caller sees every entry.
+-callback visible(
+    Kind :: tool | resource | resource_template | prompt,
+    Entry :: {Name :: binary(), Handler :: map()},
+    AuthInfo :: auth_info(),
+    State :: term()
+) -> boolean().
+
+-optional_callbacks([init/1, auth_headers/1, principal/2, visible/4]).
 
 %%====================================================================
 %% API
@@ -222,6 +233,42 @@ with_principal(#{provider := Provider} = Config, ProviderState, AuthInfo) ->
     case Derived of
         {ok, Principal} -> {ok, AuthInfo#{principal => Principal}};
         {error, no_subject} -> {error, unauthorized}
+    end.
+
+%% @doc Whether the caller behind `AuthInfo' sees `Entry' in a list
+%% response, as the provider's optional `visible/4' decides.
+%%
+%% `true' without a provider, without a caller, or when the provider
+%% does not export the callback. Anything but `true', including a
+%% raise, hides the entry: a broken scope check must not reveal what it
+%% was meant to hide.
+-spec visible(
+    auth_config() | undefined,
+    tool | resource | resource_template | prompt,
+    {binary(), map()},
+    auth_info() | undefined
+) -> boolean().
+visible(undefined, _Kind, _Entry, _AuthInfo) ->
+    true;
+visible(_AuthConfig, _Kind, _Entry, undefined) ->
+    true;
+visible(#{provider := Provider} = Config, Kind, {Name, _} = Entry, AuthInfo) ->
+    case exported(Provider, visible, 4) of
+        false ->
+            true;
+        true ->
+            State = maps:get(provider_state, Config, undefined),
+            try Provider:visible(Kind, Entry, AuthInfo, State) of
+                true -> true;
+                _ -> false
+            catch
+                Class:Reason ->
+                    logger:warning(
+                        "barrel_mcp ~p:visible/4 raised on ~p ~ts, entry hidden: ~p:~p",
+                        [Provider, Kind, Name, Class, Reason]
+                    ),
+                    false
+            end
     end.
 
 subject_of(AuthInfo) ->

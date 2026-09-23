@@ -69,6 +69,45 @@ Your `authenticate/2` function should return a map with:
 
 Additional keys are preserved in the `claims` field.
 
+## Show each caller its own entries
+
+Your module can decide which tools, resources, resource templates and
+prompts a caller sees in list responses. You need this when one
+endpoint serves callers whose tokens reach different things, and each
+should list only its own.
+
+Export `visible/4` next to `authenticate/2`. It receives the kind, the
+registry entry, the auth info your `authenticate/2` returned
+(normalised to `#{subject, scopes, claims}`, plus `principal`), and
+your module state:
+
+```erlang
+-module(my_auth).
+-export([init/1, authenticate/2, visible/4]).
+
+visible(tool, {Name, _Handler}, #{claims := #{tools := Allowed}}, _State) ->
+    lists:member(Name, Allowed);
+visible(_Kind, _Entry, _AuthInfo, _State) ->
+    true.
+```
+
+`Kind` is `tool`, `resource`, `resource_template` or `prompt`; `Entry`
+is `{Name, Handler}` as `barrel_mcp_registry:all/1` returns it.
+
+Notes:
+
+- Hiding is not an access check. `tools/call`, `resources/read` and
+  `prompts/get` still reach a hidden entry, so its handler must refuse
+  a caller that may not use it.
+- Entries are filtered before pagination, so cursors stay valid and
+  every page is full.
+- Anything but `true`, including a raise, hides the entry and logs a
+  warning.
+- Keep the `cache_scope` application setting at its default
+  `private`. `public` lets a shared cache serve one caller's list to
+  another.
+- Without `visible/4` every caller sees every entry, as before.
+
 ## Example: barrel_memory Integration
 
 Here's how barrel_memory uses custom auth with its existing key system:

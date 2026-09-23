@@ -287,6 +287,9 @@ When `progress_token` is supplied, the calling process receives one
 the server emits, until the request settles (response, cancel, or
 timeout).
 
+`meta => Map` is sent as `params._meta` (for example an idempotency
+key), merged with `progress_token` when both are given.
+
 The full echo-client example lives in
 [`examples/echo_client/src/echo_client.erl`](https://github.com/barrel-platform/barrel_mcp/tree/main/examples/echo_client/src/echo_client.erl).
 
