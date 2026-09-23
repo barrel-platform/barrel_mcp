@@ -289,10 +289,19 @@ call_tool(Pid, Name, Args) ->
 %%       request settles.</li>
 %%   <li>`{timeout: Ms}', override the per-request timeout
 %%       (`request_timeout' from the connect spec, default 30000).</li>
+%%   <li>`{meta: Map}', sent as `params._meta', which the tool handler
+%%       receives as `meta' in its ctx. A `progress_token' is merged
+%%       into it and wins a clash on `progressToken'.</li>
 %% </ul>
 -spec call_tool(pid(), binary(), map(), map()) -> {ok, map()} | {error, term()}.
 call_tool(Pid, Name, Args, Opts) ->
-    Params0 = #{<<"name">> => Name, <<"arguments">> => Args},
+    Params0 =
+        case maps:get(meta, Opts, undefined) of
+            Meta when is_map(Meta), map_size(Meta) > 0 ->
+                #{<<"name">> => Name, <<"arguments">> => Args, <<"_meta">> => Meta};
+            _ ->
+                #{<<"name">> => Name, <<"arguments">> => Args}
+        end,
     Params = maybe_attach_progress_token(Params0, Opts),
     request(Pid, <<"tools/call">>, Params, request_timeout(Opts)).
 
@@ -1818,8 +1827,12 @@ request_timeout(Opts) ->
 
 maybe_attach_progress_token(Params, Opts) ->
     case maps:get(progress_token, Opts, undefined) of
-        undefined -> Params;
-        Tok -> Params#{<<"_meta">> => #{<<"progressToken">> => Tok}}
+        undefined ->
+            Params;
+        Tok ->
+            Params#{
+                <<"_meta">> => (maps:get(<<"_meta">>, Params, #{}))#{<<"progressToken">> => Tok}
+            }
     end.
 
 %% A legacy request carries only what the caller put in `_meta'; a

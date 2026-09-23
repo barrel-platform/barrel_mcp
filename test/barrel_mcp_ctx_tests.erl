@@ -253,6 +253,20 @@ auth_info_test() ->
     ),
     ?assertEqual(Auth, barrel_mcp_ctx:auth_info(Ctx)).
 
+auth_config_test() ->
+    Config = #{provider => barrel_mcp_auth_none, provider_state => undefined},
+    Ctx = barrel_mcp_ctx:from_request(
+        modern_request(<<"tools/list">>),
+        #{auth_config => Config}
+    ),
+    ?assertEqual(Config, barrel_mcp_ctx:auth_config(Ctx)).
+
+%% Without one the ctx is exactly what it was before the key existed.
+auth_config_absent_test() ->
+    Ctx = barrel_mcp_ctx:from_request(modern_request(<<"tools/list">>), #{auth_config => undefined}),
+    ?assertEqual(undefined, barrel_mcp_ctx:auth_config(Ctx)),
+    ?assertNot(maps:is_key(auth_config, Ctx)).
+
 meta_passthrough_test() ->
     Meta = (modern_meta())#{<<"progressToken">> => <<"tok-1">>},
     Ctx = barrel_mcp_ctx:from_request(

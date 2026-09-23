@@ -150,6 +150,9 @@ deployment, and connects to both. See the
 - Providers: `barrel_mcp_auth_bearer`, `barrel_mcp_auth_apikey`,
   `barrel_mcp_auth_basic`, `barrel_mcp_auth_none`,
   `barrel_mcp_auth_custom`.
+- Per-caller listings: a provider's optional `visible/4` decides
+  which tools, resources, templates and prompts a caller lists,
+  filtered before pagination. See `custom-authentication.md`.
 - Hashing: `barrel_mcp_auth_basic:hash_password/1,2` defaults to
   PBKDF2-SHA256 (100k iterations, 16-byte salt).
   `barrel_mcp_auth_apikey:hash_key/2` produces a peppered HMAC-SHA-256
@@ -230,6 +233,8 @@ by the spec.
 - Progress: pass `progress_token` to `call_tool/4` and the caller
   receives `{mcp_progress, Token, Params}` for every matching
   `notifications/progress` until the request settles.
+- Request `_meta`: pass `meta => Map` to `call_tool/4` and it is
+  sent as `params._meta`, merged with any `progress_token`.
 - Periodic ping: opt-in via `ping_interval` (and
   `ping_failure_threshold`) in the connect spec; the connection is
   closed with reason `ping_failed` after the configured number of

@@ -51,7 +51,7 @@ Add to your `rebar.config`:
 {deps, [
     {barrel_mcp,
         {git, "https://github.com/barrel-platform/barrel_mcp.git",
-              {tag, "v4.0.0"}}}
+              {tag, "v4.1.0"}}}
 ]}.
 ```
 
@@ -678,7 +678,7 @@ Your application's entry point should call `barrel_mcp:start_stdio()`.
 
 ## Pending features
 
-Nothing is pending as of 4.0.0: the library implements every released
+Nothing is pending as of 4.1.0: the library implements every released
 revision of the specification, and both halves of the `ext-auth`
 extension. [`docs/pending-features.md`](docs/pending-features.md)
 records what is deliberately out of scope. Open an issue if you want

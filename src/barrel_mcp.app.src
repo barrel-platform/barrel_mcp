@@ -1,6 +1,6 @@
 {application, barrel_mcp, [
     {description, "MCP Protocol Library for Erlang"},
-    {vsn, "4.0.0"},
+    {vsn, "4.1.0"},
     {registered, [
         barrel_mcp_registry,
         barrel_mcp_sup,

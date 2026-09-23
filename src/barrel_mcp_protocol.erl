@@ -1482,7 +1482,7 @@ handle_request(<<"ping">>, _Params, Id, _State) ->
     success_response(Id, #{});
 %% Tools
 handle_request(<<"tools/list">>, Params, Id, Ctx) ->
-    registry_page(tool, <<"tools">>, Params, Id, fun({Name, Handler}) ->
+    registry_page(tool, <<"tools">>, Params, Id, Ctx, fun({Name, Handler}) ->
         Base = #{
             <<"name">> => Name,
             <<"description">> => maps:get(description, Handler, <<>>),
@@ -1509,8 +1509,8 @@ handle_request(<<"tools/call">>, Params, Id, Ctx) ->
             tool_call_plan(Params, Id, Ctx, Mrtr)
     end;
 %% Resources
-handle_request(<<"resources/list">>, Params, Id, _State) ->
-    registry_page(resource, <<"resources">>, Params, Id, fun({_Name, Handler}) ->
+handle_request(<<"resources/list">>, Params, Id, Ctx) ->
+    registry_page(resource, <<"resources">>, Params, Id, Ctx, fun({_Name, Handler}) ->
         Base = #{
             <<"uri">> => maps:get(uri, Handler, <<>>),
             <<"name">> => maps:get(name, Handler, <<>>),
@@ -1553,8 +1553,10 @@ handle_request(<<"resources/read">>, Params, Id, Ctx) ->
                 end
         end
     end);
-handle_request(<<"resources/templates/list">>, Params, Id, _State) ->
-    registry_page(resource_template, <<"resourceTemplates">>, Params, Id, fun({_Name, Handler}) ->
+handle_request(<<"resources/templates/list">>, Params, Id, Ctx) ->
+    registry_page(resource_template, <<"resourceTemplates">>, Params, Id, Ctx, fun(
+        {_Name, Handler}
+    ) ->
         Base = #{
             <<"uriTemplate">> => maps:get(uri_template, Handler, <<>>),
             <<"name">> => maps:get(name, Handler, <<>>),
@@ -1595,8 +1597,8 @@ handle_request(<<"resources/unsubscribe">>, Params, Id, Ctx) ->
             )
     end;
 %% Prompts
-handle_request(<<"prompts/list">>, Params, Id, _State) ->
-    registry_page(prompt, <<"prompts">>, Params, Id, fun({Name, Handler}) ->
+handle_request(<<"prompts/list">>, Params, Id, Ctx) ->
+    registry_page(prompt, <<"prompts">>, Params, Id, Ctx, fun({Name, Handler}) ->
         Base = #{
             <<"name">> => Name,
             <<"description">> => maps:get(description, Handler, <<>>),
@@ -2332,13 +2334,19 @@ renderable(Feature, Revision) ->
 %% The four catalogue listings differ only in what they list and how one
 %% entry is rendered. `tasks/list' is not one of them: it lists from
 %% barrel_mcp_tasks and keys on `taskId', not the registry.
-registry_page(Kind, WireKey, Params, Id, Render) ->
+%%
+%% The caller sees only what its auth provider lets it see, filtered
+%% before paging: the cursor is the last name on a page.
+registry_page(Kind, WireKey, Params, Id, Ctx, Render) ->
     Cursor = maps:get(<<"cursor">>, Params, undefined),
-    {Page, Next} = paginate(
-        barrel_mcp_registry:all(Kind),
-        Cursor,
-        fun({N, _}) -> N end
-    ),
+    AuthConfig = barrel_mcp_ctx:auth_config(Ctx),
+    AuthInfo = barrel_mcp_ctx:auth_info(Ctx),
+    Visible = [
+        Entry
+     || Entry <- barrel_mcp_registry:all(Kind),
+        barrel_mcp_auth:visible(AuthConfig, Kind, Entry, AuthInfo)
+    ],
+    {Page, Next} = paginate(Visible, Cursor, fun({N, _}) -> N end),
     success_response(Id, with_next_cursor(#{WireKey => lists:map(Render, Page)}, Next)).
 
 paginate(Items, Cursor, KeyFn) ->

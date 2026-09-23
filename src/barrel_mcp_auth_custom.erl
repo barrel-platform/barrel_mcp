@@ -10,6 +10,10 @@
 %%%   <li>`authenticate(Token, State) -> {ok, AuthInfo, State} | {error, Reason, State}'</li>
 %%% </ul>
 %%%
+%%% It may also export `visible(Kind, {Name, Handler}, AuthInfo, State)
+%%% -> boolean()' to choose which registry entries a caller sees in list
+%%% responses; see `barrel_mcp_auth:visible/4'.
+%%%
 %%% == Usage ==
 %%%
 %%% ```
@@ -51,7 +55,7 @@
 
 -behaviour(barrel_mcp_auth).
 
--export([init/1, authenticate/2, challenge/2]).
+-export([init/1, authenticate/2, challenge/2, visible/4]).
 
 %%====================================================================
 %% barrel_mcp_auth callbacks
@@ -95,6 +99,16 @@ authenticate(Request, #{module := Module, module_state := ModuleState}) ->
 -spec challenge(term(), map()) -> {integer(), map(), binary()}.
 challenge(_Reason, _State) ->
     {401, #{<<"www-authenticate">> => <<"Bearer realm=\"mcp\"">>}, <<>>}.
+
+%% @doc Ask the custom module whether this caller sees a registry entry,
+%% when it exports `visible/4'. Every entry is visible otherwise.
+-spec visible(atom(), {binary(), map()}, map(), map()) -> boolean().
+visible(Kind, Entry, AuthInfo, #{module := Module, module_state := ModuleState}) ->
+    _ = code:ensure_loaded(Module),
+    case erlang:function_exported(Module, visible, 4) of
+        true -> Module:visible(Kind, Entry, AuthInfo, ModuleState);
+        false -> true
+    end.
 
 %%====================================================================
 %% Internal functions
