@@ -58,7 +58,8 @@
 %%%
 %%% <ul>
 %%%   <li>API: readiness, `reg/4,5', `unreg/2', `run/3,4',
-%%%       `run_tool/3', `find/2', `all/0,1', `task_support/1'.</li>
+%%%       `run_tool/3', `find/2', `find_tool/2', `all/0,1',
+%%%       `visible_tools/1', `task_support/1'.</li>
 %%%   <li>gen_statem callbacks: the two states.</li>
 %%%   <li>Internal functions: the ETS table, the persistent_term
 %%%       snapshot, option parsing, handler invocation.</li>
@@ -71,7 +72,7 @@
 -include("barrel_mcp.hrl").
 
 %% API
--export([task_support/1]).
+-export([task_support/1, find_tool/2, visible_tools/1]).
 -export([
     start_link/0,
     wait_for_ready/0,
@@ -514,6 +515,47 @@ all() ->
         #{},
         maps:to_list(Handlers)
     ).
+
+%% @doc Find a tool as an endpoint with `Filter' sees it: a registered
+%% tool the filter refuses is `error', exactly like one that was never
+%% registered. `undefined' means no filter.
+-spec find_tool(binary(), barrel_mcp_ctx:tool_filter() | undefined) ->
+    {ok, map()} | error.
+find_tool(Name, undefined) ->
+    find(tool, Name);
+find_tool(Name, Filter) ->
+    case find(tool, Name) of
+        {ok, Handler} = Found ->
+            case allows(Filter, Name, Handler) of
+                true -> Found;
+                false -> error
+            end;
+        error ->
+            error
+    end.
+
+%% @doc The tools an endpoint with `Filter' lists. `undefined' means
+%% every registered tool.
+-spec visible_tools(barrel_mcp_ctx:tool_filter() | undefined) ->
+    [{binary(), map()}].
+visible_tools(undefined) ->
+    all(tool);
+visible_tools(Filter) ->
+    [T || {Name, Handler} = T <- all(tool), allows(Filter, Name, Handler)].
+
+%% Fails closed: a filter that raises hides the tool.
+allows(Filter, Name, Handler) ->
+    try Filter(Name, Handler) of
+        true -> true;
+        _ -> false
+    catch
+        Class:Reason ->
+            logger:warning(
+                "barrel_mcp tool_filter raised on ~ts, tool hidden: ~p:~p",
+                [Name, Class, Reason]
+            ),
+            false
+    end.
 
 %% @doc List all handlers of a specific type.
 %%

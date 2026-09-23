@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.0] - 2026-09-23
+
+Everything is additive. A server that does not set `tool_filter`, on
+any transport, behaves exactly as on 4.0.x.
+
+### Added
+
+- `tool_filter` engine option, a `fun((Name, Handler) -> boolean())`
+  that decides which tools an endpoint lists and lets be called, so one
+  router can serve several endpoints over one registry. `tools/list`
+  is filtered before pagination; a hidden tool answers `tools/call`
+  exactly like an unregistered one, including through task mode and
+  mirrored header parameters. A filter that raises hides the tool.
+- `barrel_mcp_ctx:tool_filter/1`, and `barrel_mcp_registry:find_tool/2`
+  and `visible_tools/1`.
+- `barrel_mcp_client:call_tool/4` accepts `meta => map()`, sent as
+  `params._meta` and merged with `progress_token`.
+
 ## [4.0.0] - 2026-09-20
 
 ### Upgrading from 3.0.1

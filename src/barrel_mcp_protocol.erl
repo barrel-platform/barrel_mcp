@@ -743,7 +743,7 @@ tool_call_plan(Params, Id, Ctx, Mrtr) ->
         mrtr_binding => {<<"tools/call">>, Params},
         spawn => fun(TransportCtx) ->
             ToolCtx = TransportCtx#{mcp_ctx => Ctx, mrtr => Mrtr},
-            case barrel_mcp_registry:run_tool(Name, Args, ToolCtx) of
+            case run_visible_tool(Name, Args, ToolCtx, Ctx) of
                 {ok, Pid} ->
                     Pid;
                 {error, _} = Err ->
@@ -757,6 +757,13 @@ tool_call_plan(Params, Id, Ctx, Mrtr) ->
         end
     },
     {async, Plan}.
+
+%% A tool the endpoint hides fails exactly like one never registered.
+run_visible_tool(Name, Args, ToolCtx, Ctx) ->
+    case barrel_mcp_registry:find_tool(Name, barrel_mcp_ctx:tool_filter(Ctx)) of
+        {ok, _} -> barrel_mcp_registry:run_tool(Name, Args, ToolCtx);
+        error -> {error, {not_found, tool, Name}}
+    end.
 
 %% @doc A tool that could not run, as the error result the reference
 %% implementation returns for it.
@@ -995,7 +1002,7 @@ resume_task(Owner, TaskId, Info, Ctx) ->
             mcp_ctx => Ctx,
             mrtr => Mrtr
         },
-        case barrel_mcp_registry:run_tool(Name, Args, ToolCtx) of
+        case run_visible_tool(Name, Args, ToolCtx, Ctx) of
             {ok, Pid} ->
                 Pid;
             {error, _} = Err ->
@@ -1482,7 +1489,9 @@ handle_request(<<"ping">>, _Params, Id, _State) ->
     success_response(Id, #{});
 %% Tools
 handle_request(<<"tools/list">>, Params, Id, Ctx) ->
-    registry_page(tool, <<"tools">>, Params, Id, fun({Name, Handler}) ->
+    %% Filtered before paging: the cursor is the last name on a page.
+    Tools = barrel_mcp_registry:visible_tools(barrel_mcp_ctx:tool_filter(Ctx)),
+    registry_page(Tools, <<"tools">>, Params, Id, fun({Name, Handler}) ->
         Base = #{
             <<"name">> => Name,
             <<"description">> => maps:get(description, Handler, <<>>),
@@ -2332,10 +2341,12 @@ renderable(Feature, Revision) ->
 %% The four catalogue listings differ only in what they list and how one
 %% entry is rendered. `tasks/list' is not one of them: it lists from
 %% barrel_mcp_tasks and keys on `taskId', not the registry.
-registry_page(Kind, WireKey, Params, Id, Render) ->
+registry_page(Kind, WireKey, Params, Id, Render) when is_atom(Kind) ->
+    registry_page(barrel_mcp_registry:all(Kind), WireKey, Params, Id, Render);
+registry_page(Items, WireKey, Params, Id, Render) ->
     Cursor = maps:get(<<"cursor">>, Params, undefined),
     {Page, Next} = paginate(
-        barrel_mcp_registry:all(Kind),
+        Items,
         Cursor,
         fun({N, _}) -> N end
     ),

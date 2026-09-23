@@ -556,6 +556,82 @@ The engine handles routing (`/mcp`, `/`, and
 validation, authentication and async tool calls, identically to the
 built-in server.
 
+## Serving a different tool set per endpoint
+
+The tool registry is one per node, so by default every endpoint lists
+and calls every registered tool. Use `tool_filter` when one router
+serves several logical endpoints (one per tenant, one per agent) and
+each must see only its own tools.
+
+`tool_filter` is a `fun((Name :: binary(), Handler :: map()) ->
+boolean())` in the engine config. `Handler` is the registry's handler
+map, as `barrel_mcp_registry:all(tool)` returns it, so the filter can
+read anything given at registration.
+
+Register the tools with something the filter can match on:
+
+```erlang
+ok = barrel_mcp:reg_tool(<<"acme_search">>, acme_tools, search, #{
+    description => <<"Search Acme's documents">>,
+    annotations => #{<<"tenant">> => <<"acme">>}
+}),
+ok = barrel_mcp:reg_tool(<<"globex_search">>, globex_tools, search, #{
+    description => <<"Search Globex's documents">>,
+    annotations => #{<<"tenant">> => <<"globex">>}
+}).
+```
+
+Build one engine config per tenant, each with its own filter:
+
+```erlang
+tenant_config(Tenant) ->
+    {ok, Auth} = barrel_mcp_http_engine:init_auth(#{}),
+    #{
+        mode => stream,
+        auth_config => Auth,
+        session_enabled => true,
+        allowed_origins => any,
+        allow_missing_origin => true,
+        sse_buffer_size => 256,
+        resource_metadata => undefined,
+        tool_filter => fun(_Name, Handler) ->
+            Annotations = maps:get(annotations, Handler, #{}),
+            maps:get(<<"tenant">>, Annotations, undefined) =:= Tenant
+        end
+    }.
+```
+
+Build each config once, then have your router dispatch to the one the
+path names:
+
+```erlang
+Configs = #{
+    <<"acme">> => tenant_config(<<"acme">>),
+    <<"globex">> => tenant_config(<<"globex">>)
+},
+%% For a request on /mcp/<Tenant>:
+Config = maps:get(Tenant, Configs),
+barrel_mcp_http_engine:handle(Method, Path, Headers, Body, Responder, Config).
+```
+
+What the filter decides:
+
+- `tools/list` lists only the tools it accepts. It runs before
+  pagination, so every page is full and cursors stay valid.
+- `tools/call` on a tool it refuses answers exactly like a name that
+  was never registered (`Unknown tool: <name>`, `isError: true`),
+  so a client cannot tell a hidden tool from a missing one.
+- A filter that raises hides the tool and logs a warning.
+- Without `tool_filter`, nothing changes.
+- Resources, resource templates, prompts and completions are not
+  filtered.
+- The option applies to the stream, simple and legacy SSE modes of
+  the engine. It is not an option of `barrel_mcp:start_http_stream/1`
+  or of stdio.
+
+With livery, pass the filter to each `livery_mcp:handler/1` once
+livery supports the option.
+
 ## Example: Complete Server
 
 ```erlang

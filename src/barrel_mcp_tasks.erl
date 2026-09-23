@@ -173,7 +173,7 @@ mode(undefined, _Ctx) ->
 mode(_ToolName, undefined) ->
     inline;
 mode(ToolName, Ctx) ->
-    case {barrel_mcp_registry:task_support(ToolName), enabled(Ctx)} of
+    case {task_support(ToolName, Ctx), enabled(Ctx)} of
         {forbidden, _} ->
             inline;
         {optional, false} ->
@@ -185,6 +185,14 @@ mode(ToolName, Ctx) ->
                 true -> {task, escalate};
                 false -> {task, immediate}
             end
+    end.
+
+%% A tool the endpoint hides runs inline like an unknown one, so neither
+%% a refusal nor a task handle reveals it.
+task_support(ToolName, Ctx) ->
+    case barrel_mcp_registry:find_tool(ToolName, barrel_mcp_ctx:tool_filter(Ctx)) of
+        {ok, Handler} -> maps:get(task_support, Handler, forbidden);
+        error -> forbidden
     end.
 
 %% @doc Whether this client can be handed a task at all. A modern one

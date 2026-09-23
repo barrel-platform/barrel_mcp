@@ -51,7 +51,8 @@
     auth_info/1,
     principal/1,
     streaming/1,
-    meta/1
+    meta/1,
+    tool_filter/1
 ]).
 
 -type era() :: modern | legacy.
@@ -68,8 +69,12 @@
     client_capabilities => map(),
     %% The revision the transport itself declares for this request, from
     %% `MCP-Protocol-Version'. Used only to decide the era.
-    transport_version => binary() | undefined
+    transport_version => binary() | undefined,
+    %% The endpoint's choice of which tools it lists and lets be called.
+    tool_filter => tool_filter()
 }.
+
+-type tool_filter() :: fun((Name :: binary(), Handler :: map()) -> boolean()).
 
 -type ctx() :: #{
     era := era(),
@@ -82,10 +87,11 @@
     session_id := binary() | undefined,
     auth_info := term(),
     streaming := boolean(),
-    meta := map()
+    meta := map(),
+    tool_filter => tool_filter()
 }.
 
--export_type([ctx/0, era/0, extra/0]).
+-export_type([ctx/0, era/0, extra/0, tool_filter/0]).
 
 %%====================================================================
 %% Construction
@@ -104,7 +110,7 @@ from_request(Request, Extra) when is_map(Request), is_map(Extra) ->
     Params = as_map(maps:get(<<"params">>, Request, #{})),
     Meta = as_map(maps:get(<<"_meta">>, Params, #{})),
     Era = classify(Method, Meta, maps:get(transport_version, Extra, undefined)),
-    #{
+    Ctx = #{
         era => Era,
         protocol_version => version_of(Era, Meta, Extra),
         client_info => as_map_or_undefined(
@@ -122,7 +128,11 @@ from_request(Request, Extra) when is_map(Request), is_map(Extra) ->
         auth_info => maps:get(auth_info, Extra, undefined),
         streaming => as_boolean(maps:get(streaming, Extra, false)),
         meta => Meta
-    }.
+    },
+    case Extra of
+        #{tool_filter := F} when is_function(F, 2) -> Ctx#{tool_filter => F};
+        _ -> Ctx
+    end.
 
 %% Either signal puts a request in the modern era: the `_meta' key it
 %% carries, or the revision the transport declares for it. Taking only
@@ -320,6 +330,12 @@ session_id(#{session_id := S}) -> S.
 %% @doc The authenticated principal, as returned by the auth provider.
 -spec auth_info(ctx()) -> term().
 auth_info(#{auth_info := A}) -> A.
+
+%% @doc The endpoint's tool filter, or `undefined' when it lists and
+%% calls every registered tool.
+-spec tool_filter(ctx() | map()) -> tool_filter() | undefined.
+tool_filter(#{tool_filter := F}) -> F;
+tool_filter(_) -> undefined.
 
 %% @doc The stable identity behind the credential, as
 %% `barrel_mcp_auth:authenticate/3' derived it.

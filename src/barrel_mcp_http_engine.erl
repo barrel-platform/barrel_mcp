@@ -106,6 +106,8 @@
     subscription_keepalive_ms => pos_integer(),
     sse_keepalive_ms => pos_integer(),
     resource_metadata => undefined | map(),
+    %% Which tools this endpoint lists and lets be called. Absent: all.
+    tool_filter => barrel_mcp_ctx:tool_filter(),
     _ => _
 }.
 
@@ -252,7 +254,7 @@ simple_post_authenticated(Headers, Body, Responder, Config, AuthInfo) ->
     case barrel_mcp_protocol:decode(Body) of
         {ok, Request} ->
             RequestWithAuth = with_auth(Request, AuthInfo),
-            case barrel_mcp_protocol:handle(RequestWithAuth) of
+            case barrel_mcp_protocol:handle(RequestWithAuth, endpoint_state(Config)) of
                 no_response ->
                     reply(Responder, 204, cors_headers(Headers, Config, #{}), <<>>);
                 {async, Plan} ->
@@ -273,6 +275,13 @@ simple_post_authenticated(Headers, Body, Responder, Config, AuthInfo) ->
             ),
             reply_json(Headers, Responder, Config, 400, Err)
     end.
+
+%% What the endpoint's config adds to the protocol state. Empty unless
+%% it sets a tool filter, so the state is otherwise what it always was.
+endpoint_state(#{tool_filter := Filter}) when is_function(Filter, 2) ->
+    #{tool_filter => Filter};
+endpoint_state(_Config) ->
+    #{}.
 
 reply_json(Headers, Responder, Config, Status, Envelope) ->
     Json = barrel_mcp_protocol:encode(Envelope),
@@ -355,7 +364,7 @@ stream_post_batch(Headers, Responder, Config, SessionEnabled, Batch, AuthInfo) -
             {ok, Sid} -> Sid;
             {error, _} -> undefined
         end,
-    ProtocolState = #{
+    ProtocolState = (endpoint_state(Config))#{
         auth_info => AuthInfo,
         protocol_version => negotiated_version(Headers, SessionId),
         session_id => SessionId
@@ -429,7 +438,7 @@ stream_post_request(Headers, Responder, Config, SessionEnabled, Request, AuthInf
 %% Stateless: no session to look up, none to mint, and no
 %% `Mcp-Session-Id' on the way back.
 handle_modern_request(Headers, Responder, Config, Request, AuthInfo, Transport) ->
-    case validate_metadata_headers(Headers, Request) of
+    case validate_metadata_headers(Headers, Request, Config) of
         {error, Message} ->
             Id = maps:get(<<"id">>, Request, null),
             reply_jsonrpc_error(
@@ -450,7 +459,7 @@ handle_modern_request(Headers, Responder, Config, Request, AuthInfo, Transport) 
 %% parsing the body. If the two disagree, one component has acted on a
 %% different request than the other will, so the request is rejected
 %% rather than resolved in favour of either.
-validate_metadata_headers(Headers, Request) ->
+validate_metadata_headers(Headers, Request, Config) ->
     case maps:is_key(<<"id">>, Request) of
         false ->
             %% A notification. This revision leaves header requirements
@@ -458,10 +467,10 @@ validate_metadata_headers(Headers, Request) ->
             %% hold it to.
             ok;
         true ->
-            validate_request_headers(Headers, Request)
+            validate_request_headers(Headers, Request, Config)
     end.
 
-validate_request_headers(Headers, Request) ->
+validate_request_headers(Headers, Request, Config) ->
     Method = maps:get(<<"method">>, Request, <<>>),
     Params = params_of(Request),
     case check_protocol_version_header(Headers, Params) of
@@ -472,7 +481,7 @@ validate_request_headers(Headers, Request) ->
                 Headers,
                 Method,
                 Params,
-                header_params_for(Method, Params)
+                header_params_for(Method, Params, maps:get(tool_filter, Config, undefined))
             )
     end.
 
@@ -507,12 +516,13 @@ compare_protocol_version_header(Other, Declared) ->
 
 %% Only a tool call mirrors parameters, and only the ones its schema
 %% opted into. The bindings were validated and stored at registration.
-header_params_for(<<"tools/call">>, Params) ->
-    case barrel_mcp_registry:find(tool, maps:get(<<"name">>, Params, <<>>)) of
+%% A tool the endpoint hides has none, like an unknown one.
+header_params_for(<<"tools/call">>, Params, Filter) ->
+    case barrel_mcp_registry:find_tool(maps:get(<<"name">>, Params, <<>>), Filter) of
         {ok, Handler} -> maps:get(header_params, Handler, []);
         error -> []
     end;
-header_params_for(_Method, _Params) ->
+header_params_for(_Method, _Params, _Filter) ->
     [].
 
 params_of(Request) ->
@@ -525,7 +535,7 @@ dispatch_modern_request(Headers, Responder, Config, Request, AuthInfo, Transport
     case
         barrel_mcp_protocol:handle(
             with_auth(Request, AuthInfo),
-            #{
+            (endpoint_state(Config))#{
                 auth_info => AuthInfo,
                 streaming => true,
                 transport_version => Transport
@@ -788,8 +798,8 @@ handle_dispatch(Headers, Responder, Config, SessionId, Request, AuthInfo) ->
         ok ->
             ProtocolState0 =
                 case SessionId of
-                    undefined -> #{};
-                    _ -> #{session_id => SessionId}
+                    undefined -> endpoint_state(Config);
+                    _ -> (endpoint_state(Config))#{session_id => SessionId}
                 end,
             %% The negotiated revision decides whether a batch is
             %% accepted at all, so the protocol core needs it rather
@@ -1878,7 +1888,7 @@ legacy_dispatch(SessionId, Headers, Body, Responder, Config, AuthInfo) ->
             %% Pinning the transport version to a legacy revision keeps
             %% the header-aware era selection from routing its probe
             %% into a stateless path the pair cannot serve.
-            ProtocolState = #{
+            ProtocolState = (endpoint_state(Config))#{
                 auth_info => AuthInfo,
                 protocol_version => negotiated_version(Headers, SessionId),
                 transport_version => legacy_transport_version(Headers, SessionId),

@@ -136,6 +136,10 @@ deployment, and connects to both. See the
   Total, MessageOrUndef)`; out-of-band code can use
   `barrel_mcp:notify_progress/3,4`.
 
+- Per-endpoint tool filter: the engine config's `tool_filter`
+  decides which tools an endpoint lists and lets be called. A hidden
+  tool answers as unknown. See `http-stream.md`.
+
 ### Sessions
 
 - ETS tables are `protected`; mutators run in
@@ -230,6 +234,8 @@ by the spec.
 - Progress: pass `progress_token` to `call_tool/4` and the caller
   receives `{mcp_progress, Token, Params}` for every matching
   `notifications/progress` until the request settles.
+- Request `_meta`: pass `meta => Map` to `call_tool/4` and it is
+  sent as `params._meta`, merged with any `progress_token`.
 - Periodic ping: opt-in via `ping_interval` (and
   `ping_failure_threshold`) in the connect spec; the connection is
   closed with reason `ping_failed` after the configured number of

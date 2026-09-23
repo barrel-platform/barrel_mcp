@@ -73,6 +73,20 @@ era_notification_test() ->
     ?assertEqual(modern, barrel_mcp_ctx:era(barrel_mcp_ctx:from_request(Notification))).
 
 %%====================================================================
+%% Endpoint tool filter
+%%====================================================================
+
+tool_filter_absent_test() ->
+    Ctx = barrel_mcp_ctx:from_request(request(<<"tools/list">>, #{})),
+    ?assertEqual(undefined, barrel_mcp_ctx:tool_filter(Ctx)),
+    ?assertNot(maps:is_key(tool_filter, Ctx)).
+
+tool_filter_kept_test() ->
+    F = fun(_, _) -> true end,
+    Ctx = barrel_mcp_ctx:from_request(request(<<"tools/list">>, #{}), #{tool_filter => F}),
+    ?assertEqual(F, barrel_mcp_ctx:tool_filter(Ctx)).
+
+%%====================================================================
 %% Malformed input is coerced, never crashes
 %%====================================================================
 
