@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.1] - 2026-09-27
+
+### Changed
+
+- hackney `~> 4.8.0` (locked at 4.8.3, pulling quic 2.0.1 and
+  webtransport 0.4.7), h2 `~> 0.12.0` (locked at 0.12.3), h1
+  `~> 0.9.0`. Each dependency now accepts any patch release of its
+  minor series.
+- rebar3_lint 6.0.0.
+
 ## [4.1.0] - 2026-09-23
 
 Everything is additive. A server whose auth provider does not export
