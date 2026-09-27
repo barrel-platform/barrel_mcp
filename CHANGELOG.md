@@ -9,10 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- hackney `~> 4.8.0` (locked at 4.8.3, pulling quic 2.0.1 and
-  webtransport 0.4.7), h2 `~> 0.12.0` (locked at 0.12.3), h1
-  `~> 0.9.0`. Each dependency now accepts any patch release of its
-  minor series.
+- hackney `~> 4.8.4` (pulling quic 2.0.1 and webtransport 0.4.7),
+  h2 `~> 0.12.0` (locked at 0.12.3), h1 `~> 0.9.0`. Each dependency
+  now accepts any patch release of its minor series.
 - rebar3_lint 6.0.0.
 
 ## [4.1.0] - 2026-09-23
