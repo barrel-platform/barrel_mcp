@@ -71,7 +71,7 @@
 -include("barrel_mcp.hrl").
 
 %% API
--export([task_support/1]).
+-export([task_support/1, task_provider/1, task_providers/0]).
 -export([
     start_link/0,
     wait_for_ready/0,
@@ -323,6 +323,8 @@ run_completion(Key, Value, Ctx) ->
 %%   <li>`{tool_validation_failed, RequestId, Errors}' if input
 %%       validation was enabled and the args didn't match
 %%       `input_schema'.</li>
+%%   <li>`{tool_task, RequestId, TaskId}' for `{task, TaskId}' from a
+%%       tool registered with `task_provider'.</li>
 %% </ul>
 %%
 %% Returns the worker pid.
@@ -400,6 +402,10 @@ deliver_tool_result({input_required, Requests, State}, _Handler, ReplyTo, Reques
     is_map(Requests)
 ->
     ReplyTo ! {tool_input_required, RequestId, Requests, State};
+deliver_tool_result({task, TaskId}, #{task_provider := _}, ReplyTo, RequestId) when
+    is_binary(TaskId)
+->
+    ReplyTo ! {tool_task, RequestId, TaskId};
 deliver_tool_result({tool_error, Content}, _Handler, ReplyTo, RequestId) ->
     ReplyTo ! {tool_error, RequestId, Content};
 deliver_tool_result({tool_error, Content, Meta}, _Handler, ReplyTo, RequestId) when
@@ -725,7 +731,8 @@ build_tool(Module, Function, Opts, InputSchema) ->
             },
             Merged = maps:merge(Base, opt_field(output_schema, Opts)),
             Merged1 = maps:merge(Merged, opt_field(annotations, Opts)),
-            add_metadata(Merged1, Opts)
+            Merged2 = maps:merge(Merged1, opt_field(task_provider, Opts)),
+            add_metadata(Merged2, Opts)
     end.
 
 %% @doc A registered tool's `taskSupport'; `forbidden' for a tool that
@@ -736,6 +743,19 @@ task_support(Name) ->
         {ok, Handler} -> maps:get(task_support, Handler, forbidden);
         error -> forbidden
     end.
+
+%% @doc The module hosting a tool's tasks, if it declared one.
+-spec task_provider(binary()) -> module() | undefined.
+task_provider(Name) ->
+    case find(tool, Name) of
+        {ok, Handler} -> maps:get(task_provider, Handler, undefined);
+        error -> undefined
+    end.
+
+%% @doc Every module a registered tool names as its task provider.
+-spec task_providers() -> [module()].
+task_providers() ->
+    lists:usort([M || {_, #{task_provider := M}} <- all(tool), is_atom(M)]).
 
 %% `task_support' is the extension's vocabulary (ToolExecution.taskSupport):
 %% `forbidden' (default), `optional' or `required'. `long_running => true'

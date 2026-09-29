@@ -659,6 +659,9 @@ ok = barrel_mcp_tasks:finish(SessionId, TaskId, #{<<"reindexed">> => 12000}).
 Tasks are evicted from memory one hour after they reach a terminal
 state (completed / failed / cancelled).
 
+To keep tasks across a restart, or to hand back a task your application
+owns, see [Durable Tasks](durable-tasks.md).
+
 ## Server → client notifications
 
 The façades below are era-neutral: each fans out to legacy session SSE
