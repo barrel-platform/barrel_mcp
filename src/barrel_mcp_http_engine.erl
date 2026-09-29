@@ -886,6 +886,14 @@ handle_async_tool_call(
     %% once; a modern one gets a task only when the tool takes longer
     %% than the inline window (barrel_mcp_task_relay).
     TaskMode = barrel_mcp_tasks:mode(ToolName, RequestCtx),
+    %% A tool whose tasks the application hosts creates no built-in
+    %% task: it runs as an inline call that may name its task.
+    Hosted =
+        case TaskMode of
+            {task, _} -> barrel_mcp_registry:task_provider(ToolName);
+            _ -> undefined
+        end,
+    WindowEnd = erlang:monotonic_time(millisecond) + barrel_mcp_task_relay:inline_ms(),
     Meta = maps:get(<<"_meta">>, Params, #{}),
     ProgressToken = maps:get(<<"progressToken">>, Meta, undefined),
     Self = self(),
@@ -898,7 +906,7 @@ handle_async_tool_call(
                 200,
                 barrel_mcp_protocol:missing_tasks_capability(RequestId)
             );
-        {task, immediate} ->
+        {task, immediate} when Hosted =:= undefined ->
             handle_long_running_call(
                 Headers,
                 Responder,
@@ -911,7 +919,7 @@ handle_async_tool_call(
                 Spawn,
                 AuthInfo
             );
-        _ when TaskMode =:= inline; TaskMode =:= {task, escalate} ->
+        _ ->
             %% Opting into progress or logging turns the reply into an
             %% SSE stream, opened before the tool runs.
             LogLevel = request_log_level(Reply),
@@ -932,9 +940,9 @@ handle_async_tool_call(
                     {false, _} -> emit_log_fun(Reply, SessionId)
                 end,
             Relay =
-                case TaskMode of
-                    {task, escalate} -> barrel_mcp_task_relay:start();
-                    inline -> undefined
+                case {TaskMode, Hosted} of
+                    {{task, escalate}, undefined} -> barrel_mcp_task_relay:start();
+                    _ -> undefined
                 end,
             Ctx = #{
                 session_id => SessionId,
@@ -976,7 +984,9 @@ handle_async_tool_call(
                             Relay, WorkerPid, RequestId, ToolName, Reply, OnProgress
                         )
                 end,
-            Outcome = settle_disconnect(Outcome0, WorkerPid),
+            Outcome = settle_hosted(
+                settle_disconnect(Outcome0, WorkerPid), Hosted, RequestCtx, WindowEnd
+            ),
             case SessionId of
                 undefined -> ok;
                 _ -> ok = barrel_mcp_session:clear_in_flight(SessionId, RequestId)
@@ -1029,6 +1039,19 @@ cancels_on_disconnect(#{ctx := Ctx}) when Ctx =/= undefined ->
     barrel_mcp_ctx:is_modern(Ctx);
 cancels_on_disconnect(_Reply) ->
     false.
+
+%% The handler named a task its application hosts. Without a provider
+%% the call could not take a task at all, and the handler should have
+%% checked `barrel_mcp:task_allowed/1'.
+settle_hosted({hosted_task, TaskId}, undefined, _Ctx, _WindowEnd) ->
+    logger:warning("Tool returned task ~p to a call that cannot take one", [TaskId]),
+    {failed, task_not_allowed};
+settle_hosted({hosted_task, TaskId}, Mod, Ctx, WindowEnd) ->
+    barrel_mcp_task_provider:call_outcome(
+        Mod, task_owner(Ctx), TaskId, Ctx, WindowEnd
+    );
+settle_hosted(Outcome, _Hosted, _Ctx, _WindowEnd) ->
+    Outcome.
 
 %% Nobody left to answer, so stop the worker and use the outcome that
 %% has no envelope.
@@ -1379,6 +1402,8 @@ collect_tool_outcome(RequestId, Deadline, OnEmit, CancelOnDisconnect) ->
                 {tool_error, Content, Meta};
             {tool_failed, RequestId, Reason} ->
                 {failed, Reason};
+            {tool_task, RequestId, TaskId} ->
+                {hosted_task, TaskId};
             {tool_validation_failed, RequestId, Errors} ->
                 {validation_failed, Errors};
             {cancelled, RequestId} ->
@@ -1396,6 +1421,11 @@ collect_tool_outcome(RequestId, Deadline, OnEmit, CancelOnDisconnect) ->
 %% envelopes. `cancelled' has no envelope: there is nothing to answer.
 tool_outcome_envelope(Reply, RequestId, {task, Result}) ->
     tool_success(Reply, RequestId, Result, #{});
+%% A hosted task that ended inside the inline window.
+tool_outcome_envelope(Reply, RequestId, {call_result, Result}) ->
+    tool_success(Reply, RequestId, Result, #{});
+tool_outcome_envelope(_Reply, RequestId, {rpc_error, Code, Message}) ->
+    barrel_mcp_protocol:error_response(RequestId, Code, Message);
 tool_outcome_envelope(Reply, RequestId, {input_required, Requests, State}) ->
     barrel_mcp_protocol:input_required_envelope(
         maps:get(plan, Reply, #{}), Requests, State, RequestId

@@ -127,7 +127,15 @@
     log/3,
     log/4,
     request_state/1,
-    client_supports/2
+    client_supports/2,
+    task_owner/1,
+    task_allowed/1
+]).
+
+%% Tasks hosted by the application (see barrel_mcp_task_provider).
+-export([
+    register_task_provider/1,
+    unregister_task_provider/1
 ]).
 
 %% MCP client API (connecting to remote MCP servers).
@@ -167,6 +175,11 @@ version() ->
 %%       `annotations' on `tools/list'. Spec keys are
 %%       `readOnlyHint', `destructiveHint', `idempotentHint',
 %%       `openWorldHint' (all booleans). Values pass through verbatim.</li>
+%%   <li>`task_support' - `forbidden' (default), `optional' or
+%%       `required': whether a call may be answered with a task.</li>
+%%   <li>`task_provider' - a `barrel_mcp_task_provider' module hosting
+%%       this tool's tasks. The handler may then return
+%%       `{task, TaskId}' when {@link task_allowed/1} is true.</li>
 %% </ul>
 %%
 %% == Handler Return Values ==
@@ -1070,6 +1083,46 @@ client_supports(Ctx, Feature) when is_map(Ctx) ->
         undefined -> false;
         McpCtx -> barrel_mcp_ctx:supports(McpCtx, Feature)
     end.
+
+%% @doc Who a task started by this call belongs to, for a tool whose
+%% tasks are hosted by a `barrel_mcp_task_provider'. Keep it with the
+%% task, or `barrel_mcp_tasks:principal/1' of it, and compare on every
+%% provider call.
+-spec task_owner(map()) -> term().
+task_owner(Ctx) when is_map(Ctx) ->
+    case maps:get(mcp_ctx, Ctx, undefined) of
+        undefined -> undefined;
+        McpCtx -> barrel_mcp_protocol:task_owner(McpCtx)
+    end.
+
+%% @doc Whether this call may be answered with `{task, TaskId}'.
+%%
+%% `false' when the client cannot follow a task (it did not declare the
+%% extension) or the tool does not support tasks. The tool then answers
+%% with a plain result.
+-spec task_allowed(map()) -> boolean().
+task_allowed(Ctx) when is_map(Ctx) ->
+    case maps:get(mcp_ctx, Ctx, undefined) of
+        undefined ->
+            false;
+        McpCtx ->
+            case barrel_mcp_tasks:mode(maps:get(tool_name, Ctx, undefined), McpCtx) of
+                {task, _} -> true;
+                _ -> false
+            end
+    end.
+
+%% @doc Ask `Module' for task ids barrel_mcp does not hold. Kept in the
+%% `task_providers' app env, so it outlives a restart of the
+%% application. A tool registered with `task_provider => Module' does
+%% not need this.
+-spec register_task_provider(module()) -> ok.
+register_task_provider(Module) ->
+    barrel_mcp_task_provider:register(Module).
+
+-spec unregister_task_provider(module()) -> ok.
+unregister_task_provider(Module) ->
+    barrel_mcp_task_provider:unregister(Module).
 
 %%====================================================================
 %% MCP client API

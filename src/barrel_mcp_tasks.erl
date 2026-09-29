@@ -13,8 +13,10 @@
 %%% `barrel_mcp_protocol:task_plan'), not here: this module is the
 %%% table and the lifecycle.
 %%%
-%%% Tasks live in a `protected' ETS table keyed by `TaskId', which is
-%%% crypto-random and so unique on its own. Who owns a task is a field
+%%% Tasks live in the configured {@link barrel_mcp_task_store}, a
+%%% node-local ETS table by default, keyed by `TaskId', which is
+%%% crypto-random and so unique on its own. Every write goes through
+%%% this process. Who owns a task is a field
 %%% rather than part of the key: a task id is the durable handle a
 %%% client holds, and it has to be resolvable without knowing what
 %%% created it.
@@ -27,6 +29,10 @@
 %%% A periodic sweep evicts terminal tasks (success / error /
 %%% cancelled) older than `?TASK_TTL'.
 %%%
+%%% An id this store does not hold is looked up in the application's
+%%% task providers ({@link barrel_mcp_task_provider}), so every public
+%%% read and action here also answers for hosted tasks.
+%%%
 %%% == Sections, in file order ==
 %%%
 %%% <ul>
@@ -34,8 +40,8 @@
 %%%       `set_worker/3', `await_input/5' for `input_required'.</li>
 %%%   <li>gen_server: every transition, the sweep, generation fencing
 %%%       so a late worker cannot revive an expired task.</li>
-%%%   <li>Internal: rendering per era (`ttl' versus `ttlMs'), the
-%%%       error object, expiry.</li>
+%%%   <li>Internal: the stored shape, restart recovery, expiry. Rendering
+%%%       per era lives in `barrel_mcp_task_provider:render/3'.</li>
 %%% </ul>
 %%% @end
 %%%-------------------------------------------------------------------
@@ -61,11 +67,16 @@
     params/2,
     owned/2,
     await_result/3,
-    update/3
+    update/3,
+    principal/1,
+    changed/3
 ]).
 
 %% Exported only so the sweep can name it as `fun ?MODULE:expire/1'.
 -export([expire/1]).
+
+%% Used by barrel_mcp_task_provider's await loop.
+-export([watch/1, unwatch/2]).
 
 -export([
     init/1,
@@ -75,7 +86,6 @@
     terminate/2
 ]).
 
--define(TABLE, barrel_mcp_tasks_table).
 %% 1 hour
 -define(TASK_TTL, 3600 * 1000).
 %% 1 minute
@@ -141,6 +151,11 @@
     generation = 0 :: non_neg_integer(),
     worker_pid :: pid() | undefined,
     request_id :: integer() | binary() | undefined,
+    %% Where and in which run of `barrel_mcp_tasks' the worker was
+    %% started. With a durable store a record outlives both, and a
+    %% working task from an earlier run has no worker left.
+    node = node() :: node(),
+    incarnation :: binary() | undefined,
     %% Everything needed to re-invoke the handler once its questions are
     %% answered. The worker that asked has already exited, so nothing is
     %% literally resumed: the handler runs again from the top and reads
@@ -222,41 +237,57 @@ get(SessionId, TaskId) ->
     {ok, map()} | {error, not_found}.
 get(SessionId, TaskId, Era) ->
     case lookup(SessionId, TaskId) of
-        {ok, Task} -> {ok, task_to_map(Task, Era)};
-        {error, not_found} -> {error, not_found}
+        {ok, Task} ->
+            {ok, task_to_map(Task, Era)};
+        {error, not_found} ->
+            case barrel_mcp_task_provider:find(SessionId, TaskId) of
+                {ok, _Mod, T} -> {ok, barrel_mcp_task_provider:render(T, SessionId, Era)};
+                {error, not_found} -> {error, not_found}
+            end
     end.
 
 %% A task is only visible to the session that owns it. Naming the right
 %% id but the wrong session is indistinguishable from naming an id that
 %% does not exist.
 lookup(Owner, TaskId) ->
-    case ets:lookup(?TABLE, TaskId) of
-        [{_, #task{owner = Owner} = Task}] -> {ok, Task};
-        _ -> {error, not_found}
+    case barrel_mcp_task_store:get(TaskId) of
+        {ok, Stored} ->
+            case from_stored(Stored) of
+                #task{owner = Owner} = Task -> {ok, Task};
+                _ -> {error, not_found}
+            end;
+        not_found ->
+            {error, not_found}
     end.
 
 %% @doc Every task an owner holds, rendered for the legacy era
 %% (`tasks/list' exists only there).
 -spec list(SessionId :: binary() | undefined, map()) -> {ok, [map()]}.
 list(SessionId, _Opts) ->
-    Tasks = ets:foldl(
-        fun
-            ({_, #task{owner = S} = T}, Acc) when S =:= SessionId ->
-                [task_to_map(T) | Acc];
-            (_, Acc) ->
-                Acc
+    Tasks = barrel_mcp_task_store:fold(
+        fun(_, Stored, Acc) ->
+            case from_stored(Stored) of
+                #task{owner = S} = T when S =:= SessionId -> [task_to_map(T) | Acc];
+                _ -> Acc
+            end
         end,
-        [],
-        ?TABLE
+        []
     ),
-    {ok, Tasks}.
+    Hosted = [
+        barrel_mcp_task_provider:render(T, SessionId, legacy)
+     || {_Mod, T} <- barrel_mcp_task_provider:list(SessionId)
+    ],
+    {ok, Tasks ++ Hosted}.
 
 %% @doc Mark a task as cancelled and notify the client. Sends
 %% `{cancel, RequestId}' to the worker pid (if recorded) so
 %% cooperative arity-2 handlers can abort.
 -spec cancel(binary() | undefined, binary()) -> ok | {error, not_found}.
 cancel(SessionId, TaskId) ->
-    gen_server:call(?MODULE, {cancel, SessionId, TaskId}).
+    case lookup(SessionId, TaskId) of
+        {ok, _} -> gen_server:call(?MODULE, {cancel, SessionId, TaskId});
+        {error, not_found} -> barrel_mcp_task_provider:cancel(SessionId, TaskId)
+    end.
 
 %% @doc Attach the worker to a task created before it, so cancel and
 %% expiry can reach the process; carries the request id for MRTR
@@ -289,7 +320,10 @@ fail(Owner, TaskId, Reason) ->
 -spec update(term(), binary(), map()) ->
     ok | {resume, map()} | {error, not_found}.
 update(Owner, TaskId, Responses) when is_map(Responses) ->
-    gen_server:call(?MODULE, {update, Owner, TaskId, Responses}).
+    case lookup(Owner, TaskId) of
+        {ok, _} -> gen_server:call(?MODULE, {update, Owner, TaskId, Responses});
+        {error, not_found} -> barrel_mcp_task_provider:update(Owner, TaskId, Responses)
+    end.
 
 %% @doc Block until a task reaches a terminal state, then return what
 %% the underlying request would have returned.
@@ -304,7 +338,7 @@ await_result(Owner, TaskId, Timeout) ->
         {ready, Task} ->
             {ok, Task};
         {error, not_found} ->
-            {error, not_found};
+            await_hosted(Owner, TaskId, Timeout);
         waiting ->
             receive
                 {task_terminal, TaskId, Task} -> {ok, Task}
@@ -321,7 +355,12 @@ await_result(Owner, TaskId, Timeout) ->
 %% task exists.
 -spec owned(term(), [binary()]) -> [binary()].
 owned(Owner, Ids) ->
-    [I || I <- Ids, lookup(Owner, I) =/= {error, not_found}].
+    [
+        I
+     || I <- Ids,
+        lookup(Owner, I) =/= {error, not_found} orelse
+            barrel_mcp_task_provider:find(Owner, I) =/= {error, not_found}
+    ].
 
 %% @doc The originating request params recorded for a task, if any.
 -spec params(term(), binary()) -> {ok, map()} | {error, not_found}.
@@ -343,14 +382,135 @@ await_input(Owner, TaskId, Requests, HandlerState, Params) ->
         ?MODULE, {await_input, Owner, TaskId, Requests, HandlerState, Params}
     ).
 
+%% @doc A stable id for the principal behind a task owner, for a task
+%% provider to store and compare after a restart. `undefined' when the
+%% caller is not authenticated.
+%%
+%% A legacy owner is a session id, so the principal is the session's:
+%% the same caller on a new session after a restart gets the same value.
+%% Only the derived principal is used, never the rest of `auth_info',
+%% which carries the token's `exp' and `jti'.
+-spec principal(term()) -> binary() | undefined.
+principal({principal, P}) ->
+    encode_principal(P);
+principal(SessionId) when is_binary(SessionId) ->
+    case barrel_mcp_session:get_principal(SessionId) of
+        {ok, P} -> encode_principal(P);
+        {error, not_found} -> undefined
+    end;
+principal(_Owner) ->
+    undefined.
+
+%% Hashed from a canonical encoding rather than `term_to_binary/1',
+%% whose output for the same term may change between releases. A term
+%% with no canonical form (a pid, a ref) still encodes to something that
+%% no other caller shares; it only stops being stable across restarts,
+%% which such a principal never was.
+encode_principal(anonymous) ->
+    undefined;
+encode_principal(undefined) ->
+    undefined;
+encode_principal(P) ->
+    Hash = crypto:hash(sha256, canon(P)),
+    <<"p1.", (binary:encode_hex(Hash, lowercase))/binary>>.
+
+canon(A) when is_atom(A) -> tagged($a, atom_to_binary(A, utf8));
+canon(B) when is_binary(B) -> tagged($b, B);
+canon(I) when is_integer(I) -> tagged($i, integer_to_binary(I));
+canon(L) when is_list(L) -> canon_list(L, []);
+canon(T) when is_tuple(T) ->
+    [<<$t, (tuple_size(T)):32>> | [canon(E) || E <- tuple_to_list(T)]];
+canon(M) when is_map(M) ->
+    Pairs = lists:sort([{iolist_to_binary(canon(K)), canon(V)} || K := V <- M]),
+    [<<$m, (map_size(M)):32>> | [[K, V] || {K, V} <- Pairs]];
+canon(Other) ->
+    tagged($x, term_to_binary(Other, [deterministic])).
+
+canon_list([H | T], Acc) -> canon_list(T, [canon(H) | Acc]);
+canon_list([], Acc) -> [<<$l, (length(Acc)):32>> | lists:reverse(Acc)];
+canon_list(Tail, Acc) -> [<<$L, (length(Acc)):32>>, lists:reverse(Acc), canon(Tail)].
+
+tagged(Tag, Bin) ->
+    [<<Tag, (byte_size(Bin)):32>>, Bin].
+
+%% @doc Announce a change to a task hosted by `Module'. The task is read
+%% back through `Module:get/2' and delivered as a status notification
+%% the same way a built-in task's is, then anyone waiting on it in
+%% `tasks/result' or the inline window is told to look again.
+-spec changed(module(), term(), binary()) -> ok | {error, not_found}.
+changed(Module, Owner, TaskId) ->
+    case barrel_mcp_task_provider:get(Module, Owner, TaskId) of
+        {ok, Task} ->
+            notify_hosted(Owner, Task),
+            gen_server:cast(?MODULE, {nudge, TaskId}),
+            ok;
+        {error, not_found} ->
+            {error, not_found}
+    end.
+
+%% @doc Wait until `tasks/result' may answer for a hosted task, or
+%% `changed/3' says to look again.
+-spec watch(binary()) -> reference().
+watch(TaskId) ->
+    gen_server:call(?MODULE, {watch, TaskId, self()}).
+
+-spec unwatch(binary(), reference()) -> ok.
+unwatch(TaskId, Ref) ->
+    gen_server:cast(?MODULE, {unwatch, TaskId, self(), Ref}).
+
+await_hosted(Owner, TaskId, Timeout) ->
+    case barrel_mcp_task_provider:find(Owner, TaskId) of
+        {ok, Mod, _} ->
+            case barrel_mcp_task_provider:await(Mod, Owner, TaskId, Timeout) of
+                {ok, T} -> {ok, barrel_mcp_task_provider:render(T, Owner, legacy)};
+                {error, _} = Err -> Err
+            end;
+        {error, not_found} ->
+            {error, not_found}
+    end.
+
 %%====================================================================
 %% gen_server
 %%====================================================================
 
 init([]) ->
-    _ = ensure_table(),
-    erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
-    {ok, #{waiters => #{}}}.
+    case barrel_mcp_task_store:start() of
+        ok ->
+            Incarnation = binary:encode_hex(crypto:strong_rand_bytes(8), lowercase),
+            ok = recover(Incarnation),
+            erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
+            {ok, #{waiters => #{}, nudges => #{}, incarnation => Incarnation}};
+        {error, Reason} ->
+            {stop, {task_store, Reason}}
+    end.
+
+%% A task this node was running before it restarted has no worker left
+%% to finish it. Only a durable store has any: the default table went
+%% with the previous process. The generation is bumped too, so a worker
+%% of an earlier run of this VM that still reports is discarded.
+%%
+%% Nothing is announced: no session or subscription exists yet.
+recover(Incarnation) ->
+    Node = node(),
+    barrel_mcp_task_store:fold(
+        fun(_TaskId, Stored, ok) ->
+            case from_stored(Stored) of
+                #task{status = working, node = Node, incarnation = I, generation = G} = T when
+                    I =/= Incarnation
+                ->
+                    store(T#task{
+                        status = failed,
+                        error = interrupted_error(),
+                        generation = G + 1,
+                        worker_pid = undefined,
+                        updated_at = erlang:system_time(millisecond)
+                    });
+                _ ->
+                    ok
+            end
+        end,
+        ok
+    ).
 
 %% What the requestor asked for, clamped to what this server is willing
 %% to hold. Reporting the granted value is required; reporting the
@@ -362,21 +522,6 @@ granted_ttl(Opts) ->
         Requested when is_integer(Requested), Requested > 0 -> min(Requested, Max);
         _ -> min(Default, Max)
     end.
-
-%% A parked task publishes what it is waiting for, so a client polling
-%% `tasks/get' can see which answers to supply through `tasks/update'.
-with_input_requests(Base, #task{status = input_required, mrtr = #mrtr{} = M}) ->
-    Base#{
-        <<"inputRequests">> => maps:from_list([
-            {K, #{<<"method">> => maps:get(K, M#mrtr.issued, null)}}
-         || K <- M#mrtr.outstanding
-        ])
-    };
-with_input_requests(Base, _Task) ->
-    Base.
-
-ttl_or_null(undefined) -> null;
-ttl_or_null(Ttl) -> Ttl.
 
 %% Park a task on the questions its handler asked. Everything needed to
 %% run the handler again is stored here, since the worker that asked has
@@ -411,7 +556,7 @@ do_await_input(Owner, TaskId, Requests, HandlerState, Params) ->
                         mrtr = M1,
                         updated_at = erlang:system_time(millisecond)
                     },
-                    true = ets:insert(?TABLE, {TaskId, Updated}),
+                    ok = store(Updated),
                     notify_changed(Owner, Updated),
                     ok
             end
@@ -483,7 +628,7 @@ do_update(Owner, TaskId, Responses) ->
                     end,
                 updated_at = erlang:system_time(millisecond)
             },
-            true = ets:insert(?TABLE, {TaskId, Updated}),
+            ok = store(Updated),
             case Remaining of
                 [] ->
                     notify_changed(Owner, Updated),
@@ -550,27 +695,17 @@ admit(Owner) ->
         barrel_mcp, max_tasks_per_principal, ?DEFAULT_MAX_TASKS_PER_PRINCIPAL
     ),
     Total = application:get_env(barrel_mcp, max_tasks_total, ?DEFAULT_MAX_TASKS_TOTAL),
-    case ets:info(?TABLE, size) of
-        Size when is_integer(Size), Size >= Total ->
+    case barrel_mcp_task_store:count() >= Total of
+        true ->
             {error, too_many_tasks};
-        _ ->
-            case count_owned(Owner) >= PerPrincipal of
+        false ->
+            case barrel_mcp_task_store:count_owned(Owner) >= PerPrincipal of
                 true -> {error, too_many_tasks};
                 false -> ok
             end
     end.
 
-count_owned(Owner) ->
-    ets:foldl(
-        fun
-            ({_, #task{owner = O}}, N) when O =:= Owner -> N + 1;
-            (_, N) -> N
-        end,
-        0,
-        ?TABLE
-    ).
-
-do_create(Owner, Method, Opts) ->
+do_create(Owner, Method, Opts, Incarnation) ->
     Now = erlang:system_time(millisecond),
     TaskId = generate_id(),
     Task = #task{
@@ -581,9 +716,10 @@ do_create(Owner, Method, Opts) ->
         status = working,
         ttl_ms = granted_ttl(Opts),
         created_at = Now,
-        updated_at = Now
+        updated_at = Now,
+        incarnation = Incarnation
     },
-    true = ets:insert(?TABLE, {TaskId, Task}),
+    ok = store(Task),
     notify_changed(Owner, Task),
     {ok, TaskId}.
 
@@ -592,7 +728,7 @@ handle_call({create, Owner, Method, Opts}, _From, State) ->
         {error, Reason} ->
             {reply, {error, Reason}, State};
         ok ->
-            {reply, do_create(Owner, Method, Opts), State}
+            {reply, do_create(Owner, Method, Opts, maps:get(incarnation, State)), State}
     end;
 handle_call({cancel, SessionId, TaskId}, _From, State) ->
     %% Best-effort: send the worker a cooperative cancel signal so
@@ -621,7 +757,7 @@ handle_call({set_worker, SessionId, TaskId, Info}, _From, State) ->
                     worker_pid = maps:get(worker, Info),
                     request_id = maps:get(request_id, Info, undefined)
                 },
-                true = ets:insert(?TABLE, {TaskId, Updated}),
+                ok = store(Updated),
                 ok;
             {error, not_found} ->
                 {error, not_found}
@@ -655,34 +791,63 @@ handle_call({finish, SessionId, TaskId, Result}, _From, State) ->
 handle_call({fail, SessionId, TaskId, Reason}, _From, State) ->
     Reply = transition(SessionId, TaskId, failed, undefined, Reason),
     {reply, Reply, maybe_wake(SessionId, TaskId, State)};
+handle_call({watch, TaskId, Caller}, _From, State) ->
+    Ref = monitor(process, Caller),
+    Nudges = maps:get(nudges, State),
+    Existing = maps:get(TaskId, Nudges, []),
+    {reply, Ref, State#{nudges => Nudges#{TaskId => [{Caller, Ref} | Existing]}}};
 handle_call(_, _, State) ->
     {reply, {error, unknown_request}, State}.
 
 handle_cast({stop_waiting, TaskId, Caller}, State) ->
     {noreply, drop_waiter(TaskId, Caller, State)};
+handle_cast({nudge, TaskId}, State) ->
+    Nudges = maps:get(nudges, State),
+    case maps:take(TaskId, Nudges) of
+        {List, Rest} ->
+            _ = [Caller ! {task_nudge, TaskId, Ref} || {Caller, Ref} <- List],
+            _ = [demonitor(Ref, [flush]) || {_, Ref} <- List],
+            {noreply, State#{nudges => Rest}};
+        error ->
+            {noreply, State}
+    end;
+handle_cast({unwatch, TaskId, Caller, Ref}, State) ->
+    demonitor(Ref, [flush]),
+    Nudges = maps:get(nudges, State),
+    Kept = [W || W <- maps:get(TaskId, Nudges, []), W =/= {Caller, Ref}],
+    {noreply, State#{
+        nudges =>
+            case Kept of
+                [] -> maps:remove(TaskId, Nudges);
+                _ -> Nudges#{TaskId => Kept}
+            end
+    }};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info({'DOWN', Ref, process, Pid, _Reason}, State) ->
-    Waiters = maps:get(waiters, State, #{}),
-    Pruned = maps:filtermap(
-        fun(_TaskId, List) ->
-            case [W || {C, R} = W <- List, C =/= Pid orelse R =/= Ref] of
-                [] -> false;
-                Kept -> {true, Kept}
-            end
-        end,
-        Waiters
-    ),
-    {noreply, State#{waiters => Pruned}};
+    Prune = fun(Map) ->
+        maps:filtermap(
+            fun(_TaskId, List) ->
+                case [W || {C, R} = W <- List, C =/= Pid orelse R =/= Ref] of
+                    [] -> false;
+                    Kept -> {true, Kept}
+                end
+            end,
+            Map
+        )
+    end,
+    {noreply, State#{
+        waiters => Prune(maps:get(waiters, State, #{})),
+        nudges => Prune(maps:get(nudges, State, #{}))
+    }};
 handle_info(sweep, State) ->
     Now = erlang:system_time(millisecond),
-    {Expired, Stranded, Reapable} = ets:foldl(
-        fun({TaskId, T}, {E, S, R}) ->
-            classify_for_sweep(TaskId, T, Now, {E, S, R})
+    {Expired, Stranded, Reapable} = barrel_mcp_task_store:fold(
+        fun(TaskId, Stored, Acc) ->
+            classify_for_sweep(TaskId, from_stored(Stored), Now, Acc)
         end,
-        {[], [], []},
-        ?TABLE
+        {[], [], []}
     ),
     %% Expiry applies in every state. A working or input_required task
     %% past its ttl would otherwise hold its worker and continuation
@@ -695,30 +860,88 @@ handle_info(sweep, State) ->
         end,
         Stranded
     ),
-    lists:foreach(fun(K) -> ets:delete(?TABLE, K) end, Reapable),
+    lists:foreach(fun barrel_mcp_task_store:delete/1, Reapable),
     erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
     {noreply, State};
 handle_info(_, State) ->
     {noreply, State}.
 
-terminate(_Reason, _State) -> ok.
+terminate(_Reason, _State) ->
+    barrel_mcp_task_store:stop().
 
 %%====================================================================
 %% Internal
 %%====================================================================
 
-ensure_table() ->
-    case ets:whereis(?TABLE) of
-        undefined ->
-            ets:new(?TABLE, [
-                named_table,
-                protected,
-                set,
-                {read_concurrency, true}
-            ]);
-        _ ->
-            ok
-    end.
+store(#task{id = TaskId} = Task) ->
+    barrel_mcp_task_store:put(TaskId, to_stored(Task)).
+
+%% What a backend keeps. A map rather than the record, so a store that
+%% outlives an upgrade can still read what an older release wrote.
+to_stored(#task{} = T) ->
+    #{
+        v => 1,
+        id => T#task.id,
+        owner => T#task.owner,
+        method => T#task.method,
+        params => T#task.params,
+        status => T#task.status,
+        result => T#task.result,
+        error => T#task.error,
+        created_at => T#task.created_at,
+        updated_at => T#task.updated_at,
+        ttl_ms => T#task.ttl_ms,
+        generation => T#task.generation,
+        worker_pid => T#task.worker_pid,
+        request_id => T#task.request_id,
+        node => T#task.node,
+        incarnation => T#task.incarnation,
+        mrtr =>
+            case T#task.mrtr of
+                undefined ->
+                    undefined;
+                #mrtr{} = M ->
+                    #{
+                        issued => M#mrtr.issued,
+                        outstanding => M#mrtr.outstanding,
+                        responses => M#mrtr.responses,
+                        state => M#mrtr.state,
+                        rounds => M#mrtr.rounds
+                    }
+            end
+    }.
+
+from_stored(#{v := 1} = S) ->
+    #task{
+        id = maps:get(id, S),
+        owner = maps:get(owner, S),
+        method = maps:get(method, S),
+        params = maps:get(params, S, #{}),
+        status = maps:get(status, S),
+        result = maps:get(result, S, undefined),
+        error = maps:get(error, S, undefined),
+        created_at = maps:get(created_at, S),
+        updated_at = maps:get(updated_at, S),
+        ttl_ms = maps:get(ttl_ms, S, undefined),
+        generation = maps:get(generation, S, 0),
+        worker_pid = maps:get(worker_pid, S, undefined),
+        request_id = maps:get(request_id, S, undefined),
+        node = maps:get(node, S, node()),
+        incarnation = maps:get(incarnation, S, undefined),
+        mrtr =
+            case maps:get(mrtr, S, undefined) of
+                undefined ->
+                    undefined;
+                M ->
+                    #mrtr{
+                        issued = maps:get(issued, M, #{}),
+                        outstanding = maps:get(outstanding, M, []),
+                        responses = maps:get(responses, M, #{}),
+                        state = maps:get(state, M, undefined),
+                        rounds = maps:get(rounds, M, 0)
+                    }
+            end
+    }.
 
 generate_id() ->
     Rand = crypto:strong_rand_bytes(16),
@@ -728,22 +951,36 @@ generate_id() ->
 %% Three outcomes: past its ttl in any state, working with a dead worker
 %% and nothing reported, or a terminal record whose retention window has
 %% also elapsed.
-classify_for_sweep(TaskId, #task{status = St} = T, Now, {E, S, R}) ->
-    case {expired(T, Now), St} of
-        {true, _} ->
+classify_for_sweep(TaskId, #task{status = St} = T, Now, {E, S, R}) when
+    St =:= working; St =:= input_required
+->
+    classify_live(TaskId, T, Now, {E, S, R});
+%% Reapable is checked first: it implies expired, so testing expiry first
+%% kept every terminal record with a ttl forever.
+classify_for_sweep(TaskId, T, Now, {E, S, R}) ->
+    case {reapable(T, Now), expired(T, Now)} of
+        {true, _} -> {E, S, [TaskId | R]};
+        {false, true} -> {[T | E], S, R};
+        {false, false} -> {E, S, R}
+    end.
+
+%% A live task is swept only by the node running it, or by any node once
+%% that one is gone. With a shared store, two nodes expiring the same
+%% worker would race each other's transitions.
+classify_live(TaskId, #task{node = Node, status = St} = T, Now, {E, S, R}) ->
+    Here = Node =:= node() orelse not lists:member(Node, nodes()),
+    case {Here, expired(T, Now), St} of
+        {false, _, _} ->
+            {E, S, R};
+        {true, true, _} ->
             {[T | E], S, R};
-        {false, working} ->
+        {true, false, working} ->
             case stranded(T, Now) of
                 true -> {E, [{TaskId, T} | S], R};
                 false -> {E, S, R}
             end;
-        {false, input_required} ->
-            {E, S, R};
-        {false, _Terminal} ->
-            case reapable(T, Now) of
-                true -> {E, S, [TaskId | R]};
-                false -> {E, S, R}
-            end
+        {true, false, input_required} ->
+            {E, S, R}
     end.
 
 %% From creation, not from the last update: ttl is the retention this
@@ -764,13 +1001,13 @@ reapable(#task{updated_at = U}, Now) ->
 %% result arriving from the worker afterwards cannot revive it.
 expire(#task{id = TaskId, owner = Owner, worker_pid = Worker, generation = G}) ->
     _ =
-        case is_pid(Worker) andalso is_process_alive(Worker) of
+        case alive(Worker) of
             true -> exit(Worker, kill);
             false -> ok
         end,
     case lookup(Owner, TaskId) of
         {ok, Current} ->
-            true = ets:insert(?TABLE, {TaskId, Current#task{generation = G + 1}}),
+            ok = store(Current#task{generation = G + 1}),
             _ = transition(Owner, TaskId, failed, undefined, expired_error()),
             ok;
         {error, not_found} ->
@@ -779,6 +1016,24 @@ expire(#task{id = TaskId, owner = Owner, worker_pid = Worker, generation = G}) -
 
 expired_error() ->
     #{<<"code">> => -32603, <<"message">> => <<"Task expired">>}.
+
+interrupted_error() ->
+    #{<<"code">> => -32603, <<"message">> => <<"Task interrupted by a restart">>}.
+
+%% With a store shared between nodes a worker may be remote, and after a
+%% restart a recorded pid may belong to an earlier incarnation of this
+%% node, which `is_process_alive/1' refuses. A remote worker counts as
+%% alive while its node is connected.
+alive(Pid) when is_pid(Pid), node(Pid) =:= node() ->
+    try
+        is_process_alive(Pid)
+    catch
+        error:badarg -> false
+    end;
+alive(Pid) when is_pid(Pid) ->
+    lists:member(node(Pid), nodes());
+alive(_) ->
+    false.
 
 %% A working task whose worker is gone and which nothing has reported
 %% on. The collector normally records the outcome the moment the worker
@@ -791,7 +1046,7 @@ expired_error() ->
 %% mid-report: a worker that exited a whole sweep interval ago has had
 %% its result recorded by now if it produced one.
 stranded(#task{worker_pid = Worker, updated_at = U}, Now) when is_pid(Worker) ->
-    U < Now - ?SWEEP_INTERVAL andalso not is_process_alive(Worker);
+    U < Now - ?SWEEP_INTERVAL andalso not alive(Worker);
 stranded(_Task, _Now) ->
     false.
 
@@ -804,7 +1059,7 @@ transition(SessionId, TaskId, Status, Result, Reason) ->
                 error = Reason,
                 updated_at = erlang:system_time(millisecond)
             },
-            true = ets:insert(?TABLE, {TaskId, Updated}),
+            ok = store(Updated),
             notify_changed(SessionId, Updated),
             ok;
         {ok, _Terminal} ->
@@ -814,94 +1069,79 @@ transition(SessionId, TaskId, Status, Result, Reason) ->
             {error, not_found}
     end.
 
-%% Only a legacy task has a session channel to notify on. A modern
-%% client polls `tasks/get' instead.
 %% The eras deliver differently. A legacy task belongs to a session and
 %% is announced on its stream as `notifications/tasks/status'; a modern
 %% one has no session and is announced as `notifications/tasks' to the
 %% subscriptions that named its id.
-notify_changed(SessionId, #task{} = Task) when is_binary(SessionId) ->
+notify_changed(Owner, #task{} = Task) ->
+    notify_hosted(Owner, neutral(Task)).
+
+notify_hosted(SessionId, Task) when is_binary(SessionId) ->
     case barrel_mcp_session:get_sse_pid(SessionId) of
         {ok, Pid} when is_pid(Pid) ->
             Pid !
                 {sse_send_message, #{
                     <<"jsonrpc">> => <<"2.0">>,
                     <<"method">> => <<"notifications/tasks/status">>,
-                    <<"params">> => task_to_map(Task, legacy)
+                    <<"params">> => barrel_mcp_task_provider:render(Task, SessionId, legacy)
                 }},
             ok;
         _ ->
             ok
     end;
-notify_changed(Owner, #task{id = TaskId} = Task) ->
-    barrel_mcp_subscriptions:task_changed(TaskId, Owner, task_to_map(Task, modern)).
+notify_hosted(Owner, #{id := TaskId} = Task) ->
+    barrel_mcp_subscriptions:task_changed(
+        TaskId, Owner, barrel_mcp_task_provider:render(Task, Owner, modern)
+    ).
 
 task_to_map(Task) ->
     task_to_map(Task, legacy).
 
-%% The two eras name the retention field differently: `ttl' through
-%% 2025-11-25, `ttlMs' in the extension. Both report what was granted,
-%% not what was asked for, and both require it.
-task_to_map(
-    #task{
-        id = Id,
-        owner = Owner,
-        method = M,
-        status = St,
-        result = R,
-        error = E,
-        created_at = C,
-        updated_at = U,
-        ttl_ms = Ttl
-    } = Task,
-    Era
-) ->
-    TtlKey =
-        case Era of
-            modern -> <<"ttlMs">>;
-            _ -> <<"ttl">>
-        end,
-    Base0 = #{
-        <<"taskId">> => Id,
-        <<"method">> => M,
-        <<"status">> => atom_to_binary(St, utf8),
-        <<"createdAt">> => to_rfc3339(C),
-        <<"lastUpdatedAt">> => to_rfc3339(U),
-        TtlKey => ttl_or_null(Ttl)
+task_to_map(#task{owner = Owner} = Task, Era) ->
+    barrel_mcp_task_provider:render(neutral(Task), Owner, Era).
+
+%% The era-neutral shape a task provider hands back, so a built-in task
+%% and a hosted one render through the same code.
+neutral(#task{
+    id = Id,
+    method = M,
+    status = St,
+    result = R,
+    error = E,
+    created_at = C,
+    updated_at = U,
+    ttl_ms = Ttl,
+    mrtr = Mrtr
+}) ->
+    Base = #{
+        id => Id,
+        method => M,
+        status => St,
+        created_at => C,
+        updated_at => U,
+        ttl_ms => Ttl
     },
-    Base = with_input_requests(Base0, Task),
     Base1 =
-        case Owner of
-            Sid when is_binary(Sid) -> Base#{<<"sessionId">> => Sid};
-            _ -> Base
+        case R of
+            undefined -> Base;
+            _ -> Base#{result => R}
         end,
     Base2 =
-        case St =:= completed of
-            true when R =/= undefined -> Base1#{<<"result">> => R};
-            _ -> Base1
+        case E of
+            undefined -> Base1;
+            _ -> Base1#{error => E}
         end,
-    case St =:= failed of
-        true when E =/= undefined ->
-            Base2#{<<"error">> => format_error(E)};
+    %% A parked task publishes what it is waiting for, so a client
+    %% polling `tasks/get' can see which answers to supply through
+    %% `tasks/update'.
+    case {St, Mrtr} of
+        {input_required, #mrtr{issued = Issued, outstanding = Out}} ->
+            Base2#{
+                input_requests => maps:from_list([
+                    {K, #{<<"method">> => maps:get(K, Issued, null)}}
+                 || K <- Out
+                ])
+            };
         _ ->
             Base2
     end.
-
-to_rfc3339(Ms) when is_integer(Ms) ->
-    iolist_to_binary(
-        calendar:system_time_to_rfc3339(
-            Ms,
-            [
-                {unit, millisecond},
-                {offset, "Z"}
-            ]
-        )
-    ).
-
-%% tasks.md "Task Execution Errors": the `error' field is the JSON-RPC
-%% error, so a bare reason is wrapped as an internal error.
-format_error(#{<<"code">> := _, <<"message">> := _} = E) ->
-    E;
-format_error(B) when is_binary(B) -> #{<<"code">> => -32603, <<"message">> => B};
-format_error(T) ->
-    #{<<"code">> => -32603, <<"message">> => iolist_to_binary(io_lib:format("~p", [T]))}.

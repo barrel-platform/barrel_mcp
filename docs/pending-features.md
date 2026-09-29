@@ -3,7 +3,7 @@
 Design notes for features that are **not yet implemented** and likely
 worth doing. Each entry is sized to be picked up as one focused PR.
 
-**Nothing is pending as of 4.1.1.** The last entry here, Dynamic Client
+**Nothing is pending as of 4.2.0.** The last entry here, Dynamic Client
 Registration (RFC 7591), shipped and has since been deprecated by the
 specification in favour of Client ID Metadata Documents, which shipped
 alongside it. See [Client registration](../guides/authentication.md#client-registration).
@@ -14,8 +14,10 @@ Where to look instead:
   [Protocol Versions](../guides/protocol-versions.md).
 - **What the specification deprecated**, and what replaces it: the
   Deprecated section of [`CHANGELOG.md`](../CHANGELOG.md).
-- **What is deliberately out of scope**: durable multi-node task
-  storage. Tasks stay node-local. The JSON Schema validator does not
+- **What is deliberately out of scope**: cross-node delivery of task
+  status notifications; they stay on the node where the change happens.
+  Durable task storage is pluggable, see
+  [Durable Tasks](../guides/durable-tasks.md). The JSON Schema validator does not
   implement ECMAScript regex property escapes or `$vocabulary` switching
   keyword sets off; both are recorded in the schema suite's skip list.
 

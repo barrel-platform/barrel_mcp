@@ -1150,11 +1150,14 @@ create_task_result(_TaskId, Task, Ctx) ->
             %% status, createdAt, lastUpdatedAt and ttlMs are all
             %% required. Building a handle by hand left the timestamps
             %% out, so the stored task is the source here.
-            Task#{
-                <<"resultType">> => <<"task">>,
-                <<"pollIntervalMs">> =>
-                    application:get_env(barrel_mcp, task_poll_interval_ms, 1000)
-            }
+            %% A hosted task may name its own poll interval.
+            maps:merge(
+                #{
+                    <<"pollIntervalMs">> =>
+                        application:get_env(barrel_mcp, task_poll_interval_ms, 1000)
+                },
+                Task#{<<"resultType">> => <<"task">>}
+            )
     end.
 
 %%====================================================================
@@ -1909,16 +1912,71 @@ drive_async_plan(Plan, Timeout, AuthInfo, OnSpawn) ->
     Ctx = maps:get(ctx, Plan, undefined),
     RequestId = maps:get(request_id, Plan),
     ToolName = maps:get(tool_name, Plan, undefined),
-    case barrel_mcp_tasks:mode(ToolName, Ctx) of
-        refuse ->
+    case {barrel_mcp_tasks:mode(ToolName, Ctx), hosted_by(ToolName)} of
+        {refuse, _} ->
             finalize(missing_tasks_capability(RequestId), Ctx);
+        {{task, _}, Mod} when Mod =/= undefined ->
+            finalize(drive_hosted_task(Plan, Mod, Timeout, AuthInfo, OnSpawn), Ctx);
+        {Mode, _} ->
+            drive_by_mode(Mode, Plan, Timeout, AuthInfo, OnSpawn)
+    end.
+
+drive_by_mode(Mode, Plan, Timeout, AuthInfo, OnSpawn) ->
+    Ctx = maps:get(ctx, Plan, undefined),
+    ToolName = maps:get(tool_name, Plan, undefined),
+    case Mode of
         {task, escalate} ->
             finalize(drive_inline_then_task(Plan, ToolName, Ctx, AuthInfo, OnSpawn), Ctx);
         {task, immediate} ->
             finalize(drive_as_task(Plan, ToolName, Ctx, AuthInfo), Ctx);
         inline ->
-            finalize(run_async_plan(Plan, Timeout, AuthInfo, OnSpawn), Ctx)
+            finalize(inline_only(run_async_plan(Plan, Timeout, AuthInfo, OnSpawn), Plan), Ctx)
     end.
+
+hosted_by(undefined) -> undefined;
+hosted_by(ToolName) -> barrel_mcp_registry:task_provider(ToolName).
+
+%% A tool whose tasks the application hosts. No task is created here:
+%% the handler starts the work and names its task, or answers in place.
+%% The wait is the call timeout rather than the inline window, since
+%% there is no built-in task to escalate to.
+drive_hosted_task(Plan, Mod, Timeout, AuthInfo, OnSpawn) ->
+    WindowEnd = erlang:monotonic_time(millisecond) + barrel_mcp_task_relay:inline_ms(),
+    Ctx = maps:get(ctx, Plan),
+    RequestId = maps:get(request_id, Plan),
+    case run_async_plan(Plan, Timeout, AuthInfo, OnSpawn) of
+        {hosted_task, TaskId} ->
+            case
+                barrel_mcp_task_provider:call_outcome(
+                    Mod, task_owner(Ctx), TaskId, Ctx, WindowEnd
+                )
+            of
+                {task, Result} ->
+                    success_response(RequestId, Result);
+                {call_result, Result} ->
+                    success_response(RequestId, Result);
+                {rpc_error, Code, Message} ->
+                    error_response(RequestId, Code, Message);
+                {failed, Reason} ->
+                    success_response(RequestId, decorate_result(tool_failure_result(Reason)))
+            end;
+        Response ->
+            Response
+    end.
+
+%% A task the client cannot follow is no answer: the handler should have
+%% checked `barrel_mcp:task_allowed/1'.
+inline_only({hosted_task, TaskId}, Plan) ->
+    logger:warning(
+        "Tool ~p returned task ~p to a call that cannot take one",
+        [maps:get(tool_name, Plan, undefined), TaskId]
+    ),
+    success_response(
+        maps:get(request_id, Plan),
+        decorate_result(tool_failure_result(task_not_allowed))
+    );
+inline_only(Response, _Plan) ->
+    Response.
 
 %% tasks.md "Task Creation": a task-supporting tool may still answer
 %% synchronously when it can, and an MRTR round before the work starts
@@ -2127,7 +2185,9 @@ await_plan_outcome(Plan, RequestId, Timeout) ->
         {tool_failed, RequestId, Reason} ->
             %% Built here, not by a handler, so finalize never sees it:
             %% stamp resultType and serverInfo the way every result gets.
-            success_response(RequestId, decorate_result(tool_failure_result(Reason)))
+            success_response(RequestId, decorate_result(tool_failure_result(Reason)));
+        {tool_task, RequestId, TaskId} ->
+            {hosted_task, TaskId}
     after Timeout ->
         timeout
     end.

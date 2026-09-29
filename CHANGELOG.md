@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.0] - 2026-09-29
+
+Everything is additive. With the default store and no task provider,
+tasks behave exactly as on 4.1.x.
+
+### Added
+
+- `barrel_mcp_task_store` behaviour and the `task_store` /
+  `task_store_opts` app env: barrel_mcp's own tasks can live in a
+  durable store. `barrel_mcp_task_store_ets` is the default. After a
+  restart, a task left `working` on that node becomes `failed`
+  ("Task interrupted by a restart"); a modern `input_required` task
+  resumes through `tasks/update`.
+- `barrel_mcp_task_provider` behaviour: the application owns a task's
+  id, state, input rounds and cancel. A tool registered with
+  `task_provider => Module` may return `{task, TaskId}`. `tasks/get`,
+  `tasks/update`, `tasks/cancel`, `tasks/result`, `tasks/list` and
+  `subscriptions/listen` look in the store first, then ask each
+  provider, so the handle resolves after a restart.
+- `barrel_mcp_tasks:principal/1`, a stable id for a task owner's
+  principal, and `barrel_mcp_tasks:changed/3`, which delivers a hosted
+  task's status notifications.
+- `barrel_mcp:task_owner/1`, `barrel_mcp:task_allowed/1`,
+  `barrel_mcp:register_task_provider/1` and
+  `unregister_task_provider/1`.
+- Guide: [Durable Tasks](guides/durable-tasks.md).
+
+### Fixed
+
+- A terminal task with a ttl was never evicted: the sweep matched it as
+  expired before checking whether it could be reaped.
+
 ## [4.1.1] - 2026-09-27
 
 ### Changed
