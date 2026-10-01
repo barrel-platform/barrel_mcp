@@ -379,6 +379,14 @@ checked. See
 [Show each caller its own entries](custom-authentication.md#show-each-caller-its-own-entries)
 for the notes, including why `cache_scope` must stay `private`.
 
+### Subscription checks
+
+Export the optional `authorize_subscribe/3` callback
+(`AuthInfo, Uri, State`) to decide which resources a caller may
+subscribe to, on `resources/subscribe` and in a `subscriptions/listen`
+filter. See
+[Control who can subscribe to a resource](custom-authentication.md#control-who-can-subscribe-to-a-resource).
+
 ## Accessing Auth Info in Handlers
 
 After successful authentication, auth info is available in the request:
@@ -891,8 +899,10 @@ When set:
 
 - `/.well-known/oauth-protected-resource` is served by the HTTP
   transport as a JSON metadata document.
-- The bearer challenge on 401 emits
-  `resource_metadata="<absolute PRM URL>"`. The PRM URL is
+- Every provider's 401 challenge carries
+  `resource_metadata="<absolute PRM URL>"`, appended to the
+  provider's `WWW-Authenticate` header (or as
+  `Bearer resource_metadata=...` when it sends none). The PRM URL is
   derived from `resource` by default; pass
   `metadata_url => <<"https://...">>` in the option map to
   override.

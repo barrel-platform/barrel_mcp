@@ -12,7 +12,10 @@
 %%%
 %%% It may also export `visible(Kind, {Name, Handler}, AuthInfo, State)
 %%% -> boolean()' to choose which registry entries a caller sees in list
-%%% responses; see `barrel_mcp_auth:visible/4'.
+%%% responses; see `barrel_mcp_auth:visible/4'. And
+%%% `authorize_subscribe(AuthInfo, Uri, State) -> boolean()' to decide
+%%% which resources a caller may subscribe to; see
+%%% `barrel_mcp_auth:authorize_subscribe/3'.
 %%%
 %%% == Usage ==
 %%%
@@ -55,7 +58,7 @@
 
 -behaviour(barrel_mcp_auth).
 
--export([init/1, authenticate/2, challenge/2, visible/4]).
+-export([init/1, authenticate/2, challenge/2, visible/4, authorize_subscribe/3]).
 
 %%====================================================================
 %% barrel_mcp_auth callbacks
@@ -107,6 +110,17 @@ visible(Kind, Entry, AuthInfo, #{module := Module, module_state := ModuleState})
     _ = code:ensure_loaded(Module),
     case erlang:function_exported(Module, visible, 4) of
         true -> Module:visible(Kind, Entry, AuthInfo, ModuleState);
+        false -> true
+    end.
+
+%% @doc Ask the custom module whether this caller may subscribe to
+%% `Uri', when it exports `authorize_subscribe/3'. Every subscription
+%% is accepted otherwise.
+-spec authorize_subscribe(map(), binary(), map()) -> boolean().
+authorize_subscribe(AuthInfo, Uri, #{module := Module, module_state := ModuleState}) ->
+    _ = code:ensure_loaded(Module),
+    case erlang:function_exported(Module, authorize_subscribe, 3) of
+        true -> Module:authorize_subscribe(AuthInfo, Uri, ModuleState);
         false -> true
     end.
 

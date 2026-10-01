@@ -108,6 +108,35 @@ Notes:
   another.
 - Without `visible/4` every caller sees every entry, as before.
 
+## Control who can subscribe to a resource
+
+A subscription has no handler to refuse a caller, so without a check
+anyone holding a URI can learn when it changes. You need this when
+resources belong to different callers, for example memories shared per
+workspace.
+
+Export `authorize_subscribe/3`. It receives the auth info, the URI and
+your module state:
+
+```erlang
+-module(my_auth).
+-export([init/1, authenticate/2, authorize_subscribe/3]).
+
+authorize_subscribe(#{subject := Subject}, Uri, _State) ->
+    my_acl:can_read(Subject, Uri).
+```
+
+Notes:
+
+- It is asked on `resources/subscribe` and for each URI in a
+  `subscriptions/listen` filter.
+- A refused `resources/subscribe` gets the same error as a missing
+  resource. A refused URI is dropped from the listen filter, so the
+  acknowledgement does not list it.
+- Anything but `true`, including a raise, refuses and logs a warning.
+- Without `authorize_subscribe/3` every subscription is accepted, as
+  before.
+
 ## Example: barrel_memory Integration
 
 Here's how barrel_memory uses custom auth with its existing key system:

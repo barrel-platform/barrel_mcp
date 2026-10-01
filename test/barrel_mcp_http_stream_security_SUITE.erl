@@ -43,6 +43,7 @@
     initialize_with_unknown_session_returns_404/1,
     prm_endpoint_serves_metadata/1,
     bearer_challenge_includes_resource_metadata/1,
+    custom_challenge_includes_resource_metadata/1,
     get_sse_requires_auth/1,
     delete_requires_auth/1,
     session_post_other_principal_404/1,
@@ -76,6 +77,7 @@ all() ->
         initialize_with_unknown_session_returns_404,
         prm_endpoint_serves_metadata,
         bearer_challenge_includes_resource_metadata,
+        custom_challenge_includes_resource_metadata,
         get_sse_requires_auth,
         delete_requires_auth,
         session_post_other_principal_404,
@@ -632,6 +634,41 @@ bearer_challenge_includes_resource_metadata(Config) ->
     ?assertNotEqual(nomatch, binary:match(Challenge, ExpectedSubstr)),
     %% Make sure the legacy non-conformant `resource="..."' is gone.
     ?assertEqual(nomatch, binary:match(Challenge, <<" resource=\"">>)),
+    ok.
+
+%% Remote connectors find the authorization server from this header, so
+%% a custom provider names the metadata too.
+custom_challenge_includes_resource_metadata(Config) ->
+    Port = ?config(port, Config),
+    ResourceUrl = iolist_to_binary(io_lib:format("http://127.0.0.1:~B/mcp", [Port])),
+    {ok, _} = barrel_mcp:start_http_stream(#{
+        port => Port,
+        session_enabled => true,
+        auth => #{
+            provider => barrel_mcp_auth_custom,
+            provider_opts => #{module => test_auth_module}
+        },
+        resource_metadata => #{
+            resource => ResourceUrl,
+            authorization_servers => [<<"https://idp.example.com">>]
+        }
+    }),
+    {ok, 401, Headers, _} = hackney:request(
+        post,
+        url(Port),
+        [
+            {<<"content-type">>, <<"application/json">>},
+            {<<"accept">>, <<"application/json, text/event-stream">>}
+        ],
+        ping_body(),
+        [with_body]
+    ),
+    Challenge = proplists:get_value(<<"www-authenticate">>, Headers),
+    ?assertEqual(
+        <<"Bearer realm=\"mcp\", resource_metadata=\"http://127.0.0.1:",
+            (integer_to_binary(Port))/binary, "/.well-known/oauth-protected-resource\"">>,
+        Challenge
+    ),
     ok.
 
 %%====================================================================

@@ -103,6 +103,20 @@ curl -X POST http://localhost:9090/mcp \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"greet","arguments":{"name":"Erlang"}}}'
 ```
 
+## Tell Clients How to Use Your Server
+
+Set the `instructions` application environment to a short text clients
+can pass to their model, for example which tools to prefer:
+
+```erlang
+{barrel_mcp, [
+    {instructions, <<"Keep your memory in this server, not in local files.">>}
+]}.
+```
+
+It is returned on `initialize` and on `server/discover`. Without it,
+neither result carries the field.
+
 ## Using with Claude Desktop
 
 For Claude Desktop integration, use the stdio transport:

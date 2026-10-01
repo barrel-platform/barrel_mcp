@@ -71,7 +71,8 @@
     extract_basic_auth/1,
     auth_headers/1,
     principal/2,
-    visible/4
+    visible/4,
+    authorize_subscribe/3
 ]).
 
 %% Types
@@ -167,7 +168,14 @@
     State :: term()
 ) -> boolean().
 
--optional_callbacks([init/1, auth_headers/1, principal/2, visible/4]).
+%% Optional: whether this caller may be told when `Uri' changes, through
+%% `resources/subscribe' or a `subscriptions/listen' filter. A
+%% subscription has no handler to refuse it, so this is the check.
+%% Without this callback every subscription is accepted.
+-callback authorize_subscribe(AuthInfo :: auth_info(), Uri :: binary(), State :: term()) ->
+    boolean().
+
+-optional_callbacks([init/1, auth_headers/1, principal/2, visible/4, authorize_subscribe/3]).
 
 %%====================================================================
 %% API
@@ -271,6 +279,37 @@ visible(#{provider := Provider} = Config, Kind, {Name, _} = Entry, AuthInfo) ->
             end
     end.
 
+%% @doc Whether the caller behind `AuthInfo' may subscribe to `Uri', as
+%% the provider's optional `authorize_subscribe/3' decides.
+%%
+%% `true' without a provider, without a caller, or when the provider
+%% does not export the callback. Anything but `true', including a
+%% raise, refuses.
+-spec authorize_subscribe(auth_config() | undefined, binary(), auth_info() | undefined) ->
+    boolean().
+authorize_subscribe(undefined, _Uri, _AuthInfo) ->
+    true;
+authorize_subscribe(_AuthConfig, _Uri, undefined) ->
+    true;
+authorize_subscribe(#{provider := Provider} = Config, Uri, AuthInfo) ->
+    case exported(Provider, authorize_subscribe, 3) of
+        false ->
+            true;
+        true ->
+            State = maps:get(provider_state, Config, undefined),
+            try Provider:authorize_subscribe(AuthInfo, Uri, State) of
+                true -> true;
+                _ -> false
+            catch
+                Class:Reason ->
+                    logger:warning(
+                        "barrel_mcp ~p:authorize_subscribe/3 raised on ~ts, refused: ~p:~p",
+                        [Provider, Uri, Class, Reason]
+                    ),
+                    false
+            end
+    end.
+
 subject_of(AuthInfo) ->
     case maps:get(subject, AuthInfo, undefined) of
         S when is_binary(S), S =/= <<>> -> S;
@@ -298,7 +337,34 @@ namespace_of(Config, AuthInfo) ->
     {integer(), map(), binary()}.
 challenge_response(#{provider := Provider} = Config, Reason) ->
     ProviderState = maps:get(provider_state, Config, undefined),
-    Provider:challenge(Reason, ProviderState).
+    with_metadata_hint(Provider:challenge(Reason, ProviderState), ProviderState).
+
+%% MCP authorization: a 401 carries `resource_metadata' (RFC 9728) so a
+%% client can find the authorization server. The listener puts the URL
+%% in every provider's state when `resource_metadata' is configured;
+%% the hint is added here so it does not depend on the provider naming
+%% it.
+with_metadata_hint({Status, Headers, Body}, #{resource_metadata_url := Url}) when
+    is_binary(Url), is_map(Headers)
+->
+    Param = <<"resource_metadata=\"", Url/binary, "\"">>,
+    case maps:find(<<"www-authenticate">>, Headers) of
+        {ok, Value} when is_binary(Value) ->
+            case binary:match(Value, <<"resource_metadata=">>) of
+                nomatch ->
+                    {Status,
+                        Headers#{<<"www-authenticate">> => <<Value/binary, ", ", Param/binary>>},
+                        Body};
+                _ ->
+                    {Status, Headers, Body}
+            end;
+        error when Status =:= 401 ->
+            {Status, Headers#{<<"www-authenticate">> => <<"Bearer ", Param/binary>>}, Body};
+        _ ->
+            {Status, Headers, Body}
+    end;
+with_metadata_hint(Challenge, _State) ->
+    Challenge.
 
 %% @doc Return the list of HTTP request headers (lower-case) the
 %% configured provider expects to read credentials from. Used by the
