@@ -137,6 +137,23 @@ Notes:
 - Without `authorize_subscribe/3` every subscription is accepted, as
   before.
 
+How this follows the spec:
+
+- The resources security considerations say access controls
+  **SHOULD** be implemented for sensitive resources and permissions
+  **SHOULD** be checked before operations
+  ([2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/server/resources#security-considerations),
+  [2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/server/resources#security-considerations)).
+  The spec does not name a mechanism; this callback is barrel_mcp's.
+- A refused `resources/subscribe` answers the spec's resource-not-found
+  error: `-32002` through 2025-11-25, `-32602` in 2026-07-28, which
+  also tells clients to accept `-32002`
+  ([error handling](https://modelcontextprotocol.io/specification/2026-07-28/server/resources#error-handling)).
+- In 2026-07-28 the acknowledgement of `subscriptions/listen` "reflects
+  the subset the server agreed to honor"
+  ([subscriptions](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/subscriptions#acknowledgment)),
+  so dropping a refused URI from it is the defined way to decline one.
+
 ## Example: barrel_memory Integration
 
 Here's how barrel_memory uses custom auth with its existing key system:

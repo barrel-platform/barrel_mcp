@@ -911,6 +911,25 @@ The audience-claim string in `state.resource` (used for token
 verification by `barrel_mcp_auth_bearer`) is unaffected; only
 the wire emission of `WWW-Authenticate` changed.
 
+How this follows the spec:
+
+- 2025-06-18: servers **MUST** use `WWW-Authenticate` on a 401 to
+  indicate the resource metadata URL
+  ([authorization](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization#authorization-server-location)).
+  The header is what satisfies this, whatever the provider.
+- 2025-11-25 and 2026-07-28: servers **MUST** implement one of two
+  discovery mechanisms, the `resource_metadata` parameter on a 401 or
+  the well-known URI
+  ([2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization#protected-resource-metadata-discovery-requirements),
+  [2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/authorization-server-discovery)).
+  barrel_mcp does both: the header, and the document at the root form
+  `/.well-known/oauth-protected-resource`. Clients try the header first.
+- RFC 9728 section 5.1 allows `resource_metadata` with schemes other
+  than `Bearer`, so appending it to an API-key, Basic or custom
+  challenge is valid.
+- Authorization is optional in MCP. Without `resource_metadata`, no
+  document is served and no challenge is changed.
+
 The client side is implemented by
 `barrel_mcp_client_auth_oauth:parse_www_authenticate/1` and
 `discover_protected_resource/1`: together with the server side

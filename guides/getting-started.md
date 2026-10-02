@@ -117,6 +117,17 @@ can pass to their model, for example which tools to prefer:
 It is returned on `initialize` and on `server/discover`. Without it,
 neither result carries the field.
 
+How this follows the spec:
+
+- `instructions` is an optional field of `InitializeResult` in every
+  handshake revision, 2024-11-05 through 2025-11-25
+  ([lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle#initialization)).
+- In 2026-07-28 there is no handshake, and the same optional field is on
+  the `server/discover` result.
+- The spec leaves the use to the client ("this information MAY be added
+  to the system prompt"), so treat it as a hint, not a rule a client must
+  enforce.
+
 ## Using with Claude Desktop
 
 For Claude Desktop integration, use the stdio transport:
