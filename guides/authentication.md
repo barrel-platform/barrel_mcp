@@ -379,6 +379,14 @@ checked. See
 [Show each caller its own entries](custom-authentication.md#show-each-caller-its-own-entries)
 for the notes, including why `cache_scope` must stay `private`.
 
+### Subscription checks
+
+Export the optional `authorize_subscribe/3` callback
+(`AuthInfo, Uri, State`) to decide which resources a caller may
+subscribe to, on `resources/subscribe` and in a `subscriptions/listen`
+filter. See
+[Control who can subscribe to a resource](custom-authentication.md#control-who-can-subscribe-to-a-resource).
+
 ## Accessing Auth Info in Handlers
 
 After successful authentication, auth info is available in the request:
@@ -891,8 +899,10 @@ When set:
 
 - `/.well-known/oauth-protected-resource` is served by the HTTP
   transport as a JSON metadata document.
-- The bearer challenge on 401 emits
-  `resource_metadata="<absolute PRM URL>"`. The PRM URL is
+- Every provider's 401 challenge carries
+  `resource_metadata="<absolute PRM URL>"`, appended to the
+  provider's `WWW-Authenticate` header (or as
+  `Bearer resource_metadata=...` when it sends none). The PRM URL is
   derived from `resource` by default; pass
   `metadata_url => <<"https://...">>` in the option map to
   override.
@@ -900,6 +910,25 @@ When set:
 The audience-claim string in `state.resource` (used for token
 verification by `barrel_mcp_auth_bearer`) is unaffected; only
 the wire emission of `WWW-Authenticate` changed.
+
+How this follows the spec:
+
+- 2025-06-18: servers **MUST** use `WWW-Authenticate` on a 401 to
+  indicate the resource metadata URL
+  ([authorization](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization#authorization-server-location)).
+  The header is what satisfies this, whatever the provider.
+- 2025-11-25 and 2026-07-28: servers **MUST** implement one of two
+  discovery mechanisms, the `resource_metadata` parameter on a 401 or
+  the well-known URI
+  ([2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization#protected-resource-metadata-discovery-requirements),
+  [2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/authorization-server-discovery)).
+  barrel_mcp does both: the header, and the document at the root form
+  `/.well-known/oauth-protected-resource`. Clients try the header first.
+- RFC 9728 section 5.1 allows `resource_metadata` with schemes other
+  than `Bearer`, so appending it to an API-key, Basic or custom
+  challenge is valid.
+- Authorization is optional in MCP. Without `resource_metadata`, no
+  document is served and no challenge is changed.
 
 The client side is implemented by
 `barrel_mcp_client_auth_oauth:parse_www_authenticate/1` and

@@ -153,6 +153,8 @@ deployment, and connects to both. See the
 - Per-caller listings: a provider's optional `visible/4` decides
   which tools, resources, templates and prompts a caller lists,
   filtered before pagination. See `custom-authentication.md`.
+- Subscription checks: a provider's optional `authorize_subscribe/3`
+  decides which resources a caller may subscribe to.
 - Hashing: `barrel_mcp_auth_basic:hash_password/1,2` defaults to
   PBKDF2-SHA256 (100k iterations, 16-byte salt).
   `barrel_mcp_auth_apikey:hash_key/2` produces a peppered HMAC-SHA-256
@@ -161,8 +163,8 @@ deployment, and connects to both. See the
 - **OAuth 2.0 Protected Resource Metadata** (RFC 9728): pass
   `resource_metadata => #{resource, authorization_servers}` to
   `start_http_stream/1` / `start_http/1` to expose
-  `/.well-known/oauth-protected-resource` and have the bearer
-  challenge emit `WWW-Authenticate: Bearer ...
+  `/.well-known/oauth-protected-resource` and have every provider's
+  401 challenge emit `WWW-Authenticate: ...
   resource_metadata="<URL>"` so MCP clients auto-discover the
   authorization server.
 

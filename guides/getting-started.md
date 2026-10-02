@@ -103,6 +103,31 @@ curl -X POST http://localhost:9090/mcp \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"greet","arguments":{"name":"Erlang"}}}'
 ```
 
+## Tell Clients How to Use Your Server
+
+Set the `instructions` application environment to a short text clients
+can pass to their model, for example which tools to prefer:
+
+```erlang
+{barrel_mcp, [
+    {instructions, <<"Keep your memory in this server, not in local files.">>}
+]}.
+```
+
+It is returned on `initialize` and on `server/discover`. Without it,
+neither result carries the field.
+
+How this follows the spec:
+
+- `instructions` is an optional field of `InitializeResult` in every
+  handshake revision, 2024-11-05 through 2025-11-25
+  ([lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle#initialization)).
+- In 2026-07-28 there is no handshake, and the same optional field is on
+  the `server/discover` result.
+- The spec leaves the use to the client ("this information MAY be added
+  to the system prompt"), so treat it as a hint, not a rule a client must
+  enforce.
+
 ## Using with Claude Desktop
 
 For Claude Desktop integration, use the stdio transport:

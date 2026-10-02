@@ -1277,12 +1277,39 @@ initialize(Params, Id, Ctx) ->
             undefined ->
                 ok
         end,
-    success_response(Id, #{
-        <<"protocolVersion">> => NegotiatedVersion,
-        <<"capabilities">> =>
-            maybe_advertise_completions(legacy_capabilities(NegotiatedVersion)),
-        <<"serverInfo">> => server_info()
-    }).
+    success_response(
+        Id,
+        with_instructions(#{
+            <<"protocolVersion">> => NegotiatedVersion,
+            <<"capabilities">> =>
+                maybe_advertise_completions(legacy_capabilities(NegotiatedVersion)),
+            <<"serverInfo">> => server_info()
+        })
+    ).
+
+may_subscribe(Uri, Ctx) ->
+    barrel_mcp_auth:authorize_subscribe(
+        barrel_mcp_ctx:auth_config(Ctx), Uri, barrel_mcp_ctx:auth_info(Ctx)
+    ).
+
+%% A refused URI is dropped from the filter, as an unowned task id is:
+%% the acknowledgement names what was honoured, so it cannot be read as
+%% an existence check.
+allowed_resources(#{resource_subscriptions := Uris} = Filter, Ctx) ->
+    case [U || U <- Uris, may_subscribe(U, Ctx)] of
+        [] -> maps:remove(resource_subscriptions, Filter);
+        Kept -> Filter#{resource_subscriptions => Kept}
+    end;
+allowed_resources(Filter, _Ctx) ->
+    Filter.
+
+%% `instructions' is on InitializeResult in every handshake revision and
+%% on the `server/discover' result in the modern one.
+with_instructions(Result) ->
+    case application:get_env(barrel_mcp, instructions, undefined) of
+        Text when is_binary(Text) -> Result#{<<"instructions">> => Text};
+        _ -> Result
+    end.
 
 %% `requiredCapabilities' is a ClientCapabilities object, not a list of
 %% names: the reference server builds one at
@@ -1426,7 +1453,7 @@ handle_request(<<"initialize">>, Params, Id, Ctx) ->
 %% the client can act on; handing back a stream nobody can write would
 %% only fail later and further away.
 handle_request(<<"subscriptions/listen">>, Params, Id, Ctx) ->
-    Filter = barrel_mcp_subscriptions:normalize_filter(Params),
+    Filter = allowed_resources(barrel_mcp_subscriptions:normalize_filter(Params), Ctx),
     case barrel_mcp_ctx:streaming(Ctx) of
         true when map_get(task_ids, Filter) =/= [] ->
             %% Task notifications are part of the extension, so a client
@@ -1472,11 +1499,7 @@ handle_request(<<"server/discover">>, _Params, Id, _Ctx) ->
         <<"cacheScope">> =>
             application:get_env(barrel_mcp, discover_cache_scope, <<"public">>)
     },
-    Result =
-        case application:get_env(barrel_mcp, instructions, undefined) of
-            Text when is_binary(Text) -> Base#{<<"instructions">> => Text};
-            _ -> Base
-        end,
+    Result = with_instructions(Base),
     %% `serverInfo' belongs in `_meta'. A modern request gets it from
     %% `finalize/2'; a legacy probe would not, so put it there either
     %% way and let the merge in `decorate_result/1' be idempotent.
@@ -1577,8 +1600,15 @@ handle_request(<<"resources/subscribe">>, Params, Id, Ctx) ->
     Uri = maps:get(<<"uri">>, Params, <<>>),
     case barrel_mcp_ctx:session_id(Ctx) of
         SessionId when is_binary(SessionId), Uri =/= <<>> ->
-            barrel_mcp_session:subscribe_resource(SessionId, Uri),
-            success_response(Id, #{});
+            %% A subscription has no handler to refuse it. A refusal
+            %% reads like a missing resource, so it confirms nothing.
+            case may_subscribe(Uri, Ctx) of
+                true ->
+                    barrel_mcp_session:subscribe_resource(SessionId, Uri),
+                    success_response(Id, #{});
+                false ->
+                    error_response(Id, resource_not_found_code(Ctx), <<"Resource not found">>)
+            end;
         _ ->
             error_response(
                 Id,

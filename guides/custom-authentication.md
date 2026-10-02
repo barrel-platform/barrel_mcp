@@ -108,6 +108,52 @@ Notes:
   another.
 - Without `visible/4` every caller sees every entry, as before.
 
+## Control who can subscribe to a resource
+
+A subscription has no handler to refuse a caller, so without a check
+anyone holding a URI can learn when it changes. You need this when
+resources belong to different callers, for example memories shared per
+workspace.
+
+Export `authorize_subscribe/3`. It receives the auth info, the URI and
+your module state:
+
+```erlang
+-module(my_auth).
+-export([init/1, authenticate/2, authorize_subscribe/3]).
+
+authorize_subscribe(#{subject := Subject}, Uri, _State) ->
+    my_acl:can_read(Subject, Uri).
+```
+
+Notes:
+
+- It is asked on `resources/subscribe` and for each URI in a
+  `subscriptions/listen` filter.
+- A refused `resources/subscribe` gets the same error as a missing
+  resource. A refused URI is dropped from the listen filter, so the
+  acknowledgement does not list it.
+- Anything but `true`, including a raise, refuses and logs a warning.
+- Without `authorize_subscribe/3` every subscription is accepted, as
+  before.
+
+How this follows the spec:
+
+- The resources security considerations say access controls
+  **SHOULD** be implemented for sensitive resources and permissions
+  **SHOULD** be checked before operations
+  ([2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/server/resources#security-considerations),
+  [2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/server/resources#security-considerations)).
+  The spec does not name a mechanism; this callback is barrel_mcp's.
+- A refused `resources/subscribe` answers the spec's resource-not-found
+  error: `-32002` through 2025-11-25, `-32602` in 2026-07-28, which
+  also tells clients to accept `-32002`
+  ([error handling](https://modelcontextprotocol.io/specification/2026-07-28/server/resources#error-handling)).
+- In 2026-07-28 the acknowledgement of `subscriptions/listen` "reflects
+  the subset the server agreed to honor"
+  ([subscriptions](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/subscriptions#acknowledgment)),
+  so dropping a refused URI from it is the defined way to decline one.
+
 ## Example: barrel_memory Integration
 
 Here's how barrel_memory uses custom auth with its existing key system:

@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.0] - 2026-10-01
+
+A server that exports no `authorize_subscribe/3` and sets neither
+`instructions` nor `resource_metadata` behaves exactly as on 4.2.0.
+
+### Added
+
+- Optional `barrel_mcp_auth` callback `authorize_subscribe/3`
+  (`AuthInfo`, `Uri`, `State`): whether a caller may subscribe to a
+  resource. Asked on `resources/subscribe`, which answers a refusal with
+  the error a missing resource gets, and for each URI of a
+  `subscriptions/listen` filter, which drops a refused URI. A raise or a
+  non-boolean refuses. `barrel_mcp_auth_custom` forwards it to its
+  module. Dispatch: `barrel_mcp_auth:authorize_subscribe/3`.
+
+### Fixed
+
+- The `initialize` result now carries the `instructions` app env, as
+  `server/discover` already did. Clients using the handshake never saw
+  it.
+- With `resource_metadata` configured, every provider's 401 challenge
+  carries `resource_metadata="<URL>"`, not only
+  `barrel_mcp_auth_bearer`'s. A server using `barrel_mcp_auth_custom`
+  could not be found by remote-connector clients.
+
 ## [4.2.0] - 2026-09-29
 
 Everything is additive. With the default store and no task provider,
