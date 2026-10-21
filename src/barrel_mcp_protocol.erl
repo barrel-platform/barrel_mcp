@@ -2245,6 +2245,12 @@ run_resource_read(Type, Name, Args, Uri, Id, Bind) ->
             seal_input_required(
                 Requests, State, <<"resources/read">>, Params, Ctx, Id
             );
+        {ok, {error, not_found}} ->
+            %% A template matched the URI shape but names nothing the
+            %% handler can serve (missing, or hidden from this caller).
+            error_response(Id, resource_not_found_code(Ctx), <<"Resource not found">>);
+        {ok, {error, Message}} when is_binary(Message) ->
+            error_response(Id, ?JSONRPC_INVALID_PARAMS, Message);
         {ok, Result} ->
             Content = format_resource_result(Uri, Result),
             success_response(
