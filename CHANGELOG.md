@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- A resource or resource-template handler can return `{error, not_found}`
+  to answer with the resource-not-found error, or `{error, Message}`
+  (a binary) to answer invalid params with that message. A template
+  matches the shape of a URI, not whether its target exists, so handlers
+  needed a way to refuse a matching URI without crashing or returning
+  the error as content. Other return values are unchanged.
+
 ## [4.3.0] - 2026-10-01
 
 A server that exports no `authorize_subscribe/3` and sets neither

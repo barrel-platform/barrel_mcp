@@ -14,7 +14,8 @@
     json_resource/1,
     annotated_resource/1,
     multi_block_resource/1,
-    file_template/1
+    file_template/1,
+    refusing_template/1
 ]).
 
 %%====================================================================
@@ -37,7 +38,9 @@ resources_test_() ->
         {"Resource read accepts a list of pre-built content blocks",
             fun test_resource_read_multi_block/0},
         {"Resource read against a templated URI routes to the template handler",
-            fun test_resource_read_via_template/0}
+            fun test_resource_read_via_template/0},
+        {"A template handler can answer not found or invalid params",
+            fun test_resource_read_handler_errors/0}
     ]}.
 
 setup() ->
@@ -85,6 +88,11 @@ multi_block_resource(_Args) ->
             <<"text">> => <<"details">>
         }
     ].
+
+refusing_template(#{<<"key">> := <<"missing">>}) ->
+    {error, not_found};
+refusing_template(#{<<"key">> := Key}) ->
+    {error, <<"bad key: ", Key/binary>>}.
 
 file_template(Args) ->
     Path = maps:get(<<"path">>, Args, <<"unset">>),
@@ -380,3 +388,28 @@ test_resource_read_via_template() ->
     ?assertEqual(<<"file:///etc/hosts">>, maps:get(<<"uri">>, Block)),
     ?assertEqual(<<"path=etc/hosts">>, maps:get(<<"text">>, Block)),
     barrel_mcp_registry:unreg(resource_template, <<"file_tpl">>).
+
+test_resource_read_handler_errors() ->
+    ok = barrel_mcp_registry:reg(
+        resource_template,
+        <<"refusing_tpl">>,
+        ?MODULE,
+        refusing_template,
+        #{name => <<"Refusing">>, uri_template => <<"kv:///{key}">>}
+    ),
+    Read = fun(Uri) ->
+        maps:get(
+            <<"error">>,
+            barrel_mcp_protocol:handle(#{
+                <<"jsonrpc">> => <<"2.0">>,
+                <<"id">> => 1,
+                <<"method">> => <<"resources/read">>,
+                <<"params">> => #{<<"uri">> => Uri}
+            })
+        )
+    end,
+    ?assertEqual(-32002, maps:get(<<"code">>, Read(<<"kv:///missing">>))),
+    Invalid = Read(<<"kv:///x">>),
+    ?assertEqual(-32602, maps:get(<<"code">>, Invalid)),
+    ?assertEqual(<<"bad key: x">>, maps:get(<<"message">>, Invalid)),
+    barrel_mcp_registry:unreg(resource_template, <<"refusing_tpl">>).

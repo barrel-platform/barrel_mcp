@@ -593,6 +593,20 @@ read_file_uri(#{<<"path">> := Path} = _Args) ->
     file:read_file(<<"/", Path/binary>>).
 ```
 
+A template matches the shape of a URI, not whether the thing it
+names exists. Return `{error, not_found}` when it does not (or when
+this caller may not see it) and the client gets the resource-not-found
+error. Return `{error, Message}` with a binary for a URI the handler
+rejects; it is sent as invalid params with that message:
+
+```erlang
+read_file_uri(#{<<"path">> := Path}) ->
+    case file:read_file(<<"/", Path/binary>>) of
+        {ok, Bin} -> Bin;
+        {error, enoent} -> {error, not_found}
+    end.
+```
+
 `barrel_mcp:list_resource_templates/0` lists registrations.
 Templates also surface on the wire via
 `resources/templates/list`.
