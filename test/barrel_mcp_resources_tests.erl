@@ -391,15 +391,22 @@ test_resource_read_via_template() ->
 
 test_resource_read_handler_errors() ->
     ok = barrel_mcp_registry:reg(
-        resource_template, <<"refusing_tpl">>, ?MODULE, refusing_template,
+        resource_template,
+        <<"refusing_tpl">>,
+        ?MODULE,
+        refusing_template,
         #{name => <<"Refusing">>, uri_template => <<"kv:///{key}">>}
     ),
     Read = fun(Uri) ->
-        maps:get(<<"error">>, barrel_mcp_protocol:handle(#{
-            <<"jsonrpc">> => <<"2.0">>, <<"id">> => 1,
-            <<"method">> => <<"resources/read">>,
-            <<"params">> => #{<<"uri">> => Uri}
-        }))
+        maps:get(
+            <<"error">>,
+            barrel_mcp_protocol:handle(#{
+                <<"jsonrpc">> => <<"2.0">>,
+                <<"id">> => 1,
+                <<"method">> => <<"resources/read">>,
+                <<"params">> => #{<<"uri">> => Uri}
+            })
+        )
     end,
     ?assertEqual(-32002, maps:get(<<"code">>, Read(<<"kv:///missing">>))),
     Invalid = Read(<<"kv:///x">>),
