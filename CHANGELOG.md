@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.4.1] - 2026-10-26
+
+### Changed
+
+- The HTTP client now requires hackney 4.9.0, and the lock moves to h2
+  0.12.5, certifi 2.18.0, quic 2.1.2 and webtransport 0.4.8. Nothing
+  changes in the barrel_mcp API.
+
 ## [4.4.0] - 2026-10-22
 
 A handler returning anything but the new error tuples behaves exactly as
