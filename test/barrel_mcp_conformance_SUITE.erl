@@ -215,6 +215,7 @@ run_client_conformance(Config, Label, Selection) ->
     {Status, Output} = run("node", Args, root_dir()),
     NotScored = not_scored(Runner, Selection, "client"),
     {Pass, Fails, Unscored} = summarise(OutDir, NotScored),
+    publish("client", Label, Pass, Fails, Unscored),
     ct:pal(
         "client conformance ~s: ~B passed, ~B failed, ~B not scored~n~s~s",
         [Label, Pass, length(Fails), length(Unscored), Fails, unscored_report(Unscored)]
@@ -269,6 +270,7 @@ run_conformance(Config, Label, Selection) ->
     {Status, Output} = run("node", Args, root_dir()),
     NotScored = not_scored(Runner, Selection),
     {Pass, Fails, Unscored} = summarise(OutDir, NotScored),
+    publish("server", Label, Pass, Fails, Unscored),
     ct:pal(
         "conformance ~s: ~B passed, ~B failed, ~B not scored~n~s~s",
         [Label, Pass, length(Fails), length(Unscored), Fails, unscored_report(Unscored)]
@@ -278,6 +280,26 @@ run_conformance(Config, Label, Selection) ->
             ok;
         _ ->
             ct:fail({conformance_failed, Label, Status, Fails, Output})
+    end.
+
+%% `make conformance' sets `CONFORMANCE_REPORT_DIR' so CI can publish
+%% each run's counts; a plain `rebar3 ct' writes nothing.
+publish(Mode, Label, Pass, Fails, Unscored) ->
+    case os:getenv("CONFORMANCE_REPORT_DIR") of
+        false ->
+            ok;
+        Dir ->
+            ok = filelib:ensure_path(Dir),
+            Lines = fun(L) -> [string:trim(unicode:characters_to_binary(X)) || X <- L] end,
+            Report = #{
+                mode => list_to_binary(Mode),
+                run => list_to_binary(Label),
+                passed => Pass,
+                failed => Lines(Fails),
+                not_scored => Lines(Unscored)
+            },
+            File = filename:join(Dir, Mode ++ "-" ++ Label ++ ".json"),
+            ok = file:write_file(File, json:encode(Report))
     end.
 
 unscored_report([]) ->

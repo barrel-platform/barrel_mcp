@@ -130,7 +130,8 @@ the lock hash.
   `test/conformance/package.json`, in server and client modes for every
   revision the runner knows (`2025-03-26` onward). `make conformance` installs it and runs it; plain `rebar3 ct`
   skips it. The suite reports the runner's own unscored scenarios
-  separately. A new failure in either list is a defect to fix; there is no
+  separately. `make conformance-report` prints the last run as a
+  table. A new failure in either list is a defect to fix; there is no
   expected-failures file.
 - `make examples-test` builds every app under `examples/` against this
   checkout and runs its suites.
@@ -146,7 +147,8 @@ than no test because it reads as coverage.
 | Compile (OTP 28, 29) | `rebar3 compile` with `warnings_as_errors` |
 | Tests (OTP 28, 29) | `rebar3 eunit` and `rebar3 ct`, including the doc snippet check |
 | Examples (OTP 28, 29) | Every example app builds and its suites pass |
-| Python interop (OTP 28) | The Python SDK suite and the conformance runner, through `make interop-test` |
+| Python interop (OTP 28) | The Python SDK suite, through `make interop-python` |
+| Conformance (OTP 28) | The official conformance runner through `make conformance`; the results table goes to the job summary and the raw results to the `conformance-results` artifact |
 | Format, Lint, Xref, Dialyzer | Formatting, Elvis, cross-reference and type checks |
 
 ## Documentation
@@ -160,6 +162,21 @@ grep `guides/` and `README.md` for it and fix the docs in the same change.
 Write guides in the task-oriented style the existing ones use: say what the
 thing is, when you need it, then show the steps with short notes between
 code blocks.
+
+## Issue labels
+
+Issues use the MCP project's SDK labels, so triage time and fix time can be
+measured the same way across SDKs:
+
+- type: `bug`, `enhancement`, `question`;
+- status: `needs confirmation`, `needs repro`, `ready for work`,
+  `good first issue`, `help wanted`;
+- priority, only when actionable: `P0` (core MCP operations broken, or a
+  security issue), `P1` (a bug affecting many users), `P2` (moderate),
+  `P3` (nice to have).
+
+A specification deviation is a bug and gets a priority like any other bug;
+see [Security issues and specification bugs](#security-issues-and-specification-bugs).
 
 ## Pull requests
 
@@ -175,6 +192,6 @@ Sync a branch that has fallen behind by merging `main` into it, not by rebasing.
 
 ## Releases
 
-The version lives in `src/barrel_mcp.app.src`. A release is a pull request that bumps it, the install tag in `README.md` and the "Nothing is pending as of" lines in `README.md` and `docs/pending-features.md`, and adds the CHANGELOG entry. After it merges: an annotated tag `vX.Y.Z` on the merge commit, a GitHub release carrying that CHANGELOG section as is, then `rebar3 hex publish`.
+Releases follow [docs/versioning.md](docs/versioning.md), and dependency bumps [docs/dependencies.md](docs/dependencies.md). The version lives in `src/barrel_mcp.app.src`. A release is a pull request that bumps it, the install tag in `README.md` and the "Nothing is pending as of" lines in `README.md` and `docs/pending-features.md`, and adds the CHANGELOG entry. After it merges: an annotated tag `vX.Y.Z` on the merge commit, a GitHub release carrying that CHANGELOG section as is, then `rebar3 hex publish`.
 
 Before opening the release pull request, check the specification list as described in [Keeping the specifications current](#keeping-the-specifications-current), and add any newer version found to Pending updates.

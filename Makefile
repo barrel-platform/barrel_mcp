@@ -1,4 +1,4 @@
-.PHONY: all compile test ct eunit dialyzer docs examples-setup examples-test interop-setup interop-test interop-python conformance-setup conformance clean
+.PHONY: all compile test ct eunit dialyzer docs examples-setup examples-test interop-setup interop-test interop-python conformance-setup conformance conformance-report clean
 
 all: compile
 
@@ -60,11 +60,17 @@ conformance-setup:
 	node test/conformance/patch-runner.js
 
 conformance: conformance-setup
+	rm -rf _build/conformance-report
+	CONFORMANCE_REPORT_DIR=$(CURDIR)/_build/conformance-report \
 	INTEROP_CONFORMANCE=$(CURDIR)/test/conformance/node_modules/@modelcontextprotocol/conformance/dist/index.js \
 	INTEROP_SERVER_EVERYTHING=$(CURDIR)/test/conformance/node_modules/@modelcontextprotocol/server-everything/dist/index.js \
 	    rebar3 ct --suite=test/barrel_mcp_conformance_SUITE
 
 interop-test: interop-python conformance
+
+# Markdown table of the last `make conformance' run.
+conformance-report:
+	escript test/conformance/report.escript _build/conformance-report test/conformance/package.json
 
 clean:
 	rebar3 clean

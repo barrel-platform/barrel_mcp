@@ -102,7 +102,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-rebar3-${{ matrix.otp }}-
       - name: Run Python interop tests
-        run: make interop-test
+        run: make interop-python
 
   format:
     name: Format
