@@ -1006,7 +1006,10 @@ good as the auth info map it reads.
 
 ## Security Best Practices
 
-1. **Always use TLS** in production
+1. **Always use TLS** in production. A public bind with an auth
+   provider and no `ssl` refuses to start unless you set
+   `tls_terminated_upstream => true` for a proxy that terminates TLS
+   (see the HTTP Stream guide).
 2. **Hash stored credentials** using the provided hash functions
 3. **Use short-lived tokens** with refresh capability
 4. **Validate audience claims** to prevent token misuse

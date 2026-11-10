@@ -50,6 +50,10 @@
 %%   <li>`ssl': TLS options (`certfile', `keyfile',
 %%       optional `cacertfile'). A TLS bind serves HTTP/1.1 and
 %%       HTTP/2 on the same port via ALPN.</li>
+%%   <li>`tls_terminated_upstream': `true' when a proxy in front
+%%       terminates TLS. Without `ssl' or this, a non-loopback bind with
+%%       an auth provider is refused with `{error, {cleartext_auth, Ip}}':
+%%       credentials must not cross the network in cleartext.</li>
 %%   <li>`allowed_origins': `[binary()] | any'.</li>
 %%   <li>`allow_missing_origin': accept requests with no `Origin'
 %%       header. Defaults to `true' on loopback, `false' otherwise.</li>
@@ -78,6 +82,7 @@
         auth => map(),
         session_enabled => boolean(),
         ssl => map(),
+        tls_terminated_upstream => boolean(),
         allowed_origins => [binary()] | any,
         allow_missing_origin => boolean(),
         subscription_keepalive_ms => pos_integer(),
@@ -100,7 +105,18 @@ start(Opts) ->
         {ok, AllowedOrigins} ->
             case barrel_mcp_http_engine:init_auth(maps:get(auth, Opts, #{})) of
                 {ok, AuthConfig0} ->
-                    start_listener(Opts, Loopback, AllowedOrigins, AuthConfig0, SessionEnabled);
+                    case
+                        barrel_mcp_http_engine:check_cleartext_auth(
+                            Ip, Loopback, normalize_ssl(Opts), AuthConfig0, Opts
+                        )
+                    of
+                        ok ->
+                            start_listener(
+                                Opts, Loopback, AllowedOrigins, AuthConfig0, SessionEnabled
+                            );
+                        {error, _} = Err ->
+                            Err
+                    end;
                 {error, _} = Err ->
                     Err
             end

@@ -83,6 +83,7 @@
 -export([
     is_loopback/1,
     resolve_allowed_origins/2,
+    check_cleartext_auth/5,
     normalize_resource_metadata/1,
     inject_resource_metadata_url/2,
     init_auth/1,
@@ -2365,6 +2366,23 @@ cors_headers(Headers, Config, Extra) ->
 %%====================================================================
 %% Origin validation + bind helpers
 %%====================================================================
+
+%% @doc Refuse credentials in cleartext on a public bind: bearer tokens
+%% require TLS (RFC 6750 section 5.3). `tls_terminated_upstream' says a
+%% proxy in front already speaks TLS.
+-spec check_cleartext_auth(inet:ip_address(), boolean(), map() | undefined, map(), map()) ->
+    ok | {error, {cleartext_auth, inet:ip_address()}}.
+check_cleartext_auth(_Ip, true, _Ssl, _AuthConfig, _Opts) ->
+    ok;
+check_cleartext_auth(_Ip, false, #{}, _AuthConfig, _Opts) ->
+    ok;
+check_cleartext_auth(_Ip, false, undefined, #{provider := barrel_mcp_auth_none}, _Opts) ->
+    ok;
+check_cleartext_auth(Ip, false, undefined, _AuthConfig, Opts) ->
+    case maps:get(tls_terminated_upstream, Opts, false) of
+        true -> ok;
+        _ -> {error, {cleartext_auth, Ip}}
+    end.
 
 %% @doc Decide the `Origin' allow-list from the bind address: a
 %% loopback bind may default, a public one must list its origins.

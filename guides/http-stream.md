@@ -78,6 +78,7 @@ barrel_mcp:start_http_stream(#{
 | `auth` | `map()` | `#{}` | Authentication configuration. |
 | `session_enabled` | `boolean()` | `true` | Enable session management. |
 | `ssl` | `map()` | `undefined` | TLS configuration. |
+| `tls_terminated_upstream` | `boolean()` | `false` | Set when a proxy in front terminates TLS. Required, along with `allowed_origins`, for a public bind with `auth` and no `ssl` (see below). |
 | `allowed_origins` | `[binary()] \| any` | loopback set on loopback bind; required on public bind | List of allowed `Origin` values, structurally matched (scheme + host + port). Use `any` to disable validation. The literal `<<"null">>` may be included to allow sandboxed-frame origins. |
 | `allow_missing_origin` | `boolean()` | `true` on loopback, `false` otherwise | Whether to accept requests with no `Origin` header. Non-browser clients typically don't send one. |
 | `sse_buffer_size` | `pos_integer()` | `256` | Per-session ring buffer of recent SSE events for `Last-Event-ID` replay. |
@@ -106,6 +107,24 @@ CORS-style attacks.
     allowed_origins => [<<"https://app.example.com">>]
 }).
 ```
+
+A public bind with an `auth` provider must also be served over TLS,
+since bearer tokens, API keys and Basic credentials must not cross the
+network in cleartext (RFC 6750 section 5.3). Without `ssl`, the start
+function refuses with `{error, {cleartext_auth, Ip}}`. Behind a proxy
+that terminates TLS, say so:
+
+```erlang
+{ok, _} = barrel_mcp:start_http_stream(#{
+    port => 9090,
+    ip => {0, 0, 0, 0},
+    allowed_origins => [<<"https://app.example.com">>],
+    auth => #{provider => barrel_mcp_auth_bearer, provider_opts => ProviderOpts},
+    tls_terminated_upstream => true
+}).
+```
+
+A loopback bind is never refused: the credentials do not leave the host.
 
 CORS responses echo the validated `Origin` (no wildcard) and add
 `Vary: Origin`. The `Access-Control-Allow-Headers` list is

@@ -27,8 +27,9 @@
 %% @doc Start the simple HTTP server for MCP.
 %%
 %% Same security defaults as {@link barrel_mcp_http_stream}: binds to
-%% `127.0.0.1' by default and requires explicit `allowed_origins' for
-%% non-loopback binds.
+%% `127.0.0.1' by default, requires explicit `allowed_origins' for
+%% non-loopback binds, and refuses an auth provider on a non-loopback
+%% bind without `ssl' unless `tls_terminated_upstream => true'.
 -spec start(map()) -> {ok, pid()} | {error, term()}.
 start(Opts) ->
     Port = maps:get(port, Opts, 9090),
@@ -44,7 +45,16 @@ start(Opts) ->
         {ok, AllowedOrigins} ->
             case barrel_mcp_http_engine:init_auth(maps:get(auth, Opts, #{})) of
                 {ok, AuthConfig0} ->
-                    start_listener(Opts, Port, Ip, Loopback, AllowedOrigins, AuthConfig0);
+                    case
+                        barrel_mcp_http_engine:check_cleartext_auth(
+                            Ip, Loopback, normalize_ssl(Opts), AuthConfig0, Opts
+                        )
+                    of
+                        ok ->
+                            start_listener(Opts, Port, Ip, Loopback, AllowedOrigins, AuthConfig0);
+                        {error, _} = Err ->
+                            Err
+                    end;
                 {error, _} = Err ->
                     Err
             end
