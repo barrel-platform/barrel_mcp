@@ -26,6 +26,12 @@
     origin_loopback_rejects_external/1,
     origin_null_rejected_by_default/1,
     public_bind_requires_allowed_origins/1,
+    cleartext_auth_public_bind_refused/1,
+    cleartext_auth_upstream_tls_starts/1,
+    cleartext_auth_loopback_starts/1,
+    cleartext_public_bind_without_auth_starts/1,
+    tls_public_bind_with_auth_starts/1,
+    simple_cleartext_auth_public_bind_refused/1,
     session_init_creates/1,
     session_missing_returns_400/1,
     session_unknown_returns_404/1,
@@ -60,6 +66,12 @@ all() ->
         origin_loopback_rejects_external,
         origin_null_rejected_by_default,
         public_bind_requires_allowed_origins,
+        cleartext_auth_public_bind_refused,
+        cleartext_auth_upstream_tls_starts,
+        cleartext_auth_loopback_starts,
+        cleartext_public_bind_without_auth_starts,
+        tls_public_bind_with_auth_starts,
+        simple_cleartext_auth_public_bind_refused,
         session_init_creates,
         session_missing_returns_400,
         session_unknown_returns_404,
@@ -173,6 +185,58 @@ public_bind_requires_allowed_origins(_Config) ->
             port => 21199,
             ip => {0, 0, 0, 0}
         })
+    ).
+
+%%====================================================================
+%% Credentials over cleartext
+%%====================================================================
+
+bearer_auth() ->
+    #{
+        provider => barrel_mcp_auth_bearer,
+        provider_opts => #{secret => <<"top-secret">>, audience => <<"https://mcp.test/mcp">>}
+    }.
+
+public_opts(Config) ->
+    #{port => ?config(port, Config), ip => {0, 0, 0, 0}, allowed_origins => any}.
+
+%% RFC 6750 section 5.3: bearer tokens require TLS.
+cleartext_auth_public_bind_refused(Config) ->
+    ?assertEqual(
+        {error, {cleartext_auth, {0, 0, 0, 0}}},
+        barrel_mcp:start_http_stream((public_opts(Config))#{auth => bearer_auth()})
+    ).
+
+cleartext_auth_upstream_tls_starts(Config) ->
+    ?assertMatch(
+        {ok, _},
+        barrel_mcp:start_http_stream((public_opts(Config))#{
+            auth => bearer_auth(), tls_terminated_upstream => true
+        })
+    ).
+
+cleartext_auth_loopback_starts(Config) ->
+    ?assertMatch(
+        {ok, _},
+        barrel_mcp:start_http_stream(#{port => ?config(port, Config), auth => bearer_auth()})
+    ).
+
+cleartext_public_bind_without_auth_starts(Config) ->
+    ?assertMatch({ok, _}, barrel_mcp:start_http_stream(public_opts(Config))).
+
+tls_public_bind_with_auth_starts(Config) ->
+    Tls = barrel_mcp_test_helpers:tls_files(?config(priv_dir, Config)),
+    ?assertMatch(
+        {ok, _},
+        barrel_mcp:start_http_stream((public_opts(Config))#{
+            auth => bearer_auth(), ssl => maps:with([certfile, keyfile], Tls)
+        })
+    ).
+
+simple_cleartext_auth_public_bind_refused(Config) ->
+    ?assertEqual(
+        {error, {cleartext_auth, {0, 0, 0, 0}}},
+        barrel_mcp:start_http((public_opts(Config))#{auth => bearer_auth()})
     ).
 
 %%====================================================================
