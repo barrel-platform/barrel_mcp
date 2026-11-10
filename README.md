@@ -1,5 +1,8 @@
 # barrel_mcp
 
+[![CI](https://github.com/barrel-platform/barrel_mcp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/barrel-platform/barrel_mcp/actions/workflows/ci.yml)
+[![MCP conformance](https://github.com/barrel-platform/barrel_mcp/actions/workflows/conformance.yml/badge.svg?branch=main)](https://github.com/barrel-platform/barrel_mcp/actions/workflows/conformance.yml)
+
 MCP (Model Context Protocol) library for Erlang. Implements every
 released revision of the specification, `2026-07-28` back through
 `2024-11-05`, for both server and client modes, including the
@@ -689,6 +692,23 @@ revision of the specification, and both halves of the `ext-auth`
 extension. [`docs/pending-features.md`](docs/pending-features.md)
 records what is deliberately out of scope. Open an issue if you want
 something prioritised.
+
+## Conformance
+
+Every change to `main` runs the official
+[MCP conformance runner](https://github.com/modelcontextprotocol/conformance)
+against the server and the client, for every revision the runner knows.
+The results table is in the summary of each
+[Conformance run](https://github.com/barrel-platform/barrel_mcp/actions/workflows/conformance.yml),
+and the raw results are attached as the `conformance-results` artifact.
+Run it locally with `make conformance && make conformance-report`.
+
+## Project policies
+
+- [Versioning](docs/versioning.md): what a patch, minor and major release can change.
+- [Dependency policy](docs/dependencies.md): what barrel_mcp depends on and how it stays current.
+- [Roadmap](docs/roadmap.md): planned work and specification updates.
+- [Security](SECURITY.md) and [Contributing](CONTRIBUTING.md).
 
 ## Development
 

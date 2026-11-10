@@ -1,0 +1,47 @@
+name: Conformance
+
+# The official MCP conformance runner against barrel_mcp's server and
+# client, every revision the runner knows. Results go to the job
+# summary and the `conformance-results' artifact.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  conformance:
+    name: MCP conformance / OTP 28
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          rebar3-version: '3.27'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Restore rebar3 cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/rebar3
+            _build
+          key: ${{ runner.os }}-rebar3-28-${{ hashFiles('rebar.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rebar3-28-
+      - name: Run the conformance runner
+        run: make conformance
+      - name: Publish results
+        if: always()
+        run: make -s conformance-report >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conformance-results
+          path: |
+            _build/conformance-report
+            _build/test/logs/**/log_private/*conformance-*
+          if-no-files-found: warn
