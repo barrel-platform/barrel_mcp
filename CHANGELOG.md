@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The OAuth client connected to any `https` address an MCP server
+  pointed it at during discovery and token requests, including
+  loopback, private networks and cloud metadata services, unless you
+  had set a `url_policy`. It now refuses private and reserved
+  addresses, checks the address a name resolves to and connects to that
+  same address, as the MCP security best practices ask (RFC 9728
+  section 7.7).
 - A Streamable HTTP or simple HTTP server bound to a public address
   accepted an auth provider without TLS, so bearer tokens, API keys and
   Basic credentials travelled in cleartext (RFC 6750 section 5.3). Such
@@ -16,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- An authorization server on a private address now needs its range in
+  `oauth_allowed_networks`.
 - If TLS is terminated by a proxy in front of the server, add
   `tls_terminated_upstream => true` to the server options. Loopback
   binds and servers without auth are unaffected.

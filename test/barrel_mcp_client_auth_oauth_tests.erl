@@ -81,6 +81,7 @@ refresh_round_trip_test_() ->
     {setup, fun setup_mock/0, fun cleanup_mock/1,
         {timeout, 30, [
             {"discover PRM", fun test_discover_prm/0},
+            {"discover PRM through a hostname", fun test_discover_prm_hostname/0},
             {"discover AS metadata", fun test_discover_as/0},
             {"refresh_token grant", fun test_refresh_token/0},
             {"behaviour refresh path", fun test_behaviour_refresh/0},
@@ -117,7 +118,8 @@ cleanup_mock(_) ->
     ok.
 
 %% Tiny mock authorization server.
-handle(#{path := <<"/.well-known/oauth-protected-resource">>}) ->
+handle(#{path := <<"/.well-known/oauth-protected-resource">>} = Req) ->
+    persistent_term:put({?MODULE, last_host}, barrel_mcp_test_http:header(<<"host">>, Req)),
     {200, json_ct(),
         json_encode(#{
             <<"resource">> => <<"http://127.0.0.1:19494/mcp">>,
@@ -261,6 +263,8 @@ handle(#{path := <<"/oauth/register">>, body := Body} = Req) ->
 
 json_ct() -> #{<<"content-type">> => <<"application/json">>}.
 
+last_host() -> persistent_term:get({?MODULE, last_host}, undefined).
+
 json_encode(M) -> iolist_to_binary(json:encode(M)).
 
 %%====================================================================
@@ -280,6 +284,16 @@ test_discover_prm() ->
         [?BASE],
         maps:get(<<"authorization_servers">>, Doc)
     ).
+
+%% The request goes to the address the name was checked against, under
+%% the original name.
+test_discover_prm_hostname() ->
+    Url = <<"http://localhost:19494/.well-known/oauth-protected-resource">>,
+    {ok, Doc} = barrel_mcp_client_auth_oauth:discover_protected_resource(Url, #{
+        allow_insecure_oauth => true
+    }),
+    ?assertEqual([?BASE], maps:get(<<"authorization_servers">>, Doc)),
+    ?assertEqual(<<"localhost:19494">>, last_host()).
 
 test_discover_as() ->
     {ok, AS} = barrel_mcp_client_auth_oauth:discover_authorization_server(?BASE, #{
