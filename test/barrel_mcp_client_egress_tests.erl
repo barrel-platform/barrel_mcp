@@ -105,18 +105,23 @@ insecure_flag_allows_only_loopback_test() ->
 %% Pinning
 %%====================================================================
 
-%% Numeric spellings resolve to the address they name, and that is
-%% what gets judged.
+%% A numeric spelling either resolves to the address it names, which is
+%% then judged, or does not resolve at all; resolvers differ on which.
+%% Neither lets the request through.
 refuses_encoded_loopback_hosts_test() ->
     lists:foreach(
         fun(Host) ->
-            ?assertMatch(
-                {error, {blocked_address, {127, 0, 0, 1}}},
-                barrel_mcp_client_egress:pin(<<"https://", Host/binary, "/x">>, #{}),
-                Host
-            )
+            case barrel_mcp_client_egress:pin(<<"https://", Host/binary, "/x">>, #{}) of
+                {error, {blocked_address, {127, 0, 0, 1}}} -> ok;
+                {error, {unresolved, Host, _}} -> ok;
+                Other -> ?assertEqual(refused, {Host, Other})
+            end
         end,
-        [<<"0x7f.1">>, <<"2130706433">>, <<"017700000001">>, <<"127.1">>, <<"localhost">>]
+        [<<"0x7f.1">>, <<"2130706433">>, <<"017700000001">>, <<"127.1">>]
+    ),
+    ?assertEqual(
+        {error, {blocked_address, {127, 0, 0, 1}}},
+        barrel_mcp_client_egress:pin(<<"https://localhost/x">>, #{})
     ).
 
 ip_literal_is_not_rewritten_test() ->
