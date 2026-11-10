@@ -12,8 +12,9 @@ test/interop/.venv/
 test/interop/.venv-modern/
 test/interop/__pycache__/
 
-# Claude Code scratch
-.claude/
+# Claude Code scratch; skills are shared through .agents/skills
+.claude/*
+!.claude/skills/
 
 # Rebar3
 rebar3.crashdump
