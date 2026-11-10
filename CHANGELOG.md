@@ -5,7 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [4.5.0] - 2026-11-10
+
+Two configurations that used to start are now refused, each with a
+one-option way back: an OAuth authorization server on a private
+address, and a public HTTP server with auth but no TLS. Run on
+Erlang/OTP 29.1.2, 28.5.0.8, 27.3.4.19 or later: earlier patch releases
+have TLS flaws in OTP itself, including a client that skips server
+authentication on an unsolicited TLS 1.3 PSK.
 
 ### Fixed
 
@@ -28,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - If TLS is terminated by a proxy in front of the server, add
   `tls_terminated_upstream => true` to the server options. Loopback
   binds and servers without auth are unaffected.
+- The HTTP server and client now use h1 0.10.0, h2 0.15.1 and hackney
+  4.10.2. h2 fixes two denial-of-service flaws (SETTINGS flood and
+  MadeYouReset), and h1 and h2 fix servers that stopped accepting
+  connections once the process that started them exited. Nothing
+  changes in the barrel_mcp API.
 
 ## [4.4.1] - 2026-10-26
 
