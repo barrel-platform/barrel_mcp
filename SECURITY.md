@@ -6,8 +6,13 @@ Security fixes are applied to the latest minor release on the `main` branch.
 
 | Version | Supported |
 | ------- | --------- |
-| 4.4.x   | yes       |
-| < 4.4   | no        |
+| 4.5.x   | yes       |
+| < 4.5   | no        |
+
+Run barrel_mcp on an Erlang/OTP release with the current TLS fixes:
+29.1.2, 28.5.0.8, 27.3.4.19 or later. Earlier patch releases have TLS
+flaws in OTP itself, including a client that skips server
+authentication on an unsolicited TLS 1.3 PSK.
 
 ## What is a security issue
 

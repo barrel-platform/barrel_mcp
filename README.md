@@ -45,13 +45,17 @@ change. See [Protocol Versions](guides/protocol-versions.md).
 
 ## Installation
 
+Run on Erlang/OTP 29.1.2, 28.5.0.8, 27.3.4.19 or later: earlier patch
+releases have TLS flaws in OTP itself that affect both the server and
+the client.
+
 Add to your `rebar.config`:
 
 ```erlang
 {deps, [
     {barrel_mcp,
         {git, "https://github.com/barrel-platform/barrel_mcp.git",
-              {tag, "v4.4.1"}}}
+              {tag, "v4.5.0"}}}
 ]}.
 ```
 
@@ -680,7 +684,7 @@ Your application's entry point should call `barrel_mcp:start_stdio()`.
 
 ## Pending features
 
-Nothing is pending as of 4.4.1: the library implements every released
+Nothing is pending as of 4.5.0: the library implements every released
 revision of the specification, and both halves of the `ext-auth`
 extension. [`docs/pending-features.md`](docs/pending-features.md)
 records what is deliberately out of scope. Open an issue if you want
