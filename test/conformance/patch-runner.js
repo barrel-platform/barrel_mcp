@@ -25,7 +25,11 @@ const bundle = path.join(
   'dist',
   'index.js'
 );
-const marker = '/* barrel_mcp: CreateTaskResult validated via the tasks extension */';
+const marker = '/* barrel_mcp: CreateTaskResult validated via the tasks extension, v2 */';
+// v1 called `require', which an ES module bundle does not have: every
+// task result threw inside the validator, which the runner reports as
+// a non-JSON body. A bundle carrying it has to be reinstalled.
+const staleMarker = '/* barrel_mcp: CreateTaskResult validated via the tasks extension */';
 
 const anchor =
   'if(o.result!==void 0){let e=o.result?.resultType===`input_required`&&`InputRequiredResult`in r.defs?`InputRequiredResult`:n===void 0?void 0:r.resultDefs.get(n);';
@@ -42,12 +46,16 @@ const schemaPath = path.join(
 );
 const extTasksSchema = fs.readFileSync(schemaPath, 'utf8');
 
+// The bundle is an ES module (`"type": "module"`), so the helper gets
+// its own `require' for the CommonJS ajv packages.
 const helper = `${marker}
+import { createRequire as __barrelCreateRequire } from 'node:module';
+const __barrelRequire = __barrelCreateRequire(import.meta.url);
 let __barrelTaskValidator;
 function __barrelTaskResultErrors(result, method) {
   if (__barrelTaskValidator === undefined) {
-    const Ajv2020 = require('ajv/dist/2020');
-    const addFormats = require('ajv-formats');
+    const Ajv2020 = __barrelRequire('ajv/dist/2020');
+    const addFormats = __barrelRequire('ajv-formats');
     const ajv = new Ajv2020({ strict: false, allErrors: true });
     addFormats(ajv);
     ajv.addFormat('byte', true);
@@ -69,6 +77,12 @@ const source = fs.readFileSync(bundle, 'utf8');
 if (source.includes(marker)) {
   console.log('conformance runner already patched');
   process.exit(0);
+}
+if (source.includes(staleMarker)) {
+  console.error(
+    'patch-runner: ' + bundle + ' carries the broken v1 patch. Run `rm -rf test/conformance/node_modules && make conformance-setup`.'
+  );
+  process.exit(1);
 }
 if (!source.includes(anchor)) {
   console.error(
