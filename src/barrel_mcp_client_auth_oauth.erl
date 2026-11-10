@@ -56,6 +56,8 @@
 %%%   resource       => binary(),
 %%%   store          => {module(), term()}, %% barrel_mcp_client_auth_store
 %%%   url_policy     => fun((binary()) -> ok | {error, term()}),
+%%%   oauth_allowed_networks => [binary()], %% CIDRs exempt from the
+%%%                                         %% private address block
 %%%   allow_insecure_oauth => boolean()
 %%% }}
 %%% '''
@@ -208,6 +210,9 @@
     %% What a host allows the handle to fetch. Applies to every URL,
     %% but only a server-supplied one can be a surprise.
     url_policy :: fun((binary()) -> ok | {error, term()}) | undefined,
+    %% `oauth_allowed_networks': CIDRs exempt from the private and
+    %% reserved address block in `barrel_mcp_client_egress'.
+    allowed_networks = [] :: [binary()],
     access_token :: binary() | undefined,
     refresh_token :: binary() | undefined,
     token_endpoint :: binary() | undefined,
@@ -258,12 +263,15 @@
 init(Cfg) when is_map(Cfg) ->
     Insecure = insecure_opt(Cfg),
     Policy = url_policy_opt(Cfg),
+    Nets = maps:get(oauth_allowed_networks, Cfg, []),
     Opts = #{allow_insecure_oauth => Insecure, url_policy => Policy},
     case secure_urls(configured_endpoints(Cfg), Opts) of
         ok ->
             case init_mode(Cfg, Insecure) of
-                {ok, H} -> with_credentials(H#h{url_policy = Policy}, Cfg);
-                {error, _} = Err -> Err
+                {ok, H} ->
+                    with_credentials(H#h{url_policy = Policy, allowed_networks = Nets}, Cfg);
+                {error, _} = Err ->
+                    Err
             end;
         {error, _} = Err ->
             Err
@@ -990,15 +998,7 @@ do_register_client(RegistrationEndpoint, Metadata0, Opts) ->
                 ]
         end,
     Body = iolist_to_binary(json:encode(Metadata)),
-    case
-        hackney:request(
-            post,
-            RegistrationEndpoint,
-            Headers,
-            Body,
-            [with_body, {follow_redirect, false}]
-        )
-    of
+    case oauth_request(post, RegistrationEndpoint, Headers, Body, Opts) of
         {ok, Status, _Hdrs, Resp} when
             Status >= 200, Status < 300
         ->
@@ -1976,8 +1976,8 @@ legacy_flow(H, _Challenge) ->
 
 %%-- Handle plumbing ----------------------------------------------------
 
-opts(#h{insecure = Insecure, url_policy = Policy}) ->
-    #{allow_insecure_oauth => Insecure, url_policy => Policy}.
+opts(#h{insecure = Insecure, url_policy = Policy, allowed_networks = Nets}) ->
+    #{allow_insecure_oauth => Insecure, url_policy => Policy, oauth_allowed_networks => Nets}.
 
 %% `client_id'/`client_secret' are mirrored into the record fields the
 %% refresh path reads.
@@ -2108,24 +2108,12 @@ secure_urls([Url | Rest], Opts) ->
 
 http_get_json(Url, Opts) ->
     case secure_url(Url, Opts) of
-        ok -> do_http_get_json(Url);
+        ok -> do_http_get_json(Url, Opts);
         {error, _} = Err -> Err
     end.
 
-do_http_get_json(Url) ->
-    %% Discovery endpoints (RFC 9728 / RFC 8414) are typically served
-    %% directly under the same origin as the resource. Following
-    %% arbitrary cross-origin redirects from an untrusted server
-    %% turns these helpers into an SSRF primitive, so we don't.
-    case
-        hackney:request(
-            get,
-            Url,
-            [{<<"accept">>, <<"application/json">>}],
-            <<>>,
-            [with_body, {follow_redirect, false}]
-        )
-    of
+do_http_get_json(Url, Opts) ->
+    case oauth_request(get, Url, [{<<"accept">>, <<"application/json">>}], <<>>, Opts) of
         {ok, 200, _Hdrs, Body} ->
             try
                 {ok, json:decode(Body)}
@@ -2143,24 +2131,23 @@ do_http_get_json(Url) ->
 http_post_form(Url, Form, ClientSecret, ClientId, Opts) ->
     case secure_url(Url, Opts) of
         ok ->
-            Dpop = maps:get(dpop, Opts, undefined),
             case maps:get(token_endpoint_auth_method, Opts, undefined) of
                 client_secret_post ->
-                    do_post_form(Url, Form, undefined, ClientId, Dpop);
+                    do_post_form(Url, Form, undefined, ClientId, Opts);
                 none ->
                     do_post_form(
-                        Url, maps:remove(<<"client_secret">>, Form), undefined, ClientId, Dpop
+                        Url, maps:remove(<<"client_secret">>, Form), undefined, ClientId, Opts
                     );
                 _ ->
                     do_post_form(
-                        Url, maps:remove(<<"client_secret">>, Form), ClientSecret, ClientId, Dpop
+                        Url, maps:remove(<<"client_secret">>, Form), ClientSecret, ClientId, Opts
                     )
             end;
         {error, _} = Err ->
             Err
     end.
 
-do_post_form(Url, Form, ClientSecret, ClientId, Dpop) when
+do_post_form(Url, Form, ClientSecret, ClientId, Opts) when
     is_binary(ClientId),
     ClientId =/= <<>>,
     is_binary(ClientSecret),
@@ -2175,19 +2162,20 @@ do_post_form(Url, Form, ClientSecret, ClientId, Dpop) when
         {<<"content-type">>, <<"application/x-www-form-urlencoded">>},
         {<<"accept">>, <<"application/json">>}
     ],
-    post_form(Url, Headers, Form1, Dpop, first);
-do_post_form(Url, Form, _, _, Dpop) ->
+    post_form(Url, Headers, Form1, Opts, first);
+do_post_form(Url, Form, _, _, Opts) ->
     Headers = [
         {<<"content-type">>, <<"application/x-www-form-urlencoded">>},
         {<<"accept">>, <<"application/json">>}
     ],
-    post_form(Url, Headers, Form, Dpop, first).
+    post_form(Url, Headers, Form, Opts, first).
 
 %% With a DPoP key the request carries a proof; a `use_dpop_nonce'
 %% answer (RFC 9449 8) is retried once with the nonce the server named,
 %% and that nonce rides back on the token response as `dpop_nonce' for
 %% the handle to keep.
-post_form(Url, Headers, Form, Dpop, Attempt) ->
+post_form(Url, Headers, Form, Opts, Attempt) ->
+    Dpop = maps:get(dpop, Opts, undefined),
     Hs =
         case Dpop of
             undefined ->
@@ -2196,7 +2184,7 @@ post_form(Url, Headers, Form, Dpop, Attempt) ->
                 [{<<"dpop">>, dpop_proof(Key, <<"POST">>, Url, Nonce, undefined)} | Headers]
         end,
     Body = urlencode(Form),
-    case hackney:request(post, Url, Hs, Body, [with_body, {follow_redirect, false}]) of
+    case oauth_request(post, Url, Hs, Body, Opts) of
         {ok, 200, _Hdrs, RB} ->
             try json:decode(RB) of
                 Map when is_map(Map) ->
@@ -2213,12 +2201,43 @@ post_form(Url, Headers, Form, Dpop, Attempt) ->
             case dpop_nonce_challenge(RB, Hdrs) of
                 {ok, NewNonce} ->
                     {Key1, _} = Dpop,
-                    post_form(Url, Headers, Form, {Key1, NewNonce}, second);
+                    post_form(Url, Headers, Form, Opts#{dpop => {Key1, NewNonce}}, second);
                 error ->
                     {error, {http_error, 400, RB}}
             end;
         {ok, Status, _Hdrs, RB} ->
             {error, {http_error, Status, RB}};
+        {error, _} = Err ->
+            Err
+    end.
+
+%% Connect to the address `barrel_mcp_client_egress' checked, under the
+%% original name for `Host' and SNI. Redirects are never followed: the
+%% target would skip the check (MCP security best practices, SSRF).
+%% HTTP/1.1 only, since hackney's HTTP/2 path would send the IP as
+%% `:authority'.
+oauth_request(Method, Url, Headers, Body, Opts) ->
+    case barrel_mcp_client_egress:pin(Url, Opts) of
+        {ok, #{url := Pinned, host := Host, sni := Sni}} ->
+            Hs =
+                case Host of
+                    undefined -> Headers;
+                    _ -> [{<<"host">>, Host} | Headers]
+                end,
+            Tls =
+                case Sni of
+                    undefined -> [];
+                    _ -> [{ssl_options, [{server_name_indication, Sni}]}]
+                end,
+            hackney:request(
+                Method,
+                Pinned,
+                Hs,
+                Body,
+                [with_body, {follow_redirect, false}, {protocols, [http1]} | Tls]
+            );
+        {error, {blocked_address, _} = Reason} ->
+            {error, {refused_url, Url, Reason}};
         {error, _} = Err ->
             Err
     end.

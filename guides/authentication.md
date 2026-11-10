@@ -838,13 +838,41 @@ end,
 
 Anything the fun returns other than `ok` is a refusal, reported as
 `{refused_url, Url, Reason}` inside the error for the stage that was
-refused. With no policy the handle fetches any `https` URL the server
-names, which is the default because an allow-list is deployment
-knowledge the library does not have.
+refused.
 
-At minimum, refuse link-local and cloud metadata addresses
-(`169.254.0.0/16`, `fd00:ec2::254`) and anything resolving inside your
-own network. Redirects are never followed on any of these requests.
+## Private and reserved addresses
+
+With or without a `url_policy`, the handle refuses to connect to a
+private or reserved address: loopback, the private ranges
+(`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`),
+link-local and cloud metadata (`169.254.0.0/16`, `fe80::/10`), and the
+other special-purpose ranges. This is the SSRF guidance in the MCP
+security best practices (RFC 9728 section 7.7). The check runs on the
+addresses the host name resolves to, and the request then connects to
+the address that was checked, so a name cannot pass with one address
+and connect to another. A refusal reads
+`{refused_url, Url, {blocked_address, Ip}}`. Redirects are never
+followed on any of these requests.
+
+If your authorization server lives on an internal network, allow its
+range:
+
+```erlang
+{oauth, #{
+    redirect_uri => <<"http://127.0.0.1:8765/callback">>,
+    authorize => fun open_browser/1,
+    oauth_allowed_networks => [<<"10.20.0.0/16">>]
+}}
+```
+
+The discovery and grant helpers read `oauth_allowed_networks` from
+their options map too. `allow_insecure_oauth => true` (tests only, see
+below) also allows loopback, so a local mock keeps working; private
+ranges stay blocked.
+
+For a client deployed on a server, also route outbound traffic through
+an egress proxy that blocks internal destinations; the library check is
+one layer, not a network policy.
 
 ## Plaintext authorization servers
 
