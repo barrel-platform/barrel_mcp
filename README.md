@@ -703,6 +703,28 @@ The results table is in the summary of each
 and the raw results are attached as the `conformance-results` artifact.
 Run it locally with `make conformance && make conformance-report`.
 
+The same results come out of the MCP project's own SDK runner, which
+drives barrel_mcp the way it drives the official SDKs: through a
+standalone server and client in `test/conformance/`. `make
+conformance-sdk` runs both roles against the `2025-11-25` and
+`2026-07-28` required sets. Outside this Makefile:
+
+```bash
+rebar3 as test compile
+npx @modelcontextprotocol/conformance@0.2.0-alpha.11 sdk barrel-platform/barrel_mcp \
+    --path . --mode server --requirements 2026-07-28 --skip-build \
+    --server-cmd test/conformance/server.sh --server-url http://127.0.0.1:3000/mcp
+npx @modelcontextprotocol/conformance@0.2.0-alpha.11 sdk barrel-platform/barrel_mcp \
+    --path . --mode client --requirements 2026-07-28 --skip-build \
+    --client-cmd test/conformance/client.sh
+```
+
+Until [conformance#473](https://github.com/modelcontextprotocol/conformance/pull/473)
+is released, the published runner validates task results against the
+wrong schema and reports `wire-schema-valid` failures on the tasks
+extension scenarios, which are not part of the required set. `make`
+applies the same fix locally (`test/conformance/patch-runner.js`).
+
 ## Project policies
 
 - [Versioning](docs/versioning.md): what a patch, minor and major release can change.

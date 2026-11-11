@@ -37,11 +37,23 @@ jobs:
       - name: Publish results
         if: always()
         run: make -s conformance-report >> "$GITHUB_STEP_SUMMARY"
+      - name: Run through the MCP project's SDK runner
+        run: |
+          make -s conformance-sdk > _build/conformance-sdk.out 2>&1 || status=$?
+          cat _build/conformance-sdk.out
+          {
+            echo
+            echo "## Through the MCP project's SDK runner"
+            echo
+            grep '^conformance-sdk-' _build/conformance-sdk.out | sed 's/^/- /'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "${status:-0}"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: conformance-results
           path: |
             _build/conformance-report
+            _build/conformance-sdk-*.log
             _build/test/logs/**/log_private/*conformance-*
           if-no-files-found: warn
