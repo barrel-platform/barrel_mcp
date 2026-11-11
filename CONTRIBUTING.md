@@ -128,11 +128,18 @@ the lock hash.
 - `barrel_mcp_conformance_SUITE` runs the official
   `@modelcontextprotocol/conformance` runner, pinned in
   `test/conformance/package.json`, in server and client modes for every
-  revision the runner knows (`2025-03-26` onward). `make conformance` installs it and runs it; plain `rebar3 ct`
-  skips it. The suite reports the runner's own unscored scenarios
-  separately. `make conformance-report` prints the last run as a
-  table. A new failure in either list is a defect to fix; there is no
-  expected-failures file.
+  revision the runner knows (`2025-03-26` onward). `make conformance`
+  installs it and runs it; plain `rebar3 ct` skips it. The suite reports
+  the runner's own unscored scenarios separately. `make
+  conformance-report` prints the last run as a table. A new failure in
+  either list is a defect to fix; there is no expected-failures file.
+  The fixture the scenarios need lives in
+  `test/barrel_mcp_conformance_server.erl`; add what a new scenario asks
+  for there.
+- `make conformance-sdk` runs the same required sets through the
+  runner's `sdk` command, the way the MCP project runs the official
+  SDKs, using `test/conformance/server.sh` and `client.sh`. Its results
+  must match `make conformance`.
 - `make examples-test` builds every app under `examples/` against this
   checkout and runs its suites.
 

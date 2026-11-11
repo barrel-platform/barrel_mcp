@@ -1,4 +1,4 @@
-.PHONY: all compile test ct eunit dialyzer docs examples-setup examples-test interop-setup interop-test interop-python conformance-setup conformance conformance-report clean
+.PHONY: all compile test ct eunit dialyzer docs examples-setup examples-test interop-setup interop-test interop-python conformance-setup conformance conformance-report conformance-sdk clean
 
 all: compile
 
@@ -67,6 +67,27 @@ conformance: conformance-setup
 	    rebar3 ct --suite=test/barrel_mcp_conformance_SUITE
 
 interop-test: interop-python conformance
+
+# The MCP project's own SDK runner, driving this checkout through the
+# standalone server and client in test/conformance/, the way it drives
+# the official SDKs. Fails on any failing check.
+RUNNER = test/conformance/node_modules/@modelcontextprotocol/conformance/dist/index.js
+SDK_ARGS = sdk barrel-platform/barrel_mcp --path . --skip-build
+
+conformance-sdk: conformance-setup
+	rebar3 as test compile
+	@for rev in 2025-11-25 2026-07-28; do \
+	    node $(RUNNER) $(SDK_ARGS) --mode server --requirements $$rev \
+	        --server-cmd test/conformance/server.sh \
+	        --server-url http://127.0.0.1:3000/mcp > _build/conformance-sdk-server-$$rev.log 2>&1; \
+	    node $(RUNNER) $(SDK_ARGS) --mode client --requirements $$rev \
+	        --client-cmd test/conformance/client.sh > _build/conformance-sdk-client-$$rev.log 2>&1; \
+	done
+	@fail=0; for f in _build/conformance-sdk-*.log; do \
+	    total=$$(grep -o 'Total: [0-9]* passed, [0-9]* failed' $$f | tail -1); \
+	    echo "$$(basename $$f .log): $${total:-no result}"; \
+	    case "$$total" in *" 0 failed") ;; *) fail=1 ;; esac; \
+	done; exit $$fail
 
 # Markdown table of the last `make conformance' run.
 conformance-report:
