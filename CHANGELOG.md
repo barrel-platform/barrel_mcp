@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.5.1] - 2026-11-13
+
+### Changed
+
+- The HTTP server and client now use h1 0.11.0, h2 0.17.0 and hackney
+  4.11.1, with quic 2.7.0, idna 8.0.0 and webtransport 0.5.8 in the
+  lock. If your release depends on any of these directly, move it to
+  the same version range. Nothing changes in the barrel_mcp API.
+- hackney 4.11 refuses a hostname with one very long label instead of
+  spending seconds of CPU converting it, which matters because the
+  OAuth client fetches addresses an MCP server hands it. It also checks
+  internationalized hostnames more strictly: a name with an empty
+  label, an invalid `xn--` label or more than 253 characters is now
+  refused.
+- h2 0.17.0 no longer sends `content-length` on 204 responses, as HTTP
+  requires, and tells the server when a request body does not match its
+  `content-length` instead of leaving it to time out.
+
 ## [4.5.0] - 2026-11-10
 
 Two configurations that used to start are now refused, each with a
