@@ -20,7 +20,7 @@ release.
 
 ## Versions and the lock file
 
-- `rebar.config` pins each runtime dependency to a minor range (`~> 0.10.0`).
+- `rebar.config` pins each runtime dependency to a minor range (`~> 0.11.0`).
 - `rebar.lock` is committed. CI keys its build cache on it, so every build
   uses exactly the versions in the lock.
 - A dependency bump refreshes the lock in the same commit
