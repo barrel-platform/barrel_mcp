@@ -42,7 +42,7 @@ security issues even where a specification describes the check.
 
 When the fix is to make barrel_mcp follow a specification it implements
 (MCP, its tasks extension, JSON-RPC, JSON Schema, the OAuth and HTTP RFCs
-listed in [AGENTS.md](AGENTS.md#specifications)), it is a bug, even when
+listed in [AGENTS.md](https://github.com/barrel-platform/barrel_mcp/blob/main/AGENTS.md#specifications)), it is a bug, even when
 described as denial of service, memory exhaustion or a remote crash.
 Report it as a public bug and cite the specification section; see
 [Security issues and specification bugs](CONTRIBUTING.md#security-issues-and-specification-bugs).

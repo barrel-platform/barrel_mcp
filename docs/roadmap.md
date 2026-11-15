@@ -4,7 +4,7 @@ This page lists the work planned for barrel_mcp, so you can see what is
 coming and what a newer specification version will change. Each item is a
 concrete piece of work with the version of the spec it moves to. The
 specification list itself, with the version the code follows today, is in
-[AGENTS.md](../AGENTS.md#specifications).
+[AGENTS.md](https://github.com/barrel-platform/barrel_mcp/blob/main/AGENTS.md#specifications).
 
 barrel_mcp implements every released MCP revision from `2024-11-05` through
 `2026-07-28`, server and client, including the optional client features
@@ -32,5 +32,5 @@ on every change to `main`.
 ## How items move
 
 Each specification update is its own pull request, following "Keeping the
-specifications current" in [AGENTS.md](../AGENTS.md#keeping-the-specifications-current).
+specifications current" in [AGENTS.md](https://github.com/barrel-platform/barrel_mcp/blob/main/AGENTS.md#keeping-the-specifications-current).
 When an item ships, it moves to the CHANGELOG and leaves this page.
