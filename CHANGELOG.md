@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.5.3] - 2026-11-15
+
+### Changed
+
+- The HTTP client now uses hackney 4.12.1, with quic 3.1.0,
+  webtransport 0.5.11 and certifi 2.19.0 in the lock. If your release
+  depends on any of these directly, move it to the same version range.
+  Nothing changes in the barrel_mcp API.
+- hackney 4.12.1 stops a WebTransport server from sending data far
+  ahead of what the client has read. Before, that data piled up in
+  memory when the client read slowly.
+
 ## [4.5.2] - 2026-11-15
 
 ### Changed
