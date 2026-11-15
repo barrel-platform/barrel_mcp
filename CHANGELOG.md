@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.5.2] - 2026-11-15
+
+### Changed
+
+- The HTTP server and client now use h2 0.18.0 and hackney 4.12.0, with
+  quic 3.0.0 and webtransport 0.5.9 in the lock. If your release
+  depends on any of these directly, move it to the same version range.
+  Nothing changes in the barrel_mcp API.
+- The client now refuses an HTTP/1.1 response whose headers exceed
+  1 MiB or 1000 fields, instead of reading them without limit. Before,
+  a server could keep the client busy and growing in memory by sending
+  headers that never end.
+- hackney 4.12 no longer hangs a request when a SOCKS5 proxy or an
+  HTTP/3 server stops answering, and over HTTP/3 it rejects a server
+  certificate that is not issued for TLS server authentication.
+- h2 0.18.0 lets the server finish the requests it has already accepted
+  when a client closes the connection gracefully, instead of dropping
+  their responses.
+
 ## [4.5.1] - 2026-11-13
 
 ### Changed
