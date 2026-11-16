@@ -192,7 +192,8 @@ version() ->
 %%       fields, JSON encoded into a text block otherwise. An audio or
 %%       resource_link block goes out as JSON text to a client on a
 %%       revision that does not define it</li>
-%%   <li>`[map()]' - List of content blocks, each checked as above</li>
+%%   <li>`list()' - One content block per item: maps checked as above,
+%%       binaries as text, anything else printed as text</li>
 %% </ul>
 %%
 %% == Example ==

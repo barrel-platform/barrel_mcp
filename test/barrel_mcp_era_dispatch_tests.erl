@@ -9,7 +9,7 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("barrel_mcp.hrl").
 
--export([echo_tool/1, media_tool/1, a_resource/1]).
+-export([echo_tool/1, media_tool/1, structured_tool/1, a_resource/1]).
 
 %%====================================================================
 %% Fixture
@@ -24,6 +24,7 @@ era_test_() ->
         {"Existing result _meta survives decoration", fun modern_preserves_meta/0},
         {"Modern tool call is decorated", fun modern_tool_call/0},
         {"Tool content follows the negotiated revision", fun tool_content_by_revision/0},
+        {"Structured result content is formatted", fun structured_content_formatted/0},
         {"Legacy-only methods are unknown to modern", fun legacy_only_methods/0},
         {"Legacy-only methods still work for legacy", fun legacy_only_still_served/0},
         {"initialize is legacy even with modern _meta", fun initialize_stays_legacy/0},
@@ -54,6 +55,7 @@ setup() ->
     ok = barrel_mcp_registry:wait_for_ready(),
     ok = barrel_mcp_registry:reg(tool, <<"echo">>, ?MODULE, echo_tool, #{}),
     ok = barrel_mcp_registry:reg(tool, <<"media">>, ?MODULE, media_tool, #{}),
+    ok = barrel_mcp_registry:reg(tool, <<"structured">>, ?MODULE, structured_tool, #{}),
     ok = barrel_mcp_registry:reg(resource, <<"res">>, ?MODULE, a_resource, #{
         uri => <<"file:///present">>
     }),
@@ -66,6 +68,7 @@ cleanup(_) ->
     barrel_mcp_registry:unreg(resource, <<"volatile">>),
     barrel_mcp_registry:unreg(tool, <<"echo">>),
     barrel_mcp_registry:unreg(tool, <<"media">>),
+    barrel_mcp_registry:unreg(tool, <<"structured">>),
     barrel_mcp_registry:unreg(resource, <<"res">>),
     application:unset_env(barrel_mcp, send_server_info),
     application:unset_env(barrel_mcp, advertise_versions),
@@ -74,6 +77,8 @@ cleanup(_) ->
 echo_tool(_Args) -> <<"pong">>.
 
 media_tool(_Args) -> media_blocks().
+
+structured_tool(_Args) -> {structured, #{<<"n">> => 1}, <<"one">>}.
 
 media_blocks() ->
     [
@@ -202,6 +207,18 @@ tool_content_by_revision() ->
     ?assertEqual([<<"text">>, <<"text">>], Content(<<"2024-11-05">>)),
     ?assertEqual([<<"audio">>, <<"text">>], Content(<<"2025-03-26">>)),
     ?assertEqual([<<"audio">>, <<"resource_link">>], Content(<<"2025-06-18">>)).
+
+structured_content_formatted() ->
+    {async, Plan} = barrel_mcp_protocol:handle(
+        legacy(<<"tools/call">>, #{<<"name">> => <<"structured">>, <<"arguments">> => #{}}),
+        #{protocol_version => <<"2025-06-18">>}
+    ),
+    Result = maps:get(<<"result">>, barrel_mcp_protocol:drive_async_plan(Plan, 2000)),
+    ?assertEqual(
+        [#{<<"type">> => <<"text">>, <<"text">> => <<"one">>}],
+        maps:get(<<"content">>, Result)
+    ),
+    ?assertEqual(#{<<"n">> => 1}, maps:get(<<"structuredContent">>, Result)).
 
 %%====================================================================
 %% Era gating

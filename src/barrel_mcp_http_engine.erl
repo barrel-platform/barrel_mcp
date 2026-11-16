@@ -1439,7 +1439,9 @@ tool_outcome_envelope(Reply, RequestId, {structured, Data, Content, Meta}) ->
         Reply,
         RequestId,
         #{
-            <<"content">> => Content,
+            <<"content">> => barrel_mcp_protocol:format_tool_result_external(
+                Content, reply_revision(Reply)
+            ),
             <<"structuredContent">> => Data
         },
         Meta

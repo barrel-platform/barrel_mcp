@@ -76,7 +76,6 @@
     encode_response/2,
     encode_error/3,
     decode_envelope/1,
-    format_tool_result_external/1,
     format_tool_result_external/2,
     drive_async_plan/2,
     drive_async_plan/3,
@@ -927,20 +926,20 @@ task_collector_loop(Owner, TaskId) ->
     receive
         {tool_result, _ReqId, Result} ->
             barrel_mcp_tasks:finish(Owner, TaskId, #{
-                <<"content">> => format_tool_result_external(Result)
+                <<"content">> => format_tool_result(Result, undefined)
             });
         {tool_result_meta, _ReqId, Result, _Meta} ->
             barrel_mcp_tasks:finish(Owner, TaskId, #{
-                <<"content">> => format_tool_result_external(Result)
+                <<"content">> => format_tool_result(Result, undefined)
             });
         {tool_structured, _ReqId, Data, Content} ->
             barrel_mcp_tasks:finish(Owner, TaskId, #{
-                <<"content">> => Content,
+                <<"content">> => format_tool_result(Content, undefined),
                 <<"structuredContent">> => Data
             });
         {tool_structured_meta, _ReqId, Data, Content, _Meta} ->
             barrel_mcp_tasks:finish(Owner, TaskId, #{
-                <<"content">> => Content,
+                <<"content">> => format_tool_result(Content, undefined),
                 <<"structuredContent">> => Data
             });
         {tool_error, _ReqId, Content} ->
@@ -949,7 +948,7 @@ task_collector_loop(Owner, TaskId) ->
             %% requires the CallToolResult with isError to be the task's
             %% result rather than an error object.
             barrel_mcp_tasks:finish(Owner, TaskId, #{
-                <<"content">> => format_tool_result_external(Content),
+                <<"content">> => format_tool_result(Content, undefined),
                 <<"isError">> => true
             });
         {tool_failed, _ReqId, Reason} ->
@@ -1901,14 +1900,10 @@ with_meta(Object, _) ->
     Object.
 
 %% @doc Format a tool handler's plain return value into the MCP
-%% content-block list shape. Public so transports driving async
-%% tool calls (HTTP / stdio) can produce identical envelopes.
--spec format_tool_result_external(term()) -> [map()].
-format_tool_result_external(Result) ->
-    format_tool_result(Result, undefined).
-
-%% @doc As {@link format_tool_result_external/1}, for the negotiated
-%% revision: a block type it does not define is sent as JSON text.
+%% content-block list shape for the negotiated revision (`undefined'
+%% when there is none): a block type it does not define is sent as
+%% JSON text. Public so transports driving async tool calls (HTTP /
+%% stdio) can produce identical envelopes.
 -spec format_tool_result_external(term(), binary() | undefined) -> [map()].
 format_tool_result_external(Result, Revision) ->
     format_tool_result(Result, Revision).
@@ -2176,7 +2171,7 @@ await_plan_outcome(Plan, RequestId, Timeout) ->
             success_response(
                 RequestId,
                 #{
-                    <<"content">> => Content,
+                    <<"content">> => format_tool_result(Content, Revision),
                     <<"structuredContent">> => Data
                 }
             );
@@ -2184,7 +2179,7 @@ await_plan_outcome(Plan, RequestId, Timeout) ->
             success_response(
                 RequestId,
                 #{
-                    <<"content">> => Content,
+                    <<"content">> => format_tool_result(Content, Revision),
                     <<"structuredContent">> => Data
                 },
                 RespMeta
@@ -2232,11 +2227,6 @@ await_plan_outcome(Plan, RequestId, Timeout) ->
         timeout
     end.
 
-format_list_item(Item, Revision) when is_map(Item) ->
-    format_tool_result(Item, Revision);
-format_list_item(Item, _Revision) ->
-    [Item].
-
 plan_revision(#{ctx := Ctx}) when Ctx =/= undefined ->
     barrel_mcp_ctx:protocol_version(Ctx);
 plan_revision(_Plan) ->
@@ -2251,8 +2241,13 @@ format_tool_result(Result, Revision) when is_map(Result) ->
         false ->
             [#{<<"type">> => <<"text">>, <<"text">> => iolist_to_binary(json:encode(Result))}]
     end;
-format_tool_result(Result, Revision) when is_list(Result) ->
-    lists:append([format_list_item(Item, Revision) || Item <- Result]);
+format_tool_result([_ | _] = Result, Revision) ->
+    case io_lib:printable_unicode_list(Result) of
+        true -> [#{<<"type">> => <<"text">>, <<"text">> => unicode:characters_to_binary(Result)}];
+        false -> lists:append([format_tool_result(Item, Revision) || Item <- Result])
+    end;
+format_tool_result([], _Revision) ->
+    [];
 format_tool_result(Result, _Revision) ->
     [#{<<"type">> => <<"text">>, <<"text">> => iolist_to_binary(io_lib:format("~p", [Result]))}].
 

@@ -62,7 +62,8 @@
     modern_disconnect_cancels_the_request/1,
     legacy_disconnect_does_not_cancel/1,
     legacy_post_only_client_can_be_asked/1,
-    legacy_tool_content_follows_the_revision/1
+    legacy_tool_content_follows_the_revision/1,
+    structured_content_is_formatted/1
 ]).
 
 -export([asking_tool/2]).
@@ -74,6 +75,7 @@
 -export([
     echo_tool/1,
     media_tool/1,
+    structured_tool/1,
     boom_tool/1,
     a_resource/1,
     counting_tool/2,
@@ -123,7 +125,8 @@ all() ->
         modern_disconnect_cancels_the_request,
         legacy_disconnect_does_not_cancel,
         legacy_post_only_client_can_be_asked,
-        legacy_tool_content_follows_the_revision
+        legacy_tool_content_follows_the_revision,
+        structured_content_is_formatted
     ].
 
 init_per_suite(Config) ->
@@ -135,6 +138,9 @@ init_per_suite(Config) ->
     }),
     ok = barrel_mcp:reg_tool(<<"media">>, ?MODULE, media_tool, #{
         description => <<"Returns an audio block and a resource link">>
+    }),
+    ok = barrel_mcp:reg_tool(<<"structured">>, ?MODULE, structured_tool, #{
+        description => <<"Returns structured data with a binary as content">>
     }),
     ok = barrel_mcp:reg_tool(<<"boom">>, ?MODULE, boom_tool, #{
         description => <<"Always crashes">>
@@ -208,6 +214,9 @@ media_tool(_Args) ->
         #{<<"type">> => <<"audio">>, <<"data">> => <<"aGk=">>, <<"mimeType">> => <<"audio/wav">>},
         #{<<"type">> => <<"resource_link">>, <<"uri">> => <<"file:///a">>, <<"name">> => <<"a">>}
     ].
+
+structured_tool(_Args) ->
+    {structured, #{<<"n">> => 1}, [<<"one">>, #{<<"type">> => <<"table">>}]}.
 
 boom_tool(_Args) ->
     error(deliberate_crash).
@@ -583,6 +592,24 @@ legacy_tool_content_follows_the_revision(Config) ->
     end,
     ?assertEqual([<<"audio">>, <<"text">>], Types(<<"2025-03-26">>)),
     ?assertEqual([<<"audio">>, <<"resource_link">>], Types(<<"2025-11-25">>)),
+    ok.
+
+structured_content_is_formatted(Config) ->
+    Port = ?config(port, Config),
+    {200, InitHeaders, _} = post(Port, init_body(), []),
+    SessionId = header(<<"mcp-session-id">>, InitHeaders),
+    Params = #{<<"name">> => <<"structured">>, <<"arguments">> => #{}},
+    {200, _, Body} = post(
+        Port,
+        legacy_request(2, <<"tools/call">>, Params),
+        [{<<"mcp-session-id">>, SessionId}, {<<"mcp-protocol-version">>, <<"2025-11-25">>}]
+    ),
+    [
+        #{<<"type">> := <<"text">>, <<"text">> := <<"one">>},
+        #{<<"type">> := <<"text">>, <<"text">> := J}
+    ] =
+        maps:get(<<"content">>, result_of(Body)),
+    ?assertEqual(#{<<"type">> => <<"table">>}, json:decode(J)),
     ok.
 
 %% None of this applies to a legacy client, which predates the headers.
