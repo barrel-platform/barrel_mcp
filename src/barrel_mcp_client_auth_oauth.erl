@@ -154,31 +154,92 @@
     check_issuer_binding/2
 ]).
 
--export_type([config/0, handle/0]).
+-export_type([
+    config/0,
+    authorization_code_config/0,
+    access_token_config/0,
+    client_credentials_config/0,
+    jwt_bearer_config/0,
+    enterprise_managed_config/0,
+    handle/0
+]).
 
+%% Every member also takes `allow_insecure_oauth', `url_policy',
+%% `oauth_allowed_networks', `private_key' and `dpop'.
 -type config() ::
-    #{
-        access_token := binary(),
-        refresh_token => binary(),
-        token_endpoint => binary(),
-        client_id => binary(),
-        client_secret => binary(),
-        resource => binary(),
-        scopes => [binary()],
-        allow_insecure_oauth => boolean()
-    }
+    authorization_code_config()
+    | access_token_config()
     | client_credentials_config()
+    | jwt_bearer_config()
     | enterprise_managed_config().
+
+%% The handle runs the authorization-code flow itself from a 401.
+-type authorization_code_config() :: #{
+    redirect_uri := binary(),
+    authorize := fun((binary()) -> {ok, binary()} | {error, term()}),
+    %% A preregistered client; dynamic registration otherwise.
+    client_id => binary(),
+    client_secret => binary(),
+    client_metadata => map(),
+    client_id_metadata_url => binary(),
+    token_endpoint_auth_method => client_secret_basic | client_secret_post | none,
+    store => barrel_mcp_client_auth_store:store(),
+    want_refresh_token => boolean(),
+    resource => binary(),
+    scopes => [binary()],
+    allow_insecure_oauth => boolean(),
+    url_policy => url_policy(),
+    oauth_allowed_networks => [binary()],
+    private_key => private_key(),
+    dpop => boolean()
+}.
+
+%% Tokens the host already holds; the handle only refreshes them.
+-type access_token_config() :: #{
+    access_token := binary(),
+    refresh_token => binary(),
+    token_endpoint => binary(),
+    client_id => binary(),
+    client_secret => binary(),
+    resource => binary(),
+    scopes => [binary()],
+    allow_insecure_oauth => boolean(),
+    url_policy => url_policy(),
+    oauth_allowed_networks => [binary()],
+    private_key => private_key(),
+    dpop => boolean()
+}.
 
 -type client_credentials_config() :: #{
     grant_type := client_credentials,
-    token_endpoint := binary(),
+    %% Discovered from the first 401 when absent.
+    token_endpoint => binary(),
     client_id := binary(),
     client_secret => binary(),
     client_assertion => binary(),
     resource => binary(),
     scopes => [binary()],
-    allow_insecure_oauth => boolean()
+    allow_insecure_oauth => boolean(),
+    url_policy => url_policy(),
+    oauth_allowed_networks => [binary()],
+    private_key => private_key(),
+    dpop => boolean()
+}.
+
+%% RFC 7523 jwt-bearer grant with an assertion the host obtained.
+-type jwt_bearer_config() :: #{
+    grant_type := jwt_bearer,
+    client_id := binary(),
+    assertion := binary(),
+    %% Discovered from the first 401 when absent.
+    token_endpoint => binary(),
+    resource => binary(),
+    scopes => [binary()],
+    allow_insecure_oauth => boolean(),
+    url_policy => url_policy(),
+    oauth_allowed_networks => [binary()],
+    private_key => private_key(),
+    dpop => boolean()
 }.
 
 -type enterprise_managed_config() :: #{
@@ -186,7 +247,9 @@
     %% IdP token endpoint (RFC 8693 token-exchange).
     idp_token_endpoint := binary(),
     %% Authorization server token endpoint (RFC 7523 jwt-bearer).
-    as_token_endpoint := binary(),
+    %% With `audience' and `resource', discovered from the first 401
+    %% when absent.
+    as_token_endpoint => binary(),
     client_id := binary(),
     client_secret => binary(),
     client_assertion => binary(),
@@ -196,12 +259,23 @@
     %% Spec URN: `id_token' or `saml2'.
     subject_token_type := binary(),
     %% AS issuer URL: the `aud' the IdP signs into the ID-JAG.
-    audience := binary(),
+    audience => binary(),
     %% MCP server's RFC 9728 resource identifier.
-    resource := binary(),
+    resource => binary(),
     scopes => [binary()],
-    allow_insecure_oauth => boolean()
+    allow_insecure_oauth => boolean(),
+    url_policy => url_policy(),
+    oauth_allowed_networks => [binary()],
+    private_key => private_key(),
+    dpop => boolean()
 }.
+
+%% What the handle may fetch; applies to every URL it requests.
+-type url_policy() :: fun((binary()) -> ok | {error, term()}).
+
+%% For `private_key_jwt': a PEM or an already decoded key, with its
+%% JWS algorithm.
+-type private_key() :: {binary() | barrel_mcp_jwt:key(), barrel_mcp_jwt:alg()}.
 
 -record(h, {
     %% `allow_insecure_oauth' from the config; threaded into every

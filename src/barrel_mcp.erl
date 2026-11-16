@@ -151,7 +151,8 @@
     resource_opts/0,
     resource_template_opts/0,
     prompt_opts/0,
-    prompt_argument/0
+    prompt_argument/0,
+    ssl_opts/0
 ]).
 
 %% Registration options. Each type lists every key the registry reads;
@@ -204,6 +205,14 @@
     arguments => [prompt_argument()],
     annotations => map(),
     _ => term()
+}.
+
+%% TLS for the HTTP listeners. Paths are handed to `ssl', which takes
+%% strings or binaries.
+-type ssl_opts() :: #{
+    certfile := file:filename_all(),
+    keyfile := file:filename_all(),
+    cacertfile => file:filename_all()
 }.
 
 -type prompt_argument() :: #{
@@ -631,7 +640,7 @@ completion_key(Kind, Outer, Arg) ->
 %% @see barrel_mcp_auth
 -spec start_http(Opts) -> {ok, pid()} | {error, term()} when
     Opts :: #{
-        port => pos_integer(),
+        port => inet:port_number(),
         ip => inet:ip_address(),
         auth => map(),
         acceptors => pos_integer(),
@@ -717,15 +726,11 @@ stop_http() ->
 %% @see barrel_mcp_auth
 -spec start_http_stream(Opts) -> {ok, pid()} | {error, term()} when
     Opts :: #{
-        port => pos_integer(),
+        port => inet:port_number(),
         ip => inet:ip_address(),
         auth => map(),
         session_enabled => boolean(),
-        ssl => #{
-            certfile := string(),
-            keyfile := string(),
-            cacertfile => string()
-        },
+        ssl => ssl_opts(),
         acceptors => pos_integer(),
         max_connections => pos_integer(),
         max_requests => pos_integer() | infinity,

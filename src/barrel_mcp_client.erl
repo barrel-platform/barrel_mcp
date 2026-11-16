@@ -103,8 +103,14 @@
     #{
         transport :=
             {http, binary() | string()}
-            | {stdio, #{command := string(), args => [string()]}},
-        client_info => #{name => binary(), version => binary()},
+            | {stdio, #{
+                command := file:filename_all(),
+                args => [string() | binary()],
+                env => [{string(), string() | false}]
+            }},
+        %% Sent as `clientInfo'; any other Implementation field
+        %% (`title', `icons', `websiteUrl') passes through.
+        client_info => #{name => binary(), version => binary(), _ => term()},
         capabilities => map(),
         handler => {module(), term()},
         auth =>
@@ -131,6 +137,9 @@
         init_timeout => pos_integer(),
         ping_interval => pos_integer() | infinity,
         ping_failure_threshold => pos_integer(),
+        %% How many times one request may be retried with the input a
+        %% server asked for (`input_required') before giving up.
+        max_input_rounds => pos_integer(),
         %% Extra headers on every HTTP request. Servers configured with
         %% `allow_missing_origin => false' reject requests that carry no
         %% `Origin', so pass one here:
