@@ -71,6 +71,18 @@ jobs:
         with:
           otp-version: ${{ matrix.otp }}
           rebar3-version: '3.27'
+      # The examples resolve dependency ranges from the Hex index, and a
+      # fresh index fetch has failed to find versions that exist. Reuse
+      # the index the Tests job caches; the paths must match its save.
+      - name: Restore rebar3 package cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/rebar3
+            _build
+          key: ${{ runner.os }}-rebar3-${{ matrix.otp }}-${{ hashFiles('rebar.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rebar3-${{ matrix.otp }}-
       - name: Set up _checkouts symlinks
         run: make examples-setup
       - name: Run example suites
