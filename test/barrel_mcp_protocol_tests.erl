@@ -243,3 +243,62 @@ test_handle_invalid_request() ->
     ?assert(maps:is_key(<<"error">>, Response)),
     Error = maps:get(<<"error">>, Response),
     ?assertEqual(-32600, maps:get(<<"code">>, Error)).
+
+%%====================================================================
+%% Tool result content blocks (server/tools, Tool Result)
+%%====================================================================
+
+format_tool_result_test_() ->
+    [
+        {"Spec content blocks pass through", fun test_content_blocks_pass/0},
+        {"Map with a non-spec type becomes JSON text", fun test_domain_type_map_is_text/0},
+        {"Map missing a required field becomes JSON text", fun test_incomplete_blocks_are_text/0},
+        {"Other terms become a text string", fun test_other_term_is_text/0}
+    ].
+
+test_content_blocks_pass() ->
+    Blocks = [
+        #{<<"type">> => <<"text">>, <<"text">> => <<"hi">>},
+        #{<<"type">> => <<"image">>, <<"data">> => <<"aGk=">>, <<"mimeType">> => <<"image/png">>},
+        #{<<"type">> => <<"audio">>, <<"data">> => <<"aGk=">>, <<"mimeType">> => <<"audio/wav">>},
+        #{
+            <<"type">> => <<"resource_link">>,
+            <<"uri">> => <<"file:///a.txt">>,
+            <<"name">> => <<"a.txt">>
+        },
+        #{
+            <<"type">> => <<"resource">>,
+            <<"resource">> => #{<<"uri">> => <<"file:///a.txt">>, <<"text">> => <<"hi">>}
+        },
+        #{
+            <<"type">> => <<"resource">>,
+            <<"resource">> => #{<<"uri">> => <<"file:///a.bin">>, <<"blob">> => <<"aGk=">>}
+        }
+    ],
+    [?assertEqual([B], barrel_mcp_protocol:format_tool_result_external(B)) || B <- Blocks].
+
+test_domain_type_map_is_text() ->
+    Entry = #{<<"type">> => <<"table">>, <<"description">> => null},
+    assert_json_text(Entry).
+
+test_incomplete_blocks_are_text() ->
+    Maps = [
+        #{<<"type">> => <<"text">>, <<"text">> => 42},
+        #{<<"type">> => <<"image">>, <<"data">> => <<"aGk=">>},
+        #{<<"type">> => <<"resource_link">>, <<"uri">> => <<"file:///a.txt">>},
+        #{<<"type">> => <<"resource">>, <<"resource">> => #{<<"text">> => <<"hi">>}},
+        #{<<"type">> => <<"resource">>, <<"resource">> => #{<<"uri">> => <<"file:///a">>}}
+    ],
+    lists:foreach(fun assert_json_text/1, Maps).
+
+test_other_term_is_text() ->
+    ?assertEqual(
+        [#{<<"type">> => <<"text">>, <<"text">> => <<"ok">>}],
+        barrel_mcp_protocol:format_tool_result_external(ok)
+    ).
+
+assert_json_text(Map) ->
+    [#{<<"type">> := <<"text">>, <<"text">> := Text} = Block] =
+        barrel_mcp_protocol:format_tool_result_external(Map),
+    ?assertEqual(2, map_size(Block)),
+    ?assertEqual(Map, json:decode(Text)).

@@ -187,7 +187,9 @@ version() ->
 %% The handler function can return:
 %% <ul>
 %%   <li>`binary()' - Returned as text content</li>
-%%   <li>`map()' - Automatically JSON encoded</li>
+%%   <li>`map()' - Sent as is when it is a spec content block (text,
+%%       image, audio, resource_link, resource) with its required
+%%       fields, JSON encoded into a text block otherwise</li>
 %%   <li>`[map()]' - List of content blocks</li>
 %% </ul>
 %%
