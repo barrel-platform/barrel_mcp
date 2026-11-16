@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A tool result that is not a binary, map or list (an atom, a tuple) is
   now sent as a text string. Before, its text went out as an array of
   numbers, which clients could not read.
+- Audio blocks were sent to clients on 2024-11-05, and resource link
+  blocks to clients on 2024-11-05 and 2025-03-26, although those
+  revisions do not define them, so clients that check the result
+  rejected it. These clients now receive such a block as JSON text. A
+  non-block map inside a list result is now sent as JSON text as well.
+  See `CallToolResult.content` in each revision's schema.
+- A tool that returned a list holding binaries or other plain values, a
+  string written as a character list, or structured content with plain
+  `content`, had it sent unchanged, which is not a valid tool result.
+  Each item is now sent as a content block: a binary or string becomes
+  text, and anything else becomes JSON or printed text.
 
 ## [4.5.3] - 2026-11-15
 

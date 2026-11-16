@@ -83,12 +83,16 @@ text_tool(_Args) ->
 json_tool(_Args) ->
     #{<<"key">> => <<"value">>, <<"count">> => 42}.
 
-%% List of content blocks -> verbatim.
+%% List -> one block per item: maps are checked as above, binaries
+%% become text blocks, and any other term is printed as text.
 multi_tool(_Args) ->
     [
         #{<<"type">> => <<"text">>, <<"text">> => <<"First result">>},
         #{<<"type">> => <<"text">>, <<"text">> => <<"Second result">>}
     ].
+
+%% A block type the client's revision does not define is sent as JSON
+%% text: audio needs 2025-03-26, resource_link needs 2025-06-18.
 
 %% Image content block.
 image_tool(_Args) ->
@@ -115,7 +119,8 @@ weather(_Args) ->
 ```
 
 `{tool_error, Content}` and `{structured, Data, Content}` are the
-recommended shapes. Plain returns still work; raised exceptions are
+recommended shapes. Their `Content` follows the same rules as a plain
+return. Plain returns still work; raised exceptions are
 caught and surfaced as a JSON-RPC error to the client.
 
 There is one more, for tools that need something from the user before

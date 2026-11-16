@@ -1432,14 +1432,16 @@ tool_outcome_envelope(Reply, RequestId, {input_required, Requests, State}) ->
         maps:get(plan, Reply, #{}), Requests, State, RequestId
     );
 tool_outcome_envelope(Reply, RequestId, {result, Result, Meta}) ->
-    Content = barrel_mcp_protocol:format_tool_result_external(Result),
+    Content = barrel_mcp_protocol:format_tool_result_external(Result, reply_revision(Reply)),
     tool_success(Reply, RequestId, #{<<"content">> => Content}, Meta);
 tool_outcome_envelope(Reply, RequestId, {structured, Data, Content, Meta}) ->
     tool_success(
         Reply,
         RequestId,
         #{
-            <<"content">> => Content,
+            <<"content">> => barrel_mcp_protocol:format_tool_result_external(
+                Content, reply_revision(Reply)
+            ),
             <<"structuredContent">> => Data
         },
         Meta
@@ -1450,7 +1452,9 @@ tool_outcome_envelope(Reply, RequestId, {tool_error, Content, Meta}) ->
         Reply,
         RequestId,
         #{
-            <<"content">> => barrel_mcp_protocol:format_tool_result_external(Content),
+            <<"content">> => barrel_mcp_protocol:format_tool_result_external(
+                Content, reply_revision(Reply)
+            ),
             <<"isError">> => true
         },
         Meta
@@ -1502,6 +1506,11 @@ internal_error_code(#{ctx := Ctx}) when Ctx =/= undefined ->
     end;
 internal_error_code(_Reply) ->
     ?MCP_TOOL_ERROR.
+
+reply_revision(#{ctx := Ctx}) when Ctx =/= undefined ->
+    barrel_mcp_ctx:protocol_version(Ctx);
+reply_revision(_Reply) ->
+    undefined.
 
 %% A modern result is decorated here rather than in the protocol core,
 %% because this envelope is built by the transport.

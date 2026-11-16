@@ -35,7 +35,9 @@
     | elicitation
     | elicitation_url
     | title
-    | icons.
+    | icons
+    | audio_content
+    | resource_link_content.
 
 -export_type([feature/0]).
 
@@ -179,6 +181,18 @@ feature(icons, <<"2026-07-28">>) ->
     enabled;
 feature(icons, _Revision) ->
     disabled;
+%% Content block types in CallToolResult.content: audio arrived at
+%% 2025-03-26, resource_link at 2025-06-18.
+feature(audio_content, <<"2024-11-05">>) ->
+    disabled;
+feature(audio_content, Revision) ->
+    known(Revision);
+feature(resource_link_content, <<"2024-11-05">>) ->
+    disabled;
+feature(resource_link_content, <<"2025-03-26">>) ->
+    disabled;
+feature(resource_link_content, Revision) ->
+    known(Revision);
 feature(_Feature, _Revision) ->
     disabled.
 

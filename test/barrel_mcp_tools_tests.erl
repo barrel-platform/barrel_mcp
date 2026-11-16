@@ -150,7 +150,7 @@ drive_call(Name, Args) ->
     _Pid = (maps:get(spawn, Plan))(Ctx),
     receive
         {tool_result, 1, Result} ->
-            {result, barrel_mcp_protocol:format_tool_result_external(Result)};
+            {result, barrel_mcp_protocol:format_tool_result_external(Result, undefined)};
         {tool_failed, 1, Reason} ->
             {failed, Reason};
         {tool_error, 1, Content} ->

@@ -189,8 +189,11 @@ version() ->
 %%   <li>`binary()' - Returned as text content</li>
 %%   <li>`map()' - Sent as is when it is a spec content block (text,
 %%       image, audio, resource_link, resource) with its required
-%%       fields, JSON encoded into a text block otherwise</li>
-%%   <li>`[map()]' - List of content blocks</li>
+%%       fields, JSON encoded into a text block otherwise. An audio or
+%%       resource_link block goes out as JSON text to a client on a
+%%       revision that does not define it</li>
+%%   <li>`list()' - One content block per item: maps checked as above,
+%%       binaries as text, anything else printed as text</li>
 %% </ul>
 %%
 %% == Example ==

@@ -167,6 +167,20 @@ feature_table_test() ->
             {<<"2025-06-18">>, disabled},
             {<<"2025-11-25">>, enabled},
             {<<"2026-07-28">>, enabled}
+        ]},
+        {audio_content, [
+            {<<"2024-11-05">>, disabled},
+            {<<"2025-03-26">>, enabled},
+            {<<"2025-06-18">>, enabled},
+            {<<"2025-11-25">>, enabled},
+            {<<"2026-07-28">>, enabled}
+        ]},
+        {resource_link_content, [
+            {<<"2024-11-05">>, disabled},
+            {<<"2025-03-26">>, disabled},
+            {<<"2025-06-18">>, enabled},
+            {<<"2025-11-25">>, enabled},
+            {<<"2026-07-28">>, enabled}
         ]}
     ],
     lists:foreach(
@@ -200,7 +214,9 @@ unknown_revisions_have_no_features_test() ->
             output_schema,
             output_schema_any_root,
             elicitation,
-            elicitation_url
+            elicitation_url,
+            audio_content,
+            resource_link_content
         ]
     ).
 

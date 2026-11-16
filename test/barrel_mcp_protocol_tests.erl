@@ -178,7 +178,7 @@ test_handle_tools_call() ->
     _Pid = (maps:get(spawn, Plan))(Ctx),
     receive
         {tool_result, 1, Result} ->
-            Content = barrel_mcp_protocol:format_tool_result_external(Result),
+            Content = barrel_mcp_protocol:format_tool_result_external(Result, undefined),
             ?assert(length(Content) >= 1)
     after 2000 ->
         ?assert(false)
@@ -253,7 +253,9 @@ format_tool_result_test_() ->
         {"Spec content blocks pass through", fun test_content_blocks_pass/0},
         {"Map with a non-spec type becomes JSON text", fun test_domain_type_map_is_text/0},
         {"Map missing a required field becomes JSON text", fun test_incomplete_blocks_are_text/0},
-        {"Other terms become a text string", fun test_other_term_is_text/0}
+        {"Other terms become a text string", fun test_other_term_is_text/0},
+        {"Block types follow the negotiated revision", fun test_block_types_by_revision/0},
+        {"Each list item becomes a content block", fun test_list_items/0}
     ].
 
 test_content_blocks_pass() ->
@@ -275,7 +277,10 @@ test_content_blocks_pass() ->
             <<"resource">> => #{<<"uri">> => <<"file:///a.bin">>, <<"blob">> => <<"aGk=">>}
         }
     ],
-    [?assertEqual([B], barrel_mcp_protocol:format_tool_result_external(B)) || B <- Blocks].
+    [
+        ?assertEqual([B], barrel_mcp_protocol:format_tool_result_external(B, undefined))
+     || B <- Blocks
+    ].
 
 test_domain_type_map_is_text() ->
     Entry = #{<<"type">> => <<"table">>, <<"description">> => null},
@@ -294,11 +299,54 @@ test_incomplete_blocks_are_text() ->
 test_other_term_is_text() ->
     ?assertEqual(
         [#{<<"type">> => <<"text">>, <<"text">> => <<"ok">>}],
-        barrel_mcp_protocol:format_tool_result_external(ok)
+        barrel_mcp_protocol:format_tool_result_external(ok, undefined)
     ).
 
+%% CallToolResult.content: audio from 2025-03-26, resource_link from
+%% 2025-06-18 (schema/<revision>/schema.ts).
+test_block_types_by_revision() ->
+    Audio = #{
+        <<"type">> => <<"audio">>, <<"data">> => <<"aGk=">>, <<"mimeType">> => <<"audio/wav">>
+    },
+    Link = #{
+        <<"type">> => <<"resource_link">>, <<"uri">> => <<"file:///a">>, <<"name">> => <<"a">>
+    },
+    Text = #{<<"type">> => <<"text">>, <<"text">> => <<"hi">>},
+    Passes = fun(Block, Rev) ->
+        ?assertEqual([Block], barrel_mcp_protocol:format_tool_result_external(Block, Rev))
+    end,
+    Passes(Audio, <<"2025-03-26">>),
+    Passes(Link, <<"2025-06-18">>),
+    Passes(Link, <<"2026-07-28">>),
+    Passes(Text, <<"2024-11-05">>),
+    [Passes(B, undefined) || B <- [Audio, Link, Text]],
+    assert_json_text(Audio, <<"2024-11-05">>),
+    assert_json_text(Link, <<"2024-11-05">>),
+    assert_json_text(Link, <<"2025-03-26">>).
+
+test_list_items() ->
+    Block = #{<<"type">> => <<"text">>, <<"text">> => <<"hi">>},
+    Table = #{<<"type">> => <<"table">>},
+    [B1, #{<<"text">> := Json}, B3, B4] =
+        barrel_mcp_protocol:format_tool_result_external([Block, Table, <<"bin">>, ok], undefined),
+    ?assertEqual(Block, B1),
+    ?assertEqual(Table, json:decode(Json)),
+    ?assertEqual(#{<<"type">> => <<"text">>, <<"text">> => <<"bin">>}, B3),
+    ?assertEqual(#{<<"type">> => <<"text">>, <<"text">> => <<"ok">>}, B4),
+    ?assertEqual(
+        [Block, Block], barrel_mcp_protocol:format_tool_result_external([Block, Block], undefined)
+    ),
+    ?assertEqual(
+        [#{<<"type">> => <<"text">>, <<"text">> => <<"hello">>}],
+        barrel_mcp_protocol:format_tool_result_external("hello", undefined)
+    ),
+    ?assertEqual([], barrel_mcp_protocol:format_tool_result_external([], undefined)).
+
 assert_json_text(Map) ->
+    assert_json_text(Map, undefined).
+
+assert_json_text(Map, Rev) ->
     [#{<<"type">> := <<"text">>, <<"text">> := Text} = Block] =
-        barrel_mcp_protocol:format_tool_result_external(Map),
+        barrel_mcp_protocol:format_tool_result_external(Map, Rev),
     ?assertEqual(2, map_size(Block)),
     ?assertEqual(Map, json:decode(Text)).
