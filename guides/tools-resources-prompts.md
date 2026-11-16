@@ -83,12 +83,16 @@ text_tool(_Args) ->
 json_tool(_Args) ->
     #{<<"key">> => <<"value">>, <<"count">> => 42}.
 
-%% List of content blocks -> verbatim.
+%% List of content blocks -> one block per item, each map checked as
+%% above.
 multi_tool(_Args) ->
     [
         #{<<"type">> => <<"text">>, <<"text">> => <<"First result">>},
         #{<<"type">> => <<"text">>, <<"text">> => <<"Second result">>}
     ].
+
+%% A block type the client's revision does not define is sent as JSON
+%% text: audio needs 2025-03-26, resource_link needs 2025-06-18.
 
 %% Image content block.
 image_tool(_Args) ->

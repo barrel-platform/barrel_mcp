@@ -61,7 +61,8 @@
     modern_unknown_log_level_is_invalid_params/1,
     modern_disconnect_cancels_the_request/1,
     legacy_disconnect_does_not_cancel/1,
-    legacy_post_only_client_can_be_asked/1
+    legacy_post_only_client_can_be_asked/1,
+    legacy_tool_content_follows_the_revision/1
 ]).
 
 -export([asking_tool/2]).
@@ -72,6 +73,7 @@
 %% A tool per outcome we need to observe on the wire.
 -export([
     echo_tool/1,
+    media_tool/1,
     boom_tool/1,
     a_resource/1,
     counting_tool/2,
@@ -120,7 +122,8 @@ all() ->
         modern_unknown_log_level_is_invalid_params,
         modern_disconnect_cancels_the_request,
         legacy_disconnect_does_not_cancel,
-        legacy_post_only_client_can_be_asked
+        legacy_post_only_client_can_be_asked,
+        legacy_tool_content_follows_the_revision
     ].
 
 init_per_suite(Config) ->
@@ -129,6 +132,9 @@ init_per_suite(Config) ->
     ok = barrel_mcp_registry:wait_for_ready(),
     ok = barrel_mcp:reg_tool(<<"echo">>, ?MODULE, echo_tool, #{
         description => <<"Echoes its input">>
+    }),
+    ok = barrel_mcp:reg_tool(<<"media">>, ?MODULE, media_tool, #{
+        description => <<"Returns an audio block and a resource link">>
     }),
     ok = barrel_mcp:reg_tool(<<"boom">>, ?MODULE, boom_tool, #{
         description => <<"Always crashes">>
@@ -196,6 +202,12 @@ end_per_testcase(_TC, _Config) ->
 
 echo_tool(Args) ->
     <<"Echo: ", (maps:get(<<"input">>, Args, <<"none">>))/binary>>.
+
+media_tool(_Args) ->
+    [
+        #{<<"type">> => <<"audio">>, <<"data">> => <<"aGk=">>, <<"mimeType">> => <<"audio/wav">>},
+        #{<<"type">> => <<"resource_link">>, <<"uri">> => <<"file:///a">>, <<"name">> => <<"a">>}
+    ].
 
 boom_tool(_Args) ->
     error(deliberate_crash).
@@ -552,6 +564,25 @@ param_header_mismatch(Config) ->
     ],
     {400, _, Body} = post(Port, modern_request(1, <<"tools/call">>, Params), Hdrs),
     ?assertEqual(?MCP_HEADER_MISMATCH, maps:get(<<"code">>, error_of(Body))),
+    ok.
+
+%% resource_link arrived at 2025-06-18 (schema/<revision>/schema.ts,
+%% CallToolResult.content), so an older session gets it as text.
+legacy_tool_content_follows_the_revision(Config) ->
+    Port = ?config(port, Config),
+    Types = fun(Revision) ->
+        {200, InitHeaders, _} = post(Port, init_body(Revision), []),
+        SessionId = header(<<"mcp-session-id">>, InitHeaders),
+        Params = #{<<"name">> => <<"media">>, <<"arguments">> => #{}},
+        {200, _, Body} = post(
+            Port,
+            legacy_request(2, <<"tools/call">>, Params),
+            [{<<"mcp-session-id">>, SessionId}, {<<"mcp-protocol-version">>, Revision}]
+        ),
+        [maps:get(<<"type">>, B) || B <- maps:get(<<"content">>, result_of(Body))]
+    end,
+    ?assertEqual([<<"audio">>, <<"text">>], Types(<<"2025-03-26">>)),
+    ?assertEqual([<<"audio">>, <<"resource_link">>], Types(<<"2025-11-25">>)),
     ok.
 
 %% None of this applies to a legacy client, which predates the headers.
@@ -1058,12 +1089,15 @@ legacy_request(Id, Method, Params) ->
     }).
 
 init_body() ->
+    init_body(<<"2025-11-25">>).
+
+init_body(Revision) ->
     json:encode(#{
         <<"jsonrpc">> => <<"2.0">>,
         <<"id">> => 1,
         <<"method">> => <<"initialize">>,
         <<"params">> => #{
-            <<"protocolVersion">> => <<"2025-11-25">>,
+            <<"protocolVersion">> => Revision,
             <<"capabilities">> => #{},
             <<"clientInfo">> => #{
                 <<"name">> => <<"dual-era-suite">>,

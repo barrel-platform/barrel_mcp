@@ -77,6 +77,7 @@
     encode_error/3,
     decode_envelope/1,
     format_tool_result_external/1,
+    format_tool_result_external/2,
     drive_async_plan/2,
     drive_async_plan/3,
     drive_async_plan/4
@@ -920,6 +921,8 @@ task_collector_init(Owner, TaskId) ->
         barrel_mcp_tasks:fail(Owner, TaskId, no_worker)
     end.
 
+%% No revision to pass: tasks exist from 2025-11-25, which defines every
+%% content block type.
 task_collector_loop(Owner, TaskId) ->
     receive
         {tool_result, _ReqId, Result} ->
@@ -1902,7 +1905,13 @@ with_meta(Object, _) ->
 %% tool calls (HTTP / stdio) can produce identical envelopes.
 -spec format_tool_result_external(term()) -> [map()].
 format_tool_result_external(Result) ->
-    format_tool_result(Result).
+    format_tool_result(Result, undefined).
+
+%% @doc As {@link format_tool_result_external/1}, for the negotiated
+%% revision: a block type it does not define is sent as JSON text.
+-spec format_tool_result_external(term(), binary() | undefined) -> [map()].
+format_tool_result_external(Result, Revision) ->
+    format_tool_result(Result, Revision).
 
 %% @doc Drive an `{async, AsyncPlan}' from `handle/2' to completion
 %% on the calling process and return a JSON-RPC response map.
@@ -2150,16 +2159,17 @@ run_async_plan(Plan, Timeout, AuthInfo, OnSpawn) ->
 %% One outcome message for `RequestId', turned into its response, or
 %% `timeout'.
 await_plan_outcome(Plan, RequestId, Timeout) ->
+    Revision = plan_revision(Plan),
     receive
         {tool_result, RequestId, Result} ->
             success_response(
                 RequestId,
-                #{<<"content">> => format_tool_result_external(Result)}
+                #{<<"content">> => format_tool_result(Result, Revision)}
             );
         {tool_result_meta, RequestId, Result, RespMeta} ->
             success_response(
                 RequestId,
-                #{<<"content">> => format_tool_result_external(Result)},
+                #{<<"content">> => format_tool_result(Result, Revision)},
                 RespMeta
             );
         {tool_structured, RequestId, Data, Content} ->
@@ -2185,7 +2195,7 @@ await_plan_outcome(Plan, RequestId, Timeout) ->
             success_response(
                 RequestId,
                 #{
-                    <<"content">> => format_tool_result(Content),
+                    <<"content">> => format_tool_result(Content, Revision),
                     <<"isError">> => true
                 }
             );
@@ -2193,7 +2203,7 @@ await_plan_outcome(Plan, RequestId, Timeout) ->
             success_response(
                 RequestId,
                 #{
-                    <<"content">> => format_tool_result(Content),
+                    <<"content">> => format_tool_result(Content, Revision),
                     <<"isError">> => true
                 },
                 RespMeta
@@ -2222,18 +2232,28 @@ await_plan_outcome(Plan, RequestId, Timeout) ->
         timeout
     end.
 
-format_tool_result(Result) when is_binary(Result) ->
+format_list_item(Item, Revision) when is_map(Item) ->
+    format_tool_result(Item, Revision);
+format_list_item(Item, _Revision) ->
+    [Item].
+
+plan_revision(#{ctx := Ctx}) when Ctx =/= undefined ->
+    barrel_mcp_ctx:protocol_version(Ctx);
+plan_revision(_Plan) ->
+    undefined.
+
+format_tool_result(Result, _Revision) when is_binary(Result) ->
     [#{<<"type">> => <<"text">>, <<"text">> => Result}];
-format_tool_result(Result) when is_map(Result) ->
-    case is_content_block(Result) of
+format_tool_result(Result, Revision) when is_map(Result) ->
+    case is_content_block(Result) andalso block_type_defined(Result, Revision) of
         true ->
             [Result];
         false ->
             [#{<<"type">> => <<"text">>, <<"text">> => iolist_to_binary(json:encode(Result))}]
     end;
-format_tool_result(Result) when is_list(Result) ->
-    Result;
-format_tool_result(Result) ->
+format_tool_result(Result, Revision) when is_list(Result) ->
+    lists:append([format_list_item(Item, Revision) || Item <- Result]);
+format_tool_result(Result, _Revision) ->
     [#{<<"type">> => <<"text">>, <<"text">> => iolist_to_binary(io_lib:format("~p", [Result]))}].
 
 %% ContentBlock and its required fields, MCP server/tools "Tool Result".
@@ -2251,6 +2271,13 @@ is_content_block(#{<<"type">> := <<"resource">>, <<"resource">> := #{<<"uri">> :
             is_binary(maps:get(<<"blob">>, R, undefined)));
 is_content_block(_) ->
     false.
+
+block_type_defined(#{<<"type">> := <<"audio">>}, Revision) ->
+    renderable(audio_content, Revision);
+block_type_defined(#{<<"type">> := <<"resource_link">>}, Revision) ->
+    renderable(resource_link_content, Revision);
+block_type_defined(_Block, _Revision) ->
+    true.
 
 %% Run a resource handler (exact match or template) and shape
 %% the response.

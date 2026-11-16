@@ -253,7 +253,8 @@ format_tool_result_test_() ->
         {"Spec content blocks pass through", fun test_content_blocks_pass/0},
         {"Map with a non-spec type becomes JSON text", fun test_domain_type_map_is_text/0},
         {"Map missing a required field becomes JSON text", fun test_incomplete_blocks_are_text/0},
-        {"Other terms become a text string", fun test_other_term_is_text/0}
+        {"Other terms become a text string", fun test_other_term_is_text/0},
+        {"Block types follow the negotiated revision", fun test_block_types_by_revision/0}
     ].
 
 test_content_blocks_pass() ->
@@ -297,8 +298,33 @@ test_other_term_is_text() ->
         barrel_mcp_protocol:format_tool_result_external(ok)
     ).
 
+%% CallToolResult.content: audio from 2025-03-26, resource_link from
+%% 2025-06-18 (schema/<revision>/schema.ts).
+test_block_types_by_revision() ->
+    Audio = #{
+        <<"type">> => <<"audio">>, <<"data">> => <<"aGk=">>, <<"mimeType">> => <<"audio/wav">>
+    },
+    Link = #{
+        <<"type">> => <<"resource_link">>, <<"uri">> => <<"file:///a">>, <<"name">> => <<"a">>
+    },
+    Text = #{<<"type">> => <<"text">>, <<"text">> => <<"hi">>},
+    Passes = fun(Block, Rev) ->
+        ?assertEqual([Block], barrel_mcp_protocol:format_tool_result_external(Block, Rev))
+    end,
+    Passes(Audio, <<"2025-03-26">>),
+    Passes(Link, <<"2025-06-18">>),
+    Passes(Link, <<"2026-07-28">>),
+    Passes(Text, <<"2024-11-05">>),
+    [Passes(B, undefined) || B <- [Audio, Link, Text]],
+    assert_json_text(Audio, <<"2024-11-05">>),
+    assert_json_text(Link, <<"2024-11-05">>),
+    assert_json_text(Link, <<"2025-03-26">>).
+
 assert_json_text(Map) ->
+    assert_json_text(Map, undefined).
+
+assert_json_text(Map, Rev) ->
     [#{<<"type">> := <<"text">>, <<"text">> := Text} = Block] =
-        barrel_mcp_protocol:format_tool_result_external(Map),
+        barrel_mcp_protocol:format_tool_result_external(Map, Rev),
     ?assertEqual(2, map_size(Block)),
     ?assertEqual(Map, json:decode(Text)).

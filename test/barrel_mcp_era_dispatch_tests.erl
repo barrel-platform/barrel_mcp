@@ -9,7 +9,7 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("barrel_mcp.hrl").
 
--export([echo_tool/1, a_resource/1]).
+-export([echo_tool/1, media_tool/1, a_resource/1]).
 
 %%====================================================================
 %% Fixture
@@ -23,6 +23,7 @@ era_test_() ->
         {"serverInfo can be switched off", fun server_info_disabled/0},
         {"Existing result _meta survives decoration", fun modern_preserves_meta/0},
         {"Modern tool call is decorated", fun modern_tool_call/0},
+        {"Tool content follows the negotiated revision", fun tool_content_by_revision/0},
         {"Legacy-only methods are unknown to modern", fun legacy_only_methods/0},
         {"Legacy-only methods still work for legacy", fun legacy_only_still_served/0},
         {"initialize is legacy even with modern _meta", fun initialize_stays_legacy/0},
@@ -52,6 +53,7 @@ setup() ->
     application:ensure_all_started(barrel_mcp),
     ok = barrel_mcp_registry:wait_for_ready(),
     ok = barrel_mcp_registry:reg(tool, <<"echo">>, ?MODULE, echo_tool, #{}),
+    ok = barrel_mcp_registry:reg(tool, <<"media">>, ?MODULE, media_tool, #{}),
     ok = barrel_mcp_registry:reg(resource, <<"res">>, ?MODULE, a_resource, #{
         uri => <<"file:///present">>
     }),
@@ -63,12 +65,21 @@ cleanup(_) ->
     application:unset_env(barrel_mcp, cache_scope),
     barrel_mcp_registry:unreg(resource, <<"volatile">>),
     barrel_mcp_registry:unreg(tool, <<"echo">>),
+    barrel_mcp_registry:unreg(tool, <<"media">>),
     barrel_mcp_registry:unreg(resource, <<"res">>),
     application:unset_env(barrel_mcp, send_server_info),
     application:unset_env(barrel_mcp, advertise_versions),
     ok.
 
 echo_tool(_Args) -> <<"pong">>.
+
+media_tool(_Args) -> media_blocks().
+
+media_blocks() ->
+    [
+        #{<<"type">> => <<"audio">>, <<"data">> => <<"aGk=">>, <<"mimeType">> => <<"audio/wav">>},
+        #{<<"type">> => <<"resource_link">>, <<"uri">> => <<"file:///a">>, <<"name">> => <<"a">>}
+    ].
 
 a_resource(_Args) -> <<"body">>.
 
@@ -176,6 +187,21 @@ modern_tool_call() ->
     Result = maps:get(<<"result">>, Resp),
     ?assertEqual(<<"complete">>, maps:get(<<"resultType">>, Result)),
     ?assert(maps:is_key(<<"content">>, Result)).
+
+%% A block type the negotiated revision does not define reaches the
+%% client as text: audio from 2025-03-26, resource_link from 2025-06-18.
+tool_content_by_revision() ->
+    Content = fun(Revision) ->
+        {async, Plan} = barrel_mcp_protocol:handle(
+            legacy(<<"tools/call">>, #{<<"name">> => <<"media">>, <<"arguments">> => #{}}),
+            #{protocol_version => Revision}
+        ),
+        Resp = barrel_mcp_protocol:drive_async_plan(Plan, 2000),
+        [maps:get(<<"type">>, B) || B <- maps:get(<<"content">>, maps:get(<<"result">>, Resp))]
+    end,
+    ?assertEqual([<<"text">>, <<"text">>], Content(<<"2024-11-05">>)),
+    ?assertEqual([<<"audio">>, <<"text">>], Content(<<"2025-03-26">>)),
+    ?assertEqual([<<"audio">>, <<"resource_link">>], Content(<<"2025-06-18">>)).
 
 %%====================================================================
 %% Era gating
