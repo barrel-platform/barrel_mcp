@@ -260,7 +260,7 @@ simple_post_authenticated(Headers, Body, Responder, Config, AuthInfo) ->
                 {async, Plan} ->
                     Result = barrel_mcp_protocol:drive_async_plan(
                         Plan,
-                        60000,
+                        maps:get(timeout, Plan),
                         AuthInfo
                     ),
                     reply_json(Headers, Responder, Config, 200, Result);
@@ -868,7 +868,7 @@ handle_async_tool_call(
 ) ->
     RequestId = maps:get(request_id, AsyncPlan),
     Spawn = maps:get(spawn, AsyncPlan),
-    Timeout = maps:get(timeout, AsyncPlan, 60000),
+    Timeout = maps:get(timeout, AsyncPlan),
     %% What the reply needs: the session to echo (legacy only) and the
     %% request context that decorates a modern result.
     Params = maps:get(<<"params">>, Request, #{}),
@@ -986,7 +986,7 @@ handle_async_tool_call(
                         )
                 end,
             Outcome = settle_hosted(
-                settle_disconnect(Outcome0, WorkerPid), Hosted, RequestCtx, WindowEnd
+                settle_unanswered(Outcome0, WorkerPid), Hosted, RequestCtx, WindowEnd
             ),
             case SessionId of
                 undefined -> ok;
@@ -1054,17 +1054,25 @@ settle_hosted({hosted_task, TaskId}, Mod, Ctx, WindowEnd) ->
 settle_hosted(Outcome, _Hosted, _Ctx, _WindowEnd) ->
     Outcome.
 
-%% Nobody left to answer, so stop the worker and use the outcome that
-%% has no envelope.
-settle_disconnect(disconnected, WorkerPid) ->
+%% Nobody will read the worker's result: the client left, or the call
+%% was answered as timed out. Stop the worker; a disconnect has no
+%% envelope.
+settle_unanswered(disconnected, WorkerPid) ->
+    stop_worker(WorkerPid),
+    cancelled;
+settle_unanswered(timeout, WorkerPid) ->
+    stop_worker(WorkerPid),
+    timeout;
+settle_unanswered(Outcome, _WorkerPid) ->
+    Outcome.
+
+stop_worker(WorkerPid) ->
     _ =
         case is_pid(WorkerPid) andalso is_process_alive(WorkerPid) of
             true -> exit(WorkerPid, kill);
             false -> ok
         end,
-    cancelled;
-settle_disconnect(Outcome, _WorkerPid) ->
-    Outcome.
+    ok.
 
 %% `undefined' unless this request named a level in its `_meta'.
 request_log_level(#{ctx := Ctx}) when Ctx =/= undefined ->
@@ -2013,7 +2021,7 @@ answer_on_stream(SessionId, Plan, AuthInfo) ->
     Watcher = spawn_link(fun() -> watch_stream(SessionId) end),
     Response = barrel_mcp_protocol:drive_async_plan(
         Plan,
-        60000,
+        maps:get(timeout, Plan),
         AuthInfo,
         fun(Worker) -> Watcher ! {worker, Worker} end
     ),
@@ -2039,12 +2047,12 @@ watch_stream_loop(Ref, Stream, Worker) ->
     receive
         {worker, W} when Ref =:= undefined ->
             %% No stream to watch means the peer is already gone.
-            _ = settle_disconnect(disconnected, W),
+            stop_worker(W),
             ok;
         {worker, W} ->
             watch_stream_loop(Ref, Stream, W);
         {'DOWN', Ref, process, Stream, _} ->
-            _ = settle_disconnect(disconnected, Worker),
+            stop_worker(Worker),
             ok;
         done ->
             ok

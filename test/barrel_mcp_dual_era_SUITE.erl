@@ -63,7 +63,10 @@
     legacy_disconnect_does_not_cancel/1,
     legacy_post_only_client_can_be_asked/1,
     legacy_tool_content_follows_the_revision/1,
-    structured_content_is_formatted/1
+    structured_content_is_formatted/1,
+    tool_timeout_caps_the_call/1,
+    tool_timeout_beats_the_app_default/1,
+    timed_out_tool_is_stopped/1
 ]).
 
 -export([asking_tool/2]).
@@ -76,6 +79,7 @@
     echo_tool/1,
     media_tool/1,
     structured_tool/1,
+    timed_tool/1,
     boom_tool/1,
     a_resource/1,
     counting_tool/2,
@@ -126,7 +130,10 @@ all() ->
         legacy_disconnect_does_not_cancel,
         legacy_post_only_client_can_be_asked,
         legacy_tool_content_follows_the_revision,
-        structured_content_is_formatted
+        structured_content_is_formatted,
+        tool_timeout_caps_the_call,
+        tool_timeout_beats_the_app_default,
+        timed_out_tool_is_stopped
     ].
 
 init_per_suite(Config) ->
@@ -142,6 +149,8 @@ init_per_suite(Config) ->
     ok = barrel_mcp:reg_tool(<<"structured">>, ?MODULE, structured_tool, #{
         description => <<"Returns structured data with a binary as content">>
     }),
+    ok = barrel_mcp:reg_tool(<<"capped">>, ?MODULE, timed_tool, #{timeout => 200}),
+    ok = barrel_mcp:reg_tool(<<"patient">>, ?MODULE, timed_tool, #{timeout => 3000}),
     ok = barrel_mcp:reg_tool(<<"boom">>, ?MODULE, boom_tool, #{
         description => <<"Always crashes">>
     }),
@@ -176,6 +185,8 @@ init_per_suite(Config) ->
 end_per_suite(_Config) ->
     barrel_mcp_registry:unreg(tool, <<"echo">>),
     barrel_mcp_registry:unreg(tool, <<"boom">>),
+    barrel_mcp_registry:unreg(tool, <<"capped">>),
+    barrel_mcp_registry:unreg(tool, <<"patient">>),
     barrel_mcp_registry:unreg(tool, <<"counter">>),
     barrel_mcp_registry:unreg(tool, <<"chatty">>),
     barrel_mcp_registry:unreg(tool, <<"slow">>),
@@ -217,6 +228,16 @@ media_tool(_Args) ->
 
 structured_tool(_Args) ->
     {structured, #{<<"n">> => 1}, [<<"one">>, #{<<"type">> => <<"table">>}]}.
+
+%% Records its pid when the case set up the table, then sleeps.
+timed_tool(#{<<"ms">> := Ms}) ->
+    _ =
+        case ets:whereis(timed_workers) of
+            undefined -> ok;
+            _ -> ets:insert(timed_workers, {worker, self()})
+        end,
+    timer:sleep(Ms),
+    <<"done">>.
 
 boom_tool(_Args) ->
     error(deliberate_crash).
@@ -610,6 +631,55 @@ structured_content_is_formatted(Config) ->
     ] =
         maps:get(<<"content">>, result_of(Body)),
     ?assertEqual(#{<<"type">> => <<"table">>}, json:decode(J)),
+    ok.
+
+legacy_call(Port, Name, Args) ->
+    {200, InitHeaders, _} = post(Port, init_body(), []),
+    SessionId = header(<<"mcp-session-id">>, InitHeaders),
+    Params = #{<<"name">> => Name, <<"arguments">> => Args},
+    {200, _, Body} = post(
+        Port,
+        legacy_request(2, <<"tools/call">>, Params),
+        [{<<"mcp-session-id">>, SessionId}, {<<"mcp-protocol-version">>, <<"2025-11-25">>}]
+    ),
+    envelope_of(Body).
+
+%% The tool's `timeout' bounds the call instead of a fixed 60 s.
+tool_timeout_caps_the_call(Config) ->
+    Port = ?config(port, Config),
+    Started = erlang:monotonic_time(millisecond),
+    Envelope = legacy_call(Port, <<"capped">>, #{<<"ms">> => 3000}),
+    Elapsed = erlang:monotonic_time(millisecond) - Started,
+    ?assertMatch(#{<<"error">> := #{<<"message">> := <<"Tool timed out">>}}, Envelope),
+    ?assert(Elapsed < 2000),
+    ok.
+
+tool_timeout_beats_the_app_default(Config) ->
+    Port = ?config(port, Config),
+    application:set_env(barrel_mcp, tool_call_timeout, 100),
+    try
+        Envelope = legacy_call(Port, <<"patient">>, #{<<"ms">> => 400}),
+        ?assertMatch(
+            #{<<"result">> := #{<<"content">> := [#{<<"text">> := <<"done">>}]}}, Envelope
+        )
+    after
+        application:unset_env(barrel_mcp, tool_call_timeout)
+    end,
+    ok.
+
+%% Nobody reads a result after `Tool timed out', so the tool must not
+%% keep running.
+timed_out_tool_is_stopped(Config) ->
+    Port = ?config(port, Config),
+    ets:new(timed_workers, [named_table, public]),
+    try
+        Envelope = legacy_call(Port, <<"capped">>, #{<<"ms">> => 3000}),
+        ?assertMatch(#{<<"error">> := #{<<"message">> := <<"Tool timed out">>}}, Envelope),
+        [{worker, Worker}] = ets:lookup(timed_workers, worker),
+        ?assertNot(is_process_alive(Worker))
+    after
+        ets:delete(timed_workers)
+    end,
     ok.
 
 %% None of this applies to a legacy client, which predates the headers.

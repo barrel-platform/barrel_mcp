@@ -168,6 +168,9 @@
     annotations => map(),
     task_support => forbidden | optional | required | binary(),
     task_provider => module(),
+    %% Milliseconds a call answered in place may run; `infinity' is the
+    %% largest Erlang timeout. Defaults to `tool_call_timeout'.
+    timeout => 1..4294967295 | infinity,
     %% Older spelling of `task_support => optional'.
     long_running => boolean(),
     _ => term()
@@ -259,6 +262,12 @@ version() ->
 %%       `openWorldHint' (all booleans). Values pass through verbatim.</li>
 %%   <li>`task_support' - `forbidden' (default), `optional' or
 %%       `required': whether a call may be answered with a task.</li>
+%%   <li>`timeout' - Milliseconds a call answered in place may run
+%%       before the client gets `Tool timed out' and the handler
+%%       process is stopped. Defaults to the
+%%       `tool_call_timeout' application setting, itself 60000.
+%%       `infinity' stands for 4294967295, the largest Erlang
+%%       timeout.</li>
 %%   <li>`task_provider' - a `barrel_mcp_task_provider' module hosting
 %%       this tool's tasks. The handler may then return
 %%       `{task, TaskId}' when {@link task_allowed/1} is true.</li>

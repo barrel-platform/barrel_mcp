@@ -106,6 +106,11 @@
 %% field of client and server capabilities.
 -define(MCP_EXT_TASKS, <<"io.modelcontextprotocol/tasks">>).
 
+%% Tool call time limits. `infinity' stands for the largest value
+%% `receive ... after' accepts.
+-define(MCP_DEFAULT_TOOL_TIMEOUT, 60000).
+-define(MCP_MAX_TIMEOUT, 16#FFFFFFFF).
+
 %% JSON-RPC Error Codes
 -define(JSONRPC_PARSE_ERROR, -32700).
 -define(JSONRPC_INVALID_REQUEST, -32600).

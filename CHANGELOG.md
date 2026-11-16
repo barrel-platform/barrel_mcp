@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- A tool can set how long a call may run with the `timeout`
+  registration option, and `tool_call_timeout` in the application
+  environment sets the default for the others. Before, every call
+  answered in place was cut off at 60 seconds on every transport, so a
+  legitimately slow tool could not finish. The default is still 60
+  seconds, and `infinity` stands for the largest timeout Erlang accepts.
+
+### Changed
+
+- A tool call that times out now stops the tool. Before, the client got
+  `Tool timed out` but the tool kept running in the background and its
+  result was thrown away, so a slow tool called repeatedly piled up
+  work nobody would read. A tool that must finish its work past the
+  timeout should run as a task.
+
 ## [4.5.5] - 2026-11-16
 
 ### Fixed

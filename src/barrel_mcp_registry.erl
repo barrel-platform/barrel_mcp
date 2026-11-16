@@ -668,11 +668,13 @@ build_handler(tool, Module, Function, Opts) ->
     %% Both schemas are checked here rather than on every call: a schema
     %% that is not one would otherwise fail at the worst moment, and a
     %% caller registering it can still do something about it.
-    case check_schemas(InputSchema, Opts) of
-        {error, _} = SchemaErr ->
+    case {check_schemas(InputSchema, Opts), tool_timeout_opt(Opts)} of
+        {{error, _} = SchemaErr, _} ->
             SchemaErr;
-        ok ->
-            build_tool(Module, Function, Opts, InputSchema)
+        {ok, {error, _} = TimeoutErr} ->
+            TimeoutErr;
+        {ok, {ok, Timeout}} ->
+            build_tool(Module, Function, Opts, InputSchema, Timeout)
     end;
 build_handler(resource, Module, Function, Opts) ->
     Base = #{
@@ -710,7 +712,16 @@ build_handler(completion, Module, Function, _Opts) ->
     %%   {ok, [Suggestion]} | {ok, [Suggestion], #{has_more => true}}.
     #{module => Module, function => Function}.
 
-build_tool(Module, Function, Opts, InputSchema) ->
+%% A value past `?MCP_MAX_TIMEOUT' would crash the wait on every call.
+tool_timeout_opt(Opts) ->
+    case maps:find(timeout, Opts) of
+        error -> {ok, #{}};
+        {ok, infinity} -> {ok, #{timeout => ?MCP_MAX_TIMEOUT}};
+        {ok, T} when is_integer(T), T > 0, T =< ?MCP_MAX_TIMEOUT -> {ok, #{timeout => T}};
+        {ok, Bad} -> {error, {invalid_timeout, Bad}}
+    end.
+
+build_tool(Module, Function, Opts, InputSchema, Timeout) ->
     %% An invalid `x-mcp-header' annotation makes the whole tool
     %% definition invalid, so it fails registration rather than every
     %% later call. Scanning once here also keeps the per-request
@@ -732,7 +743,7 @@ build_tool(Module, Function, Opts, InputSchema) ->
             Merged = maps:merge(Base, opt_field(output_schema, Opts)),
             Merged1 = maps:merge(Merged, opt_field(annotations, Opts)),
             Merged2 = maps:merge(Merged1, opt_field(task_provider, Opts)),
-            add_metadata(Merged2, Opts)
+            add_metadata(maps:merge(Merged2, Timeout), Opts)
     end.
 
 %% @doc A registered tool's `taskSupport'; `forbidden' for a tool that

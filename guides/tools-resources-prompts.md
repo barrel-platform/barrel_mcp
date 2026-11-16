@@ -271,6 +271,41 @@ Notes:
   default (`max_input_rounds`), so a tool that always asks never
   finishes.
 
+### Call timeout
+
+A tool call answered in place may run for 60 seconds by default, on
+every transport. Raise or lower that when a tool is legitimately slower
+or must answer faster.
+
+Set it for one tool with `timeout` on `reg_tool/4`, in milliseconds:
+
+```erlang
+barrel_mcp:reg_tool(<<"build_report">>, my_tools, build_report, #{
+    description => <<"Aggregate a month of call records">>,
+    timeout => 300000
+}).
+```
+
+Set the default for every tool without one in the application
+environment:
+
+```erlang
+{barrel_mcp, [{tool_call_timeout, 120000}]}
+```
+
+When the time runs out the client gets the error `Tool timed out` and
+the tool's process is stopped, so its work does not go on unseen.
+
+- `infinity` stands for the largest timeout Erlang accepts,
+  4294967295 ms (about 49.7 days), so a call stays bounded.
+- Registration refuses anything other than an integer from 1 to
+  4294967295 or `infinity` with `{error, {invalid_timeout, Value}}`.
+- The client waits on its own clock: raise it too, for example
+  `barrel_mcp_client:call_tool/4` with `#{timeout => 300000}` (30 s by
+  default).
+- A call that becomes a task (below) is bounded by the task's lifetime
+  instead.
+
 ### Long-running tools (tasks)
 
 Set `task_support` on `reg_tool/4` to say whether a call may become a

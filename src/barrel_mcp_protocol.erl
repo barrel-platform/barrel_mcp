@@ -85,10 +85,6 @@
 %% How long `tasks/result' waits for a task to finish before giving up.
 -define(TASK_RESULT_TIMEOUT, 300000).
 
-%% How long one element of a batch may take. A batch is answered as a
-%% whole, so a slow element holds the rest.
--define(BATCH_ELEMENT_TIMEOUT, 60000).
-
 %% Deepest JSON nesting accepted from a peer. Well past anything MCP
 %% defines, and far below what would trouble the stack.
 -define(DEFAULT_MAX_JSON_DEPTH, 64).
@@ -289,11 +285,12 @@ element_kind(_E) ->
 
 %% One element of a call batch. A tool call yields an async plan that
 %% nobody else will drive, so it is driven here: a batch is a legacy
-%% compatibility path and the caller is waiting on the whole array.
+%% compatibility path and the caller is waiting on the whole array, so
+%% a slow element holds the rest for up to its tool's timeout.
 batch_element(Element, State) when is_map(Element) ->
     case handle(Element, State) of
         {async, Plan} ->
-            drive_async_plan(Plan, ?BATCH_ELEMENT_TIMEOUT);
+            drive_async_plan(Plan, maps:get(timeout, Plan));
         no_response ->
             no_response;
         Response when is_map(Response) ->
@@ -737,6 +734,8 @@ tool_call_plan(Params, Id, Ctx, Mrtr) ->
     Plan = #{
         request_id => Id,
         tool_name => Name,
+        %% How long whichever transport drives this may wait on it.
+        timeout => tool_timeout(Name),
         meta => maps:get(<<"_meta">>, Params, #{}),
         %% Carried so whichever transport finishes the call can seal a
         %% new state against the same request.
@@ -757,6 +756,21 @@ tool_call_plan(Params, Id, Ctx, Mrtr) ->
         end
     },
     {async, Plan}.
+
+%% The tool's own `timeout' (stored normalised), else the application
+%% default.
+tool_timeout(Name) ->
+    case barrel_mcp_registry:find(tool, Name) of
+        {ok, #{timeout := Timeout}} -> Timeout;
+        _ -> default_tool_timeout()
+    end.
+
+default_tool_timeout() ->
+    case application:get_env(barrel_mcp, tool_call_timeout, ?MCP_DEFAULT_TOOL_TIMEOUT) of
+        infinity -> ?MCP_MAX_TIMEOUT;
+        T when is_integer(T), T > 0, T =< ?MCP_MAX_TIMEOUT -> T;
+        _ -> ?MCP_DEFAULT_TOOL_TIMEOUT
+    end.
 
 %% @doc A tool that could not run, as the error result the reference
 %% implementation returns for it.
@@ -2145,10 +2159,15 @@ run_async_plan(Plan, Timeout, AuthInfo, OnSpawn) ->
         reply_to => Self,
         auth_info => AuthInfo
     },
-    _ = OnSpawn(Spawn(Ctx)),
+    Worker = Spawn(Ctx),
+    _ = OnSpawn(Worker),
     case await_plan_outcome(Plan, RequestId, Timeout) of
-        timeout -> error_response(RequestId, internal_error_code(PlanCtx), <<"Tool timed out">>);
-        Response -> Response
+        timeout ->
+            %% Nobody reads the result once the call is answered.
+            _ = is_pid(Worker) andalso exit(Worker, kill),
+            error_response(RequestId, internal_error_code(PlanCtx), <<"Tool timed out">>);
+        Response ->
+            Response
     end.
 
 %% One outcome message for `RequestId', turned into its response, or
