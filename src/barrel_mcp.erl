@@ -146,6 +146,82 @@
     list_clients/0
 ]).
 
+-export_type([
+    tool_opts/0,
+    resource_opts/0,
+    resource_template_opts/0,
+    prompt_opts/0,
+    prompt_argument/0,
+    ssl_opts/0
+]).
+
+%% Registration options. Each type lists every key the registry reads;
+%% keys it does not know are ignored, so the maps stay open.
+-type tool_opts() :: #{
+    description => binary(),
+    title => binary(),
+    icons => [map()],
+    input_schema => map(),
+    output_schema => map(),
+    validate_input => boolean(),
+    validate_output => boolean(),
+    annotations => map(),
+    task_support => forbidden | optional | required | binary(),
+    task_provider => module(),
+    %% Older spelling of `task_support => optional'.
+    long_running => boolean(),
+    _ => term()
+}.
+
+-type resource_opts() :: #{
+    name => binary(),
+    title => binary(),
+    icons => [map()],
+    uri => binary(),
+    description => binary(),
+    mime_type => binary(),
+    annotations => map(),
+    cache_ttl_ms => integer(),
+    _ => term()
+}.
+
+-type resource_template_opts() :: #{
+    name => binary(),
+    title => binary(),
+    icons => [map()],
+    uri_template => binary(),
+    description => binary(),
+    mime_type => binary(),
+    annotations => map(),
+    cache_ttl_ms => integer(),
+    _ => term()
+}.
+
+-type prompt_opts() :: #{
+    name => binary(),
+    title => binary(),
+    icons => [map()],
+    description => binary(),
+    arguments => [prompt_argument()],
+    annotations => map(),
+    _ => term()
+}.
+
+%% TLS for the HTTP listeners. Paths are handed to `ssl', which takes
+%% strings or binaries.
+-type ssl_opts() :: #{
+    certfile := file:filename_all(),
+    keyfile := file:filename_all(),
+    cacertfile => file:filename_all()
+}.
+
+-type prompt_argument() :: #{
+    name := binary(),
+    description => binary(),
+    required => boolean(),
+    _ => term()
+}.
+
 %% @doc This library's version, as its application resource states it.
 %% One place says it; everything else reads it from here.
 -spec version() -> binary().
@@ -170,7 +246,13 @@ version() ->
 %%
 %% <ul>
 %%   <li>`description' - Human-readable description of the tool</li>
+%%   <li>`title' - Display name, sent from 2025-06-18</li>
+%%   <li>`icons' - List of icon maps, sent from 2025-11-25</li>
 %%   <li>`input_schema' - JSON Schema defining expected input format</li>
+%%   <li>`output_schema' - JSON Schema for `structuredContent', sent
+%%       from 2025-06-18</li>
+%%   <li>`validate_input', `validate_output' - Check arguments and
+%%       structured results against the schemas (default `false')</li>
 %%   <li>`annotations' - Map of MCP behavioural hints surfaced under
 %%       `annotations' on `tools/list'. Spec keys are
 %%       `readOnlyHint', `destructiveHint', `idempotentHint',
@@ -220,12 +302,7 @@ version() ->
     Name :: binary(),
     Module :: module(),
     Function :: atom(),
-    Opts :: #{
-        description => binary(),
-        input_schema => map(),
-        annotations => map(),
-        _ => _
-    }.
+    Opts :: tool_opts().
 reg_tool(Name, Module, Function, Opts) ->
     barrel_mcp_registry:reg(tool, Name, Module, Function, Opts).
 
@@ -293,6 +370,11 @@ list_tools() ->
 %%   <li>`uri' - Unique resource URI (e.g., `<<"file:///config">>')</li>
 %%   <li>`description' - Resource description</li>
 %%   <li>`mime_type' - MIME type (default: `<<"text/plain">>')</li>
+%%   <li>`title' - Display name</li>
+%%   <li>`icons' - List of icon maps</li>
+%%   <li>`annotations' - Map sent as is under `annotations'</li>
+%%   <li>`cache_ttl_ms' - How long a read stays fresh, overriding the
+%%       server default</li>
 %% </ul>
 %%
 %% == Handler Return Values ==
@@ -323,12 +405,7 @@ list_tools() ->
     Name :: binary(),
     Module :: module(),
     Function :: atom(),
-    Opts :: #{
-        name => binary(),
-        uri => binary(),
-        description => binary(),
-        mime_type => binary()
-    }.
+    Opts :: resource_opts().
 reg_resource(Name, Module, Function, Opts) ->
     barrel_mcp_registry:reg(resource, Name, Module, Function, Opts).
 
@@ -370,17 +447,14 @@ list_resources() ->
 %%       `<<"file:///{path}">>').</li>
 %%   <li>`description': human-readable description.</li>
 %%   <li>`mime_type': content type (default `<<"text/plain">>').</li>
+%%   <li>`title', `icons', `annotations', `cache_ttl_ms': as for
+%%       {@link reg_resource/4}.</li>
 %% </ul>
 -spec reg_resource_template(Name, Module, Function, Opts) -> ok | {error, term()} when
     Name :: binary(),
     Module :: module(),
     Function :: atom(),
-    Opts :: #{
-        name => binary(),
-        uri_template => binary(),
-        description => binary(),
-        mime_type => binary()
-    }.
+    Opts :: resource_template_opts().
 reg_resource_template(Name, Module, Function, Opts) ->
     barrel_mcp_registry:reg(resource_template, Name, Module, Function, Opts).
 
@@ -408,6 +482,7 @@ list_resource_templates() ->
 %% <ul>
 %%   <li>`description' - Prompt description</li>
 %%   <li>`arguments' - List of argument definitions</li>
+%%   <li>`title', `icons', `annotations' - As for {@link reg_resource/4}</li>
 %% </ul>
 %%
 %% Each argument definition is a map with:
@@ -446,10 +521,7 @@ list_resource_templates() ->
     Name :: binary(),
     Module :: module(),
     Function :: atom(),
-    Opts :: #{
-        description => binary(),
-        arguments => [#{name := binary(), description => binary(), required => boolean()}]
-    }.
+    Opts :: prompt_opts().
 reg_prompt(Name, Module, Function, Opts) ->
     barrel_mcp_registry:reg(prompt, Name, Module, Function, Opts).
 
@@ -568,7 +640,7 @@ completion_key(Kind, Outer, Arg) ->
 %% @see barrel_mcp_auth
 -spec start_http(Opts) -> {ok, pid()} | {error, term()} when
     Opts :: #{
-        port => pos_integer(),
+        port => inet:port_number(),
         ip => inet:ip_address(),
         auth => map(),
         acceptors => pos_integer(),
@@ -654,15 +726,11 @@ stop_http() ->
 %% @see barrel_mcp_auth
 -spec start_http_stream(Opts) -> {ok, pid()} | {error, term()} when
     Opts :: #{
-        port => pos_integer(),
+        port => inet:port_number(),
         ip => inet:ip_address(),
         auth => map(),
         session_enabled => boolean(),
-        ssl => #{
-            certfile := string(),
-            keyfile := string(),
-            cacertfile => string()
-        },
+        ssl => ssl_opts(),
         acceptors => pos_integer(),
         max_connections => pos_integer(),
         max_requests => pos_integer() | infinity,
@@ -748,7 +816,7 @@ start_stdio_link() ->
 
 %% @doc Register a tool (alias for {@link reg_tool/4}).
 %% @deprecated Use {@link reg_tool/4} instead.
--spec reg(binary(), module(), atom(), map()) -> ok | {error, term()}.
+-spec reg(binary(), module(), atom(), tool_opts()) -> ok | {error, term()}.
 reg(Name, Module, Function, Opts) ->
     reg_tool(Name, Module, Function, Opts).
 

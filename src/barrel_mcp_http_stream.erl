@@ -77,19 +77,28 @@
 %% </ul>
 -spec start(Opts) -> {ok, pid()} | {error, term()} when
     Opts :: #{
-        port => pos_integer(),
+        %% 0 picks a free port.
+        port => inet:port_number(),
         ip => inet:ip_address(),
         auth => map(),
         session_enabled => boolean(),
-        ssl => map(),
+        ssl => barrel_mcp:ssl_opts(),
         tls_terminated_upstream => boolean(),
+        %% RFC 9728 protected resource metadata, served at
+        %% `/.well-known/oauth-protected-resource'.
+        resource_metadata => map(),
         allowed_origins => [binary()] | any,
         allow_missing_origin => boolean(),
+        sse_buffer_size => pos_integer(),
         subscription_keepalive_ms => pos_integer(),
         sse_keepalive_ms => pos_integer(),
         sse_path => binary(),
         sse_message_path => binary(),
-        max_connections => pos_integer()
+        acceptors => pos_integer(),
+        max_connections => pos_integer(),
+        max_requests => pos_integer() | infinity,
+        max_body_bytes => pos_integer(),
+        body_timeout_ms => pos_integer()
     }.
 start(Opts) ->
     Ip = maps:get(ip, Opts, {127, 0, 0, 1}),

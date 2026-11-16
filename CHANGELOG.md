@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Dialyzer reported a contract break when an application passed options
+  barrel_mcp accepts and uses but whose specs left them out: `title`,
+  `icons`, `annotations` and `cache_ttl_ms` when registering a resource,
+  resource template or prompt, several server start options, binary
+  certificate paths, the stdio `env` and `max_input_rounds` for a
+  client, and the authorization-code and jwt_bearer OAuth configs. The
+  specs now list every option, so these applications pass dialyzer
+  without workarounds. Nothing changes at runtime.
+
 ## [4.5.4] - 2026-11-16
 
 ### Fixed
