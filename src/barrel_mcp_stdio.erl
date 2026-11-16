@@ -101,7 +101,6 @@
 %% worker slot, so nothing else counts them.
 -define(DEFAULT_MAX_SUBSCRIPTIONS, 32).
 
--define(WORKER_TIMEOUT, 60000).
 -define(DROP_LOG_INTERVAL_MS, 5000).
 
 -record(entry, {
@@ -477,7 +476,7 @@ protocol_state(#state{version = Version, session = SessionId}) ->
 settle_result(no_response, _Id) ->
     no_response;
 settle_result({async, Plan}, _Id) ->
-    barrel_mcp_protocol:drive_async_plan(Plan, ?WORKER_TIMEOUT);
+    barrel_mcp_protocol:drive_async_plan(Plan, maps:get(timeout, Plan));
 settle_result({subscribe, Sub}, _Id) ->
     {subscribe, Sub};
 settle_result(Response, _Id) ->

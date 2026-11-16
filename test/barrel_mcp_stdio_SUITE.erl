@@ -24,6 +24,7 @@
 -export([
     answers_a_request/1,
     slow_calls_run_concurrently/1,
+    a_tool_timeout_caps_the_call/1,
     cancelling_a_running_request_answers_nothing/1,
     cancelling_a_queued_request_answers_nothing/1,
     duplicate_id_is_refused/1,
@@ -55,6 +56,7 @@ all() ->
     [
         answers_a_request,
         slow_calls_run_concurrently,
+        a_tool_timeout_caps_the_call,
         cancelling_a_running_request_answers_nothing,
         cancelling_a_queued_request_answers_nothing,
         duplicate_id_is_refused,
@@ -159,6 +161,19 @@ slow_calls_run_concurrently(_Config) ->
     ?assertEqual([1, 2, 3], lists:sort(Ids)),
     ?assert(Elapsed < 700),
     stop_server(Dev, Server).
+
+%% The tool's own `timeout' bounds the call, not a fixed 60 s.
+a_tool_timeout_caps_the_call(_Config) ->
+    ok = barrel_mcp:reg_tool(<<"capped_slow">>, ?MODULE, slow_tool, #{timeout => 100}),
+    {Dev, Server} = start_server(),
+    Started = erlang:monotonic_time(millisecond),
+    send(Dev, request(1, <<"tools/call">>, call(<<"capped_slow">>, #{<<"ms">> => 1000}))),
+    Response = barrel_mcp_stdio_io:next_line(Dev),
+    Elapsed = erlang:monotonic_time(millisecond) - Started,
+    ?assertEqual(<<"Tool timed out">>, maps:get(<<"message">>, maps:get(<<"error">>, Response))),
+    ?assert(Elapsed < 800),
+    stop_server(Dev, Server),
+    barrel_mcp_registry:unreg(tool, <<"capped_slow">>).
 
 %% "Servers receiving cancellation notifications SHOULD ... not send a
 %% response for the cancelled request"

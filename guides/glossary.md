@@ -62,6 +62,10 @@ from the word to the code.
   worker before escalating to a task. `task_inline_ms` in the
   `barrel_mcp` application environment, default 100 ms
   (`barrel_mcp_task_relay:inline_ms/0`).
+- **Tool call timeout**: how long a tool call answered in place may
+  run. The tool's `timeout` registration option, else
+  `tool_call_timeout` in the `barrel_mcp` application environment,
+  default 60000 ms. `infinity` stands for 4294967295 ms.
 - **`input_required`**: the state of a task, or the `resultType` of
   a synchronous answer, when the tool asked the client a question
   and waits for the answer (`barrel_mcp_tasks:await_input/5`). See

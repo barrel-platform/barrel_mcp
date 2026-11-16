@@ -260,7 +260,7 @@ simple_post_authenticated(Headers, Body, Responder, Config, AuthInfo) ->
                 {async, Plan} ->
                     Result = barrel_mcp_protocol:drive_async_plan(
                         Plan,
-                        60000,
+                        maps:get(timeout, Plan),
                         AuthInfo
                     ),
                     reply_json(Headers, Responder, Config, 200, Result);
@@ -868,7 +868,7 @@ handle_async_tool_call(
 ) ->
     RequestId = maps:get(request_id, AsyncPlan),
     Spawn = maps:get(spawn, AsyncPlan),
-    Timeout = maps:get(timeout, AsyncPlan, 60000),
+    Timeout = maps:get(timeout, AsyncPlan),
     %% What the reply needs: the session to echo (legacy only) and the
     %% request context that decorates a modern result.
     Params = maps:get(<<"params">>, Request, #{}),
@@ -2013,7 +2013,7 @@ answer_on_stream(SessionId, Plan, AuthInfo) ->
     Watcher = spawn_link(fun() -> watch_stream(SessionId) end),
     Response = barrel_mcp_protocol:drive_async_plan(
         Plan,
-        60000,
+        maps:get(timeout, Plan),
         AuthInfo,
         fun(Worker) -> Watcher ! {worker, Worker} end
     ),
