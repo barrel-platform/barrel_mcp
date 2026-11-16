@@ -77,7 +77,9 @@ Tools can return any of:
 text_tool(_Args) ->
     <<"Hello, World!">>.
 
-%% Map -> JSON-encoded text content block.
+%% Map -> JSON-encoded text content block, unless it is a content
+%% block the spec defines (text, image, audio, resource_link, resource)
+%% with its required fields.
 json_tool(_Args) ->
     #{<<"key">> => <<"value">>, <<"count">> => 42}.
 

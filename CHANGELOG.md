@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A tool result map with a `type` field is now sent as a content block
+  only when it is one the MCP spec defines (text, image, audio,
+  resource_link or resource) and has that block's required fields. Any
+  other map, such as a record with `type` set to `table`, is now sent as
+  JSON text. Before, it went out as a content block, and clients that
+  check tool results against the schema, such as opencode, rejected the
+  whole result. See "Tool Result" in the MCP `server/tools` section
+  (2025-06-18 and later).
+- A tool result that is not a binary, map or list (an atom, a tuple) is
+  now sent as a text string. Before, its text went out as an array of
+  numbers, which clients could not read.
+
 ## [4.5.3] - 2026-11-15
 
 ### Changed

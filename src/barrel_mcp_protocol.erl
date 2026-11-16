@@ -2225,16 +2225,32 @@ await_plan_outcome(Plan, RequestId, Timeout) ->
 format_tool_result(Result) when is_binary(Result) ->
     [#{<<"type">> => <<"text">>, <<"text">> => Result}];
 format_tool_result(Result) when is_map(Result) ->
-    case maps:get(<<"type">>, Result, undefined) of
-        undefined ->
-            [#{<<"type">> => <<"text">>, <<"text">> => iolist_to_binary(json:encode(Result))}];
-        _ ->
-            [Result]
+    case is_content_block(Result) of
+        true ->
+            [Result];
+        false ->
+            [#{<<"type">> => <<"text">>, <<"text">> => iolist_to_binary(json:encode(Result))}]
     end;
 format_tool_result(Result) when is_list(Result) ->
     Result;
 format_tool_result(Result) ->
-    [#{<<"type">> => <<"text">>, <<"text">> => io_lib:format("~p", [Result])}].
+    [#{<<"type">> => <<"text">>, <<"text">> => iolist_to_binary(io_lib:format("~p", [Result]))}].
+
+%% ContentBlock and its required fields, MCP server/tools "Tool Result".
+is_content_block(#{<<"type">> := <<"text">>, <<"text">> := T}) ->
+    is_binary(T);
+is_content_block(#{<<"type">> := Type, <<"data">> := D, <<"mimeType">> := M}) when
+    Type =:= <<"image">>; Type =:= <<"audio">>
+->
+    is_binary(D) andalso is_binary(M);
+is_content_block(#{<<"type">> := <<"resource_link">>, <<"uri">> := U, <<"name">> := N}) ->
+    is_binary(U) andalso is_binary(N);
+is_content_block(#{<<"type">> := <<"resource">>, <<"resource">> := #{<<"uri">> := U} = R}) ->
+    is_binary(U) andalso
+        (is_binary(maps:get(<<"text">>, R, undefined)) orelse
+            is_binary(maps:get(<<"blob">>, R, undefined)));
+is_content_block(_) ->
+    false.
 
 %% Run a resource handler (exact match or template) and shape
 %% the response.
