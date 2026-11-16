@@ -2159,10 +2159,15 @@ run_async_plan(Plan, Timeout, AuthInfo, OnSpawn) ->
         reply_to => Self,
         auth_info => AuthInfo
     },
-    _ = OnSpawn(Spawn(Ctx)),
+    Worker = Spawn(Ctx),
+    _ = OnSpawn(Worker),
     case await_plan_outcome(Plan, RequestId, Timeout) of
-        timeout -> error_response(RequestId, internal_error_code(PlanCtx), <<"Tool timed out">>);
-        Response -> Response
+        timeout ->
+            %% Nobody reads the result once the call is answered.
+            _ = is_pid(Worker) andalso exit(Worker, kill),
+            error_response(RequestId, internal_error_code(PlanCtx), <<"Tool timed out">>);
+        Response ->
+            Response
     end.
 
 %% One outcome message for `RequestId', turned into its response, or

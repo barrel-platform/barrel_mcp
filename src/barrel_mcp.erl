@@ -263,7 +263,8 @@ version() ->
 %%   <li>`task_support' - `forbidden' (default), `optional' or
 %%       `required': whether a call may be answered with a task.</li>
 %%   <li>`timeout' - Milliseconds a call answered in place may run
-%%       before the client gets `Tool timed out'. Defaults to the
+%%       before the client gets `Tool timed out' and the handler
+%%       process is stopped. Defaults to the
 %%       `tool_call_timeout' application setting, itself 60000.
 %%       `infinity' stands for 4294967295, the largest Erlang
 %%       timeout.</li>

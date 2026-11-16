@@ -65,7 +65,8 @@
     legacy_tool_content_follows_the_revision/1,
     structured_content_is_formatted/1,
     tool_timeout_caps_the_call/1,
-    tool_timeout_beats_the_app_default/1
+    tool_timeout_beats_the_app_default/1,
+    timed_out_tool_is_stopped/1
 ]).
 
 -export([asking_tool/2]).
@@ -131,7 +132,8 @@ all() ->
         legacy_tool_content_follows_the_revision,
         structured_content_is_formatted,
         tool_timeout_caps_the_call,
-        tool_timeout_beats_the_app_default
+        tool_timeout_beats_the_app_default,
+        timed_out_tool_is_stopped
     ].
 
 init_per_suite(Config) ->
@@ -662,6 +664,21 @@ tool_timeout_beats_the_app_default(Config) ->
         )
     after
         application:unset_env(barrel_mcp, tool_call_timeout)
+    end,
+    ok.
+
+%% Nobody reads a result after `Tool timed out', so the tool must not
+%% keep running.
+timed_out_tool_is_stopped(Config) ->
+    Port = ?config(port, Config),
+    ets:new(timed_workers, [named_table, public]),
+    try
+        Envelope = legacy_call(Port, <<"capped">>, #{<<"ms">> => 3000}),
+        ?assertMatch(#{<<"error">> := #{<<"message">> := <<"Tool timed out">>}}, Envelope),
+        [{worker, Worker}] = ets:lookup(timed_workers, worker),
+        ?assertNot(is_process_alive(Worker))
+    after
+        ets:delete(timed_workers)
     end,
     ok.
 

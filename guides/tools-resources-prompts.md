@@ -293,7 +293,8 @@ environment:
 {barrel_mcp, [{tool_call_timeout, 120000}]}
 ```
 
-When the time runs out the client gets the error `Tool timed out`.
+When the time runs out the client gets the error `Tool timed out` and
+the tool's process is stopped, so its work does not go on unseen.
 
 - `infinity` stands for the largest timeout Erlang accepts,
   4294967295 ms (about 49.7 days), so a call stays bounded.

@@ -20,7 +20,8 @@ timeout_test_() ->
         {"An invalid app default is ignored", fun invalid_app_default/0},
         {"Registration refuses an invalid timeout", fun registration_validates/0},
         {"A per-tool timeout beats the app default", fun tool_timeout_wins/0},
-        {"A call past its timeout is answered as timed out", fun call_times_out/0}
+        {"A call past its timeout is answered as timed out", fun call_times_out/0},
+        {"A call past its timeout stops the tool", fun timed_out_tool_is_stopped/0}
     ]}.
 
 setup() ->
@@ -108,3 +109,18 @@ call_times_out() ->
     Elapsed = erlang:monotonic_time(millisecond) - T0,
     ?assertMatch(#{<<"error">> := #{<<"message">> := <<"Tool timed out">>}}, Resp),
     ?assert(Elapsed < 1000).
+
+timed_out_tool_is_stopped() ->
+    ok = reg(<<"t">>, #{timeout => 50}),
+    {async, Plan} = barrel_mcp_protocol:handle(call(<<"t">>, 5000)),
+    Self = self(),
+    _ = barrel_mcp_protocol:drive_async_plan(
+        Plan, maps:get(timeout, Plan), undefined, fun(W) -> Self ! {worker, W} end
+    ),
+    Worker =
+        receive
+            {worker, W} -> W
+        after 1000 -> error(no_worker)
+        end,
+    ?assert(is_pid(Worker)),
+    ?assertNot(is_process_alive(Worker)).
