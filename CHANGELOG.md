@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- `reg_tool/4`, `reg_resource/4`, `reg_resource_template/4` and
+  `reg_prompt/4` now have specs that name every option the registry
+  reads at runtime (`title`, `icons`, `annotations`, `cache_ttl_ms`,
+  `output_schema`, `validate_input`, `validate_output`, `task_support`,
+  `task_provider` / `long_running`), each with a catch-all so forward
+  additions do not break hosts. Before, the specs named only the base
+  fields, so dialyzer rejected hosts that registered a prompt with a
+  `title` or a resource with `annotations` or `cache_ttl_ms` — options
+  the server honoured silently. Each option map is now also an exported
+  type (`tool_opts`, `resource_opts`, `resource_template_opts`,
+  `prompt_opts`, `prompt_argument`) and the option lists appear in the
+  doc for each registration function.
+
 ## [4.5.4] - 2026-11-16
 
 ### Fixed
