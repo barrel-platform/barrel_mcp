@@ -103,7 +103,9 @@ over_stdio(Version, Config, Expect) ->
         transport =>
             {stdio, #{
                 command => barrel_mcp_test_helpers:erl_executable(),
-                args => barrel_mcp_test_helpers:child_args(barrel_mcp_stdio_child)
+                args => barrel_mcp_test_helpers:child_args(
+                    barrel_mcp_stdio_child, start_cancellable
+                )
             }},
         protocol_version => Version,
         %% A cold VM answers later than a server that is already up.
