@@ -180,7 +180,9 @@
     %% Which multi round-trip attempt this is, so a server that keeps
     %% asking is bounded across the whole exchange rather than per
     %% attempt.
-    rounds = 1 :: pos_integer()
+    rounds = 1 :: pos_integer(),
+    %% Monitor on the caller; `undefined' for `init' and `ping'.
+    mon :: reference() | undefined
 }).
 
 %% A request the server answered with `input_required', paused while
@@ -199,7 +201,8 @@
     %% the server assigned to that input request.
     awaiting = #{} :: map(),
     responses = #{} :: map(),
-    rounds = 1 :: pos_integer()
+    rounds = 1 :: pos_integer(),
+    mon :: reference() | undefined
 }).
 
 -record(data, {
@@ -231,7 +234,10 @@
     %% Callers of `subscribe/2' parked until the server acknowledges
     %% the filter. Appended, like `mrtr' above, because a test reads
     %% this record by position.
-    sub_waiters = [] :: [gen_statem:from()]
+    sub_waiters = [] :: [gen_statem:from()],
+    %% What each caller monitor is waiting on: a request by id or a
+    %% multi round-trip round by reference.
+    callers = #{} :: #{reference() => {req, integer()} | {round, reference()}}
 }).
 
 %%====================================================================
@@ -499,6 +505,9 @@ ping(Pid) ->
 %% @doc Cancel a previously-issued request by id. Sends
 %% `notifications/cancelled' to the server and unblocks the caller
 %% with `{error, cancelled}'.
+%%
+%% A request is also cancelled, with no id needed, when the process
+%% that made it exits before the answer arrives.
 -spec cancel(pid(), integer()) -> ok.
 cancel(Pid, RequestId) ->
     gen_statem:cast(Pid, {cancel, RequestId}).
@@ -681,24 +690,28 @@ ready({call, From}, {request, Method, Params, Timeout}, Data) ->
                     undefined -> Data1;
                     Tok -> Data1#data{progress = (Data1#data.progress)#{Tok => CallerPid}}
                 end,
+            {Mon, Data3} = watch_caller(From, {req, Id}, Data2),
             P = #pending{
                 caller = From,
                 method = Method,
                 params = Params,
                 timeout = Timeout,
                 deadline = deadline(Timeout),
-                progress_token = ProgressToken
+                progress_token = ProgressToken,
+                mon = Mon
             },
-            Pending = (Data2#data.pending)#{Id => P},
+            Pending = (Data3#data.pending)#{Id => P},
             Actions =
                 case Timeout of
                     infinity -> [];
                     T -> [{{timeout, {req, Id}}, T, request_timeout}]
                 end,
-            {keep_state, Data2#data{pending = Pending}, Actions}
+            {keep_state, Data3#data{pending = Pending}, Actions}
     end;
 ready(cast, {cancel, Id}, Data) ->
     do_cancel(Id, Data);
+ready(info, {'DOWN', Mon, process, _Pid, _Reason}, Data) ->
+    caller_down(Mon, Data);
 %% 2026-07-28 removed this notification along with Roots itself, so
 %% there is nothing to send and nothing listening for it.
 ready(cast, notify_roots_list_changed, #data{era = modern} = Data) ->
@@ -906,8 +919,39 @@ handle_error_response(Id, Code, Message, _ErrData, _State, Data) ->
             keep_state_and_data
     end.
 
-settle_data(#pending{progress_token = Tok}, Data) ->
-    drop_progress(Tok, Data).
+settle_data(#pending{progress_token = Tok, mon = Mon}, Data) ->
+    unwatch_caller(Mon, drop_progress(Tok, Data)).
+
+%% A request belongs to the process that made it: one monitor per
+%% request or round in flight, dropped when it settles.
+watch_caller({Pid, _Tag}, What, Data) ->
+    Mon = monitor(process, Pid),
+    {Mon, Data#data{callers = (Data#data.callers)#{Mon => What}}}.
+
+unwatch_caller(undefined, Data) ->
+    Data;
+unwatch_caller(Mon, Data) ->
+    demonitor(Mon, [flush]),
+    Data#data{callers = maps:remove(Mon, Data#data.callers)}.
+
+%% Nobody is left to read the answer. "A client SHOULD send a
+%% cancellation notification to indicate that a request it previously
+%% issued should be terminated"
+%% (2026-07-28/basic/patterns/cancellation.mdx:8).
+caller_down(Mon, Data) ->
+    case maps:get(Mon, Data#data.callers, undefined) of
+        {req, Id} ->
+            {P, Rest} = maps:take(Id, Data#data.pending),
+            signal_cancel(Id, <<"caller exited">>, Data),
+            Data1 = settle_data(P, Data#data{pending = Rest}),
+            {keep_state, Data1, [drop_req_timeout(Id)]};
+        {round, Ref} ->
+            %% Between attempts there is no request for the server to stop.
+            Data1 = unwatch_caller(Mon, Data#data{mrtr = maps:remove(Ref, Data#data.mrtr)}),
+            {keep_state, Data1, [cancel_round_timeout(Ref)]};
+        undefined ->
+            keep_state_and_data
+    end.
 
 drop_progress(undefined, Data) -> Data;
 drop_progress(Tok, Data) -> Data#data{progress = maps:remove(Tok, Data#data.progress)}.
@@ -1341,13 +1385,16 @@ begin_input_round(#pending{caller = From, method = Method, params = Params} = P,
         request_state = maps:get(<<"requestState">>, Result, undefined),
         rounds = P#pending.rounds
     },
-    dispatch_input_requests(maps:get(<<"inputRequests">>, Result, #{}), Round, Data).
+    Ref = make_ref(),
+    {Mon, Data1} = watch_caller(From, {round, Ref}, Data),
+    dispatch_input_requests(
+        maps:get(<<"inputRequests">>, Result, #{}), Ref, Round#mrtr{mon = Mon}, Data1
+    ).
 
 %% Ask the handler for each thing the server wants. A handler that
 %% answers immediately is collected here; one that defers is recorded
 %% and the round waits for `reply_async/3'.
-dispatch_input_requests(Requests, Round, Data) when is_map(Requests) ->
-    Ref = make_ref(),
+dispatch_input_requests(Requests, Ref, Round, Data) when is_map(Requests) ->
     {Round1, Data1} = maps:fold(
         fun(Key, Request, {R, D}) -> ask_handler(Ref, Key, Request, R, D) end,
         {Round, Data},
@@ -1355,9 +1402,8 @@ dispatch_input_requests(Requests, Round, Data) when is_map(Requests) ->
     ),
     Rounds = (Data1#data.mrtr)#{Ref => Round1},
     maybe_retry(Ref, Data1#data{mrtr = Rounds});
-dispatch_input_requests(_Requests, Round, Data) ->
+dispatch_input_requests(_Requests, Ref, Round, Data) ->
     %% No requests at all: the server only wants the state echoed back.
-    Ref = make_ref(),
     maybe_retry(Ref, Data#data{mrtr = (Data#data.mrtr)#{Ref => Round}}).
 
 %% Time left of the caller's budget. Rounds share it rather than each
@@ -1392,7 +1438,8 @@ maybe_retry(Ref, Data) ->
             {Data, []};
         #mrtr{awaiting = Awaiting} = Round when map_size(Awaiting) =:= 0 ->
             Rounds = maps:remove(Ref, Data#data.mrtr),
-            {Data1, Actions} = finish_input_round(Round, Data#data{mrtr = Rounds}),
+            Data0 = unwatch_caller(Round#mrtr.mon, Data#data{mrtr = Rounds}),
+            {Data1, Actions} = finish_input_round(Round, Data0),
             {Data1, [cancel_round_timeout(Ref) | Actions]};
         Waiting ->
             %% Still waiting on a deferred handler. The round holds the
@@ -1446,6 +1493,7 @@ send_retry(#mrtr{method = Method, params = Params, timeout = Timeout} = Round, R
             Id, Method, with_request_meta(Retry, Data1)
         )
     ),
+    {Mon, Data2} = watch_caller(Round#mrtr.caller, {req, Id}, Data1),
     P = #pending{
         caller = Round#mrtr.caller,
         method = Method,
@@ -1455,15 +1503,16 @@ send_retry(#mrtr{method = Method, params = Params, timeout = Timeout} = Round, R
         %% Carried forward so a further input_required counts up
         %% rather than starting over.
         progress_token = progress_token_from_params(Params),
-        rounds = Round#mrtr.rounds + 1
+        rounds = Round#mrtr.rounds + 1,
+        mon = Mon
     },
-    Pending = (Data1#data.pending)#{Id => P},
+    Pending = (Data2#data.pending)#{Id => P},
     Actions =
         case Remaining of
             infinity -> [];
             _ -> [{{timeout, {req, Id}}, Remaining, request_timeout}]
         end,
-    {Data1#data{pending = Pending}, Actions}.
+    {Data2#data{pending = Pending}, Actions}.
 
 with_input_responses(Params, #mrtr{responses = Responses, request_state = State}) ->
     P1 =
@@ -1514,9 +1563,9 @@ find_round(Tag, Rounds) ->
 %% have got had the server simply not replied.
 timeout_round(Ref, Data) ->
     case maps:take(Ref, Data#data.mrtr) of
-        {#mrtr{caller = From}, Rounds} ->
+        {#mrtr{caller = From, mon = Mon}, Rounds} ->
             gen_statem:reply(From, {error, timeout}),
-            {keep_state, Data#data{mrtr = Rounds}};
+            {keep_state, unwatch_caller(Mon, Data#data{mrtr = Rounds})};
         error ->
             keep_state_and_data
     end.

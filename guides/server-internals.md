@@ -189,7 +189,8 @@ Steps 1 and 2 as above, then:
 6. `{async, Plan}` → `handle_async_tool_call/7`; the legacy mode is
    `task` (immediate task, `handle_long_running_call/10`) or
    `inline`; the worker is recorded in the session's in-flight table
-   so a `notifications/cancelled` or a DELETE can kill it.
+   so a `notifications/cancelled` or a DELETE can stop it
+   (`barrel_mcp_registry:cancel_tool/3`).
 7. The answer goes back on the POST's own SSE stream
    (`stream_sse_response/5`); server-to-client requests raised while
    it runs go on the same stream when the client has no standalone

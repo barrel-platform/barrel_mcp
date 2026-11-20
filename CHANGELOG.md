@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- A cancelled tool call now stops an arity-1 handler. It cannot see the
+  `{cancel, RequestId}` message an arity-2 handler gets, so it used to
+  run to the end, side effects included, with its result thrown away.
+  Its process is now killed when `notifications/cancelled` arrives,
+  over Streamable HTTP and stdio. A tool that has to clean up when it
+  is cancelled should take the arity-2 form and handle the message
+  (MCP cancellation, "Behavior Requirements").
+
+### Fixed
+
+- The client now cancels a request when the process that made it exits.
+  Before, the request stayed open until its timeout and the server kept
+  running the tool for a caller that was gone. The client now tells the
+  server to stop that one request and forgets it, and the other callers
+  sharing the client are not affected. This also gives you a way to
+  interrupt one call without its request id: run it in its own process
+  and stop that process.
+- A stdio server now stops a tool whose call is cancelled. Before, the
+  tool was never told, ran to the end and only its answer was dropped.
+  An arity-2 handler now gets `{cancel, RequestId}`, as it already did
+  over Streamable HTTP, and a tool still running when the server's
+  input closes is stopped too.
+
+- A stdio server stopped answering after its eighth request. Each
+  answered request kept its place among the requests allowed to run at
+  once (`stdio_max_workers`, 8 by default), so later requests waited
+  forever. A request now gives its place back when it is answered.
+
 ## [4.6.0] - 2026-11-16
 
 ### Added
