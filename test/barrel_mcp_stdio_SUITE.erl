@@ -28,6 +28,9 @@
     a_tool_timeout_caps_the_call/1,
     cancelling_a_running_request_answers_nothing/1,
     cancelling_a_queued_request_answers_nothing/1,
+    cancelling_tells_an_arity_2_tool/1,
+    cancelling_stops_an_arity_1_tool/1,
+    closing_the_channel_stops_a_running_tool/1,
     duplicate_id_is_refused/1,
     overload_is_refused/1,
     unmatched_response_is_dropped/1,
@@ -48,6 +51,7 @@
 
 -export([echo_tool/1, slow_tool/1, a_tool/1, a_resource/1]).
 -export([asking_tool/2, boom_tool/1]).
+-export([waiting_tool/2, blind_tool/1]).
 
 -define(MODERN, <<"2026-07-28">>).
 -define(LEGACY, <<"2025-11-25">>).
@@ -61,6 +65,9 @@ all() ->
         a_tool_timeout_caps_the_call,
         cancelling_a_running_request_answers_nothing,
         cancelling_a_queued_request_answers_nothing,
+        cancelling_tells_an_arity_2_tool,
+        cancelling_stops_an_arity_1_tool,
+        closing_the_channel_stops_a_running_tool,
         duplicate_id_is_refused,
         overload_is_refused,
         unmatched_response_is_dropped,
@@ -137,6 +144,43 @@ asking_tool(_Args, Ctx) ->
 
 boom_tool(_Args) -> error(boom).
 
+%% The cancellation cases watch these two through `observer/0'.
+waiting_tool(_Args, Ctx) ->
+    Id = maps:get(request_id, Ctx),
+    observer() ! {tool_started, self()},
+    receive
+        {cancel, Id} ->
+            observer() ! {tool_cancelled, Id},
+            {tool_error, <<"cancelled">>}
+    after 2000 ->
+        observer() ! tool_finished,
+        <<"done">>
+    end.
+
+blind_tool(Args) ->
+    observer() ! {tool_started, self()},
+    timer:sleep(maps:get(<<"ms">>, Args, 600)),
+    observer() ! tool_finished,
+    <<"done">>.
+
+observer() ->
+    persistent_term:get({?MODULE, observer}).
+
+observe(Name, Function) ->
+    persistent_term:put({?MODULE, observer}, self()),
+    ok = barrel_mcp:reg_tool(Name, ?MODULE, Function, #{}).
+
+unobserve(Name) ->
+    barrel_mcp_registry:unreg(tool, Name),
+    persistent_term:erase({?MODULE, observer}),
+    ok.
+
+tool_started() ->
+    receive
+        {tool_started, Worker} -> Worker
+    after 2000 -> error(tool_never_started)
+    end.
+
 %%====================================================================
 %% Cases
 %%====================================================================
@@ -204,6 +248,66 @@ cancelling_a_running_request_answers_nothing(_Config) ->
     send(Dev, request(2, <<"tools/call">>, call(<<"echo">>, #{<<"input">> => <<"ok">>}))),
     ?assertEqual(2, maps:get(<<"id">>, barrel_mcp_stdio_io:next_line(Dev))),
     stop_server(Dev, Server).
+
+%% "Servers receiving cancellation notifications SHOULD: Stop processing
+%% the cancelled request" (2026-07-28/basic/patterns/cancellation.mdx:73).
+%% An arity-2 handler is told, and stops itself.
+cancelling_tells_an_arity_2_tool(_Config) ->
+    observe(<<"waiting">>, waiting_tool),
+    {Dev, Server} = start_server(),
+    send(Dev, request(1, <<"tools/call">>, call(<<"waiting">>, #{}))),
+    _Worker = tool_started(),
+    send(Dev, cancelled(1)),
+    receive
+        {tool_cancelled, 1} -> ok
+    after 1000 -> error(tool_never_told)
+    end,
+    ?assertEqual(ok, barrel_mcp_stdio_io:silent(Dev, 300)),
+    send(Dev, request(2, <<"tools/call">>, call(<<"echo">>, #{<<"input">> => <<"ok">>}))),
+    ?assertEqual(2, maps:get(<<"id">>, barrel_mcp_stdio_io:next_line(Dev))),
+    receive
+        tool_finished -> error(tool_ran_to_completion)
+    after 0 -> ok
+    end,
+    stop_server(Dev, Server),
+    unobserve(<<"waiting">>).
+
+%% An arity-1 handler cannot be told, so its worker is stopped before
+%% the work it had left happens.
+cancelling_stops_an_arity_1_tool(_Config) ->
+    observe(<<"blind">>, blind_tool),
+    {Dev, Server} = start_server(),
+    send(Dev, request(1, <<"tools/call">>, call(<<"blind">>, #{<<"ms">> => 600}))),
+    Worker = tool_started(),
+    MRef = monitor(process, Worker),
+    send(Dev, cancelled(1)),
+    receive
+        {'DOWN', MRef, process, Worker, Reason} -> ?assertEqual(killed, Reason)
+    after 400 -> error(tool_kept_running)
+    end,
+    ?assertEqual(ok, barrel_mcp_stdio_io:silent(Dev, 800)),
+    receive
+        tool_finished -> error(tool_ran_to_completion)
+    after 0 -> ok
+    end,
+    send(Dev, request(2, <<"tools/call">>, call(<<"echo">>, #{<<"input">> => <<"ok">>}))),
+    ?assertEqual(2, maps:get(<<"id">>, barrel_mcp_stdio_io:next_line(Dev))),
+    stop_server(Dev, Server),
+    unobserve(<<"blind">>).
+
+%% Nobody is left to read the result once stdin closes.
+closing_the_channel_stops_a_running_tool(_Config) ->
+    observe(<<"blind">>, blind_tool),
+    {Dev, Server} = start_server(),
+    send(Dev, request(1, <<"tools/call">>, call(<<"blind">>, #{<<"ms">> => 3000}))),
+    Worker = tool_started(),
+    MRef = monitor(process, Worker),
+    stop_server(Dev, Server),
+    receive
+        {'DOWN', MRef, process, Worker, _} -> ok
+    after 1000 -> error(tool_outlived_its_server)
+    end,
+    unobserve(<<"blind">>).
 
 %% A queued request has not started, so cancelling it must not later
 %% produce an answer when a slot frees up.
