@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Over HTTP/3, hackney 4.12.2 sends writes on a stream in the order
   they were made, and on a resumed connection only sends GET, HEAD,
   OPTIONS and TRACE requests as 0-RTT.
+### Fixed
+
+- A stdio server stopped answering after its eighth request. Each
+  answered request kept its place among the requests allowed to run at
+  once (`stdio_max_workers`, 8 by default), so later requests waited
+  forever. A request now gives its place back when it is answered.
 
 ## [4.6.0] - 2026-11-16
 

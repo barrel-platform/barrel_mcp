@@ -712,7 +712,9 @@ worker_down(MRef, Reason, State) ->
             State1 = State#state{by_mref = ByMref},
             case maps:take(Id, State1#state.requests) of
                 error ->
-                    State1;
+                    %% Answered already: answer/3 dropped the entry and
+                    %% left the slot to be released here.
+                    take_next(State1#state{running = max(0, State1#state.running - 1)});
                 {#entry{state = subscription}, Rest} ->
                     _ = barrel_mcp_subscriptions:unsubscribe(Id),
                     State1#state{requests = Rest};

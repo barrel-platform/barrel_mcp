@@ -24,6 +24,7 @@
 -export([
     answers_a_request/1,
     slow_calls_run_concurrently/1,
+    an_answered_request_frees_its_slot/1,
     a_tool_timeout_caps_the_call/1,
     cancelling_a_running_request_answers_nothing/1,
     cancelling_a_queued_request_answers_nothing/1,
@@ -56,6 +57,7 @@ all() ->
     [
         answers_a_request,
         slow_calls_run_concurrently,
+        an_answered_request_frees_its_slot,
         a_tool_timeout_caps_the_call,
         cancelling_a_running_request_answers_nothing,
         cancelling_a_queued_request_answers_nothing,
@@ -160,6 +162,20 @@ slow_calls_run_concurrently(_Config) ->
     Elapsed = erlang:monotonic_time(millisecond) - Started,
     ?assertEqual([1, 2, 3], lists:sort(Ids)),
     ?assert(Elapsed < 700),
+    stop_server(Dev, Server).
+
+%% An answered request gives its worker slot back, so the cap bounds
+%% concurrent requests, not the requests a server answers in its life.
+an_answered_request_frees_its_slot(_Config) ->
+    application:set_env(barrel_mcp, stdio_max_workers, 1),
+    {Dev, Server} = start_server(),
+    lists:foreach(
+        fun(Id) ->
+            send(Dev, request(Id, <<"tools/call">>, call(<<"echo">>, #{<<"input">> => <<"hi">>}))),
+            ?assertMatch(#{<<"id">> := Id}, barrel_mcp_stdio_io:next_line(Dev, 2000))
+        end,
+        [1, 2, 3]
+    ),
     stop_server(Dev, Server).
 
 %% The tool's own `timeout' bounds the call, not a fixed 60 s.
