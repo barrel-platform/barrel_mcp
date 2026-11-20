@@ -208,7 +208,7 @@ test_sweep_drops_subscriptions() ->
 
 test_delete_drops_in_flight() ->
     {ok, SessionId} = barrel_mcp_session:create(#{}),
-    ok = barrel_mcp_session:record_in_flight(SessionId, 1, self(), self()),
+    ok = barrel_mcp_session:record_in_flight(SessionId, 1, <<"tool">>, self(), self()),
     ok = barrel_mcp_session:delete(SessionId),
     ok = barrel_mcp_session:cancel_in_flight(SessionId, 1),
     receive

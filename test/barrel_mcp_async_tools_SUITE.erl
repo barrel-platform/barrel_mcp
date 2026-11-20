@@ -19,6 +19,7 @@
 ]).
 -export([
     cancel_returns_empty_body/1,
+    cancel_stops_an_arity_1_tool/1,
     progress_emits_events/1,
     tool_error_returns_isError/1,
     auth_info_passed_to_tool/1,
@@ -26,13 +27,14 @@
 ]).
 
 %% Tool handlers used by the suite.
--export([slow_tool/2, progress_tool/2, error_tool/1, whoami_tool/2]).
+-export([slow_tool/2, blind_tool/1, progress_tool/2, error_tool/1, whoami_tool/2]).
 
 -define(BASE_PORT, 22200).
 
 all() ->
     [
         cancel_returns_empty_body,
+        cancel_stops_an_arity_1_tool,
         progress_emits_events,
         tool_error_returns_isError,
         auth_info_passed_to_tool,
@@ -129,6 +131,65 @@ cancel_returns_empty_body(Config) ->
         ?assert(false)
     end,
     ok = barrel_mcp_registry:unreg(tool, <<"slow">>),
+    ok.
+
+%% An arity-1 handler cannot see `{cancel, RequestId}', so the worker
+%% is stopped: "Receivers of cancellation notifications SHOULD: Stop
+%% processing the cancelled request"
+%% (2025-11-25/basic/utilities/cancellation.mdx:37).
+cancel_stops_an_arity_1_tool(Config) ->
+    Port = ?config(port, Config),
+    {ok, _} = barrel_mcp:start_http_stream(#{
+        port => Port,
+        session_enabled => true
+    }),
+    persistent_term:put({?MODULE, observer}, self()),
+    ok = barrel_mcp_registry:reg(tool, <<"blind">>, ?MODULE, blind_tool, #{}),
+
+    {200, IH, _} = post_init(Port),
+    SessionId = proplists:get_value(<<"mcp-session-id">>, IH),
+    Headers = [
+        {<<"content-type">>, <<"application/json">>},
+        {<<"accept">>, <<"application/json, text/event-stream">>},
+        {<<"mcp-session-id">>, SessionId}
+    ],
+    Self = self(),
+    Caller = spawn_link(fun() ->
+        {ok, S, _, B} = hackney:request(
+            post, url(Port), Headers, tool_call_body(<<"blind">>, 7), [with_body]
+        ),
+        Self ! {tool_call_returned, S, B}
+    end),
+    Worker =
+        receive
+            {tool_started, Pid} -> Pid
+        after 5000 -> error(tool_never_started)
+        end,
+    MRef = monitor(process, Worker),
+    %% The worker starts before the transport records it.
+    timer:sleep(150),
+
+    Cancel = json:encode(#{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"method">> => <<"notifications/cancelled">>,
+        <<"params">> => #{<<"requestId">> => 7}
+    }),
+    {ok, 202, _, _} = hackney:request(post, url(Port), Headers, Cancel, [with_body]),
+
+    receive
+        {'DOWN', MRef, process, Worker, Reason} -> ?assertEqual(killed, Reason)
+    after 1000 -> error(tool_kept_running)
+    end,
+    receive
+        {tool_call_returned, Status, Body} ->
+            ?assertEqual(200, Status),
+            ?assertEqual(<<>>, Body)
+    after 5000 ->
+        exit(Caller, kill),
+        error(call_never_returned)
+    end,
+    ok = barrel_mcp_registry:unreg(tool, <<"blind">>),
+    persistent_term:erase({?MODULE, observer}),
     ok.
 
 %%====================================================================
@@ -284,6 +345,11 @@ auth_info_passed_to_tool(Config) ->
 %%====================================================================
 %% Tool implementations
 %%====================================================================
+
+blind_tool(_Args) ->
+    persistent_term:get({?MODULE, observer}) ! {tool_started, self()},
+    timer:sleep(30000),
+    <<"slept">>.
 
 slow_tool(_Args, _Ctx) ->
     receive

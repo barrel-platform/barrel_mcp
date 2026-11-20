@@ -86,7 +86,7 @@
     notify_progress/4,
     send_notification/3,
     %% In-flight tool tracking (used by `notifications/cancelled').
-    record_in_flight/4,
+    record_in_flight/5,
     cancel_in_flight/2,
     clear_in_flight/2,
     %% SSE replay (Last-Event-ID).
@@ -145,6 +145,7 @@
 -record(in_flight, {
     session_id :: binary(),
     request_id :: integer() | binary(),
+    tool :: binary(),
     worker_pid :: pid(),
     waiter_pid :: pid()
 }).
@@ -567,16 +568,17 @@ broadcast_to_sse_sessions(Notification) ->
 
 %% @doc Record an in-flight tool call so a later
 %% `notifications/cancelled' can find the worker and waiter.
--spec record_in_flight(binary(), integer() | binary(), pid(), pid()) -> ok.
-record_in_flight(SessionId, RequestId, WorkerPid, WaiterPid) ->
+-spec record_in_flight(binary(), integer() | binary(), binary(), pid(), pid()) -> ok.
+record_in_flight(SessionId, RequestId, ToolName, WorkerPid, WaiterPid) ->
     gen_server:call(
         ?MODULE,
-        {record_in_flight, SessionId, RequestId, WorkerPid, WaiterPid}
+        {record_in_flight, SessionId, RequestId, ToolName, WorkerPid, WaiterPid}
     ).
 
-%% @doc Cancel an in-flight tool call. Sends `{cancel, RequestId}'
-%% to the worker and `{cancelled, RequestId}' to the waiter, then
-%% drops the entry. Idempotent: a missing entry returns `ok'.
+%% @doc Cancel an in-flight tool call. Stops the worker as
+%% {@link barrel_mcp_registry:cancel_tool/3} does and sends
+%% `{cancelled, RequestId}' to the waiter, then drops the entry.
+%% Idempotent: a missing entry returns `ok'.
 -spec cancel_in_flight(binary(), integer() | binary()) -> ok.
 cancel_in_flight(SessionId, RequestId) ->
     gen_server:call(?MODULE, {cancel_in_flight, SessionId, RequestId}).
@@ -871,13 +873,14 @@ handle_call({deliver_response, SessionId, Key, Response}, _From, State) ->
         end,
     {reply, Reply, State};
 handle_call(
-    {record_in_flight, SessionId, RequestId, Worker, Waiter},
+    {record_in_flight, SessionId, RequestId, ToolName, Worker, Waiter},
     _From,
     State
 ) ->
     InFlight = #in_flight{
         session_id = SessionId,
         request_id = RequestId,
+        tool = ToolName,
         worker_pid = Worker,
         waiter_pid = Waiter
     },
@@ -885,13 +888,8 @@ handle_call(
     {reply, ok, State};
 handle_call({cancel_in_flight, SessionId, RequestId}, _From, State) ->
     case ets:lookup(?INFLIGHT_TABLE, {SessionId, RequestId}) of
-        [{_, #in_flight{worker_pid = W, waiter_pid = Wt}}] ->
-            _ =
-                (try
-                    W ! {cancel, RequestId}
-                catch
-                    _:_ -> ok
-                end),
+        [{_, #in_flight{tool = ToolName, worker_pid = W, waiter_pid = Wt}}] ->
+            ok = barrel_mcp_registry:cancel_tool(ToolName, W, RequestId),
             _ =
                 (try
                     Wt ! {cancelled, RequestId}
