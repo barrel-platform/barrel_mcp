@@ -9,21 +9,31 @@
 -module(barrel_mcp_stdio_child).
 
 -export([start/0, echo_tool/1, touch_tool/1, a_resource/1]).
--export([waiting_tool/2, marked/3]).
+-export([start_cancellable/0, waiting_tool/2, marked/3]).
 
 -define(URI, <<"file:///watched">>).
 
 start() ->
+    serve(fun() -> ok end).
+
+%% @doc As `start/0', plus the `waiting' tool. Kept apart because the
+%% Python interop client checks the exact tool list of `start/0'.
+start_cancellable() ->
+    serve(fun() ->
+        ok = barrel_mcp:reg_tool(<<"waiting">>, ?MODULE, waiting_tool, #{
+            description => <<"Waits to be cancelled, and leaves a file per step">>
+        })
+    end).
+
+serve(Extra) ->
     {ok, _} = application:ensure_all_started(barrel_mcp),
     ok = barrel_mcp_registry:wait_for_ready(),
+    ok = Extra(),
     ok = barrel_mcp:reg_tool(<<"echo">>, ?MODULE, echo_tool, #{
         description => <<"Echoes its input">>
     }),
     ok = barrel_mcp:reg_tool(<<"touch">>, ?MODULE, touch_tool, #{
         description => <<"Marks the watched resource as changed">>
-    }),
-    ok = barrel_mcp:reg_tool(<<"waiting">>, ?MODULE, waiting_tool, #{
-        description => <<"Waits to be cancelled, and leaves a file per step">>
     }),
     ok = barrel_mcp:reg_resource(<<"watched">>, ?MODULE, a_resource, #{uri => ?URI}),
     barrel_mcp_stdio:start(),
