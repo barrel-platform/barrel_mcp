@@ -107,7 +107,9 @@
     state :: queued | running | subscription,
     pid :: pid() | undefined,
     mref :: reference() | undefined,
-    tag :: reference() | undefined
+    tag :: reference() | undefined,
+    %% The tool a running `tools/call' is waiting on, once it started.
+    tool :: {binary(), pid()} | undefined
 }).
 
 -record(state, {
@@ -194,6 +196,8 @@ handle_info({stdio_error, _Reason}, State) ->
     {stop, normal, State};
 handle_info({stdio_result, Tag, Response}, State) ->
     {noreply, settle(Tag, Response, State)};
+handle_info({stdio_tool, Tag, Id, Name, Worker}, State) ->
+    {noreply, tool_started(Tag, Id, Name, Worker, State)};
 %% With an id this is a `sampling/createMessage', `elicitation/create'
 %% or `roots/list' we are waiting on, bounded already by the worker
 %% count; dropping one would strand the tool that sent it. Without an id
@@ -252,13 +256,21 @@ flush_writer(Writer) when is_pid(Writer) ->
 flush_writer(_Writer) ->
     ok.
 
-stop_entry(#entry{pid = Pid, mref = MRef}) ->
+stop_entry(#entry{pid = Pid, mref = MRef} = Entry) ->
     _ =
         case MRef of
             undefined -> ok;
             _ -> demonitor(MRef, [flush])
         end,
-    stop_child(Pid).
+    stop_child(Pid),
+    stop_tool(Entry).
+
+%% Nobody is left to read what the tool returns.
+stop_tool(#entry{tool = {_Name, Worker}}) ->
+    exit(Worker, kill),
+    ok;
+stop_tool(_Entry) ->
+    ok.
 
 stop_child(undefined) ->
     ok;
@@ -450,7 +462,7 @@ run_request(Coordinator, Tag, Id, Message, Ctx) ->
                     Id, ?JSONRPC_INTERNAL_ERROR, <<"Internal error">>
                 )
         end,
-    Coordinator ! {stdio_result, Tag, settle_result(Result, Id)},
+    Coordinator ! {stdio_result, Tag, settle_result(Result, {Coordinator, Tag, Id})},
     ok.
 
 run_batch(Coordinator, Tag, Line, Ctx) ->
@@ -475,12 +487,39 @@ protocol_state(#state{version = Version, session = SessionId}) ->
 
 settle_result(no_response, _Id) ->
     no_response;
-settle_result({async, Plan}, _Id) ->
-    barrel_mcp_protocol:drive_async_plan(Plan, maps:get(timeout, Plan));
+settle_result({async, Plan}, Request) ->
+    barrel_mcp_protocol:drive_async_plan(
+        Plan, maps:get(timeout, Plan), undefined, report_tool(Plan, Request)
+    );
 settle_result({subscribe, Sub}, _Id) ->
     {subscribe, Sub};
 settle_result(Response, _Id) ->
     Response.
+
+%% Tells the coordinator which process runs the tool, so a cancellation
+%% can reach it. A tool inside a batch has no request to cancel.
+report_tool(Plan, {Coordinator, Tag, Id}) ->
+    Name = maps:get(tool_name, Plan),
+    fun
+        (Worker) when is_pid(Worker) -> Coordinator ! {stdio_tool, Tag, Id, Name, Worker};
+        (_NoWorker) -> ok
+    end;
+report_tool(_Plan, _Batch) ->
+    fun(_Worker) -> ok end.
+
+%% A request cancelled before its tool was reported is gone by now, and
+%% the tool it started has to be stopped all the same.
+tool_started(Tag, Id, Name, Worker, State) ->
+    case maps:find(Tag, State#state.by_tag) of
+        {ok, Id} ->
+            Entry = maps:get(Id, State#state.requests),
+            State#state{
+                requests = (State#state.requests)#{Id => Entry#entry{tool = {Name, Worker}}}
+            };
+        _ ->
+            ok = barrel_mcp_registry:cancel_tool(Name, Worker, Id),
+            State
+    end.
 
 %% The worker answered. A subscription is not finished by its first
 %% reply, so it keeps its slot; everything else releases one.
@@ -687,6 +726,7 @@ cancel(Id, State) ->
                 by_mref = maps:remove(Entry#entry.mref, State#state.by_mref)
             };
         {#entry{} = Entry, Rest} ->
+            cancel_tool(Id, Entry),
             drop_entry(Entry),
             take_next(State#state{
                 requests = Rest,
@@ -695,6 +735,13 @@ cancel(Id, State) ->
                 running = max(0, State#state.running - 1)
             })
     end.
+
+%% An arity-2 handler is told and stops itself; an arity-1 handler
+%% cannot be told, so it is stopped.
+cancel_tool(Id, #entry{tool = {Name, Worker}}) ->
+    barrel_mcp_registry:cancel_tool(Name, Worker, Id);
+cancel_tool(_Id, _Entry) ->
+    ok.
 
 drop_entry(#entry{mref = MRef, pid = Pid}) ->
     _ =
@@ -718,7 +765,8 @@ worker_down(MRef, Reason, State) ->
                 {#entry{state = subscription}, Rest} ->
                     _ = barrel_mcp_subscriptions:unsubscribe(Id),
                     State1#state{requests = Rest};
-                {#entry{tag = Tag}, Rest} ->
+                {#entry{tag = Tag} = Entry, Rest} ->
+                    _ = Reason =/= normal andalso stop_tool(Entry),
                     State2 = State1#state{
                         requests = Rest,
                         by_tag = maps:remove(Tag, State1#state.by_tag),
