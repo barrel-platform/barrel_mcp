@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A stdio server stopped answering after its eighth request. Each
+  answered request kept its place among the requests allowed to run at
+  once (`stdio_max_workers`, 8 by default), so later requests waited
+  forever. A request now gives its place back when it is answered.
+
 ## [4.6.0] - 2026-11-16
 
 ### Added
