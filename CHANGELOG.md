@@ -48,7 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An arity-2 handler now gets `{cancel, RequestId}`, as it already did
   over Streamable HTTP, and a tool still running when the server's
   input closes is stopped too.
-
 - A stdio server stopped answering after its eighth request. Each
   answered request kept its place among the requests allowed to run at
   once (`stdio_max_workers`, 8 by default), so later requests waited
