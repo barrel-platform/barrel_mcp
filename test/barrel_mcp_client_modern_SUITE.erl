@@ -39,6 +39,7 @@
     auto_is_the_default/1,
     mrtr_round_trip/1,
     mrtr_async_handler/1,
+    mrtr_round_ends_with_its_caller/1,
     mrtr_bounded_rounds/1,
     mrtr_shares_one_deadline/1,
     removed_methods_are_refused/1,
@@ -98,6 +99,7 @@ all() ->
         auto_is_the_default,
         mrtr_round_trip,
         mrtr_async_handler,
+        mrtr_round_ends_with_its_caller,
         mrtr_bounded_rounds,
         mrtr_shares_one_deadline,
         removed_methods_are_refused,
@@ -669,6 +671,35 @@ mrtr_async_handler(Config) ->
         error(no_result)
     end,
     close(Client).
+
+%% A round waiting on its handler belongs to the caller too: once the
+%% caller is gone there is nobody to retry for.
+mrtr_round_ends_with_its_caller(Config) ->
+    Owner = self(),
+    Client = connect_with(Config, #{mode => async, owner => Owner}),
+    Caller = spawn(fun() -> barrel_mcp_client:call_tool(Client, <<"confirm">>, #{}) end),
+    Tag =
+        receive
+            {deferred, T} -> T
+        after 5000 -> error(handler_never_called)
+        end,
+    ?assertEqual(1, map_size(rounds(Client))),
+    exit(Caller, kill),
+    wait_until(fun() -> map_size(rounds(Client)) =:= 0 end, 2000),
+    ?assertEqual(#{}, rounds(Client)),
+    %% The handler's late answer finds no round and starts no request.
+    ok = barrel_mcp_client:reply_async(Client, Tag, #{
+        <<"action">> => <<"accept">>,
+        <<"content">> => #{<<"name">> => <<"grace">>}
+    }),
+    {ready, Data} = sys:get_state(Client),
+    ?assertEqual(#{}, element(5, Data)),
+    close(Client).
+
+%% Field 16 of the client's state record is `mrtr'.
+rounds(Client) ->
+    {ready, Data} = sys:get_state(Client),
+    element(16, Data).
 
 %% A server is allowed to keep asking, so the client has to stop.
 mrtr_bounded_rounds(Config) ->
