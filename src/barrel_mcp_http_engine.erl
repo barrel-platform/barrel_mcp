@@ -973,7 +973,7 @@ handle_async_tool_call(
                     ok;
                 {_, true} ->
                     ok = barrel_mcp_session:record_in_flight(
-                        SessionId, RequestId, WorkerPid, Self
+                        SessionId, RequestId, ToolName, WorkerPid, Self
                     )
             end,
             Outcome0 =
