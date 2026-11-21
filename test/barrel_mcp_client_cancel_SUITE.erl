@@ -25,7 +25,9 @@
     legacy_stdio_caller_exit_cancels_its_call/1,
     modern_stdio_caller_exit_cancels_its_call/1,
     legacy_http_caller_exit_cancels_its_call/1,
-    modern_http_caller_exit_cancels_its_call/1
+    modern_http_caller_exit_cancels_its_call/1,
+    modern_http_caller_exit_always_reaches_the_tool/1,
+    modern_http_cancel_always_reaches_the_tool/1
 ]).
 
 -define(MODERN, <<"2026-07-28">>).
@@ -38,7 +40,9 @@ all() ->
         legacy_stdio_caller_exit_cancels_its_call,
         modern_stdio_caller_exit_cancels_its_call,
         legacy_http_caller_exit_cancels_its_call,
-        modern_http_caller_exit_cancels_its_call
+        modern_http_caller_exit_cancels_its_call,
+        modern_http_caller_exit_always_reaches_the_tool,
+        modern_http_cancel_always_reaches_the_tool
     ].
 
 init_per_suite(Config) ->
@@ -93,6 +97,61 @@ legacy_http_caller_exit_cancels_its_call(Config) ->
 %% stops the tool without telling it.
 modern_http_caller_exit_cancels_its_call(Config) ->
     over_http(?MODERN, Config, stopped).
+
+%% Closing the response stream has to reach the server at once,
+%% whatever state the request is in, and must not hold up the client's
+%% other requests. Without a progress token the server has sent nothing
+%% yet when the cancel comes.
+modern_http_caller_exit_always_reaches_the_tool(Config) ->
+    repeatedly(Config, fun(_Client, Caller, _Id) -> exit(Caller, kill) end).
+
+modern_http_cancel_always_reaches_the_tool(Config) ->
+    repeatedly(Config, fun(Client, _Caller, Id) -> barrel_mcp_client:cancel(Client, Id) end).
+
+repeatedly(Config, Cancel) ->
+    Port = ?config(port, Config),
+    Dir = ?config(dir, Config),
+    {ok, _} = barrel_mcp:start_http_stream(#{port => Port}),
+    {ok, Client} = barrel_mcp_client:start(#{
+        transport => {http, barrel_mcp_test_helpers:url(Port)},
+        protocol_version => ?MODERN
+    }),
+    try
+        wait_until(fun() -> is_ready(Client) end, 30000),
+        {_, Missed} = lists:foldl(
+            fun(N, {Seen, Acc}) ->
+                Opts =
+                    case N rem 2 of
+                        0 -> #{};
+                        1 -> #{progress_token => integer_to_binary(N)}
+                    end,
+                Caller = call_waiting(Client, Dir, 1500, Opts),
+                [Id] = started(Dir, N) -- Seen,
+                Cancel(Client, Caller, Id),
+                T0 = erlang:monotonic_time(millisecond),
+                {ok, _} = barrel_mcp_client:call_tool(Client, <<"echo">>, #{<<"input">> => <<"x">>}),
+                ?assert(erlang:monotonic_time(millisecond) - T0 < 400),
+                wait_until(fun() -> marked(Dir, "cancelled", Id) end, 400),
+                case marked(Dir, "cancelled", Id) of
+                    true -> {[Id | Seen], Acc};
+                    false -> {[Id | Seen], [{N, Opts} | Acc]}
+                end
+            end,
+            {[], []},
+            lists:seq(1, 40)
+        ),
+        ?assertEqual([], Missed),
+        ?assertEqual(#{}, pending(Client)),
+        ?assertMatch(
+            {ok, _}, barrel_mcp_client:call_tool(Client, <<"echo">>, #{<<"input">> => <<"x">>})
+        )
+    after
+        try
+            barrel_mcp_client:close(Client)
+        catch
+            _:_ -> ok
+        end
+    end.
 
 %%====================================================================
 %% The scenario
