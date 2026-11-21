@@ -7,8 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.7.0] - 2026-11-21
+
 ### Changed
 
+- A cancelled tool call now stops an arity-1 handler. It cannot see the
+  `{cancel, RequestId}` message an arity-2 handler gets, so it used to
+  run to the end, side effects included, with its result thrown away.
+  Its process is now killed when `notifications/cancelled` arrives,
+  over Streamable HTTP and stdio. A tool that has to clean up when it
+  is cancelled should take the arity-2 form and handle the message
+  (MCP cancellation, "Behavior Requirements").
 - The HTTP server and client now use h1 0.13.1, h2 0.18.3 and hackney
   4.12.3, with quic 3.3.0 and webtransport 0.5.13 in the lock. If your
   release depends on any of these directly, move it to the same version
@@ -36,13 +45,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the server gave, when the server closes the connection right after
   the handshake. Before, the request could fail with an unrelated error
   or only after the connect timeout.
-- A cancelled tool call now stops an arity-1 handler. It cannot see the
-  `{cancel, RequestId}` message an arity-2 handler gets, so it used to
-  run to the end, side effects included, with its result thrown away.
-  Its process is now killed when `notifications/cancelled` arrives,
-  over Streamable HTTP and stdio. A tool that has to clean up when it
-  is cancelled should take the arity-2 form and handle the message
-  (MCP cancellation, "Behavior Requirements").
 
 ### Fixed
 

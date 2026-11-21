@@ -178,7 +178,7 @@ same pull request.
 
 The specs barrel_mcp implements, at the version the code follows.
 Where a newer one exists it is listed under
-[Pending updates](#pending-updates). Last checked: 2026-11-10.
+[Pending updates](#pending-updates). Last checked: 2026-11-21.
 
 ### MCP
 
@@ -276,7 +276,7 @@ citations and the table, with no CHANGELOG entry.
 
 ### Pending updates
 
-Known newer versions, checked 2026-11-10. Each needs the diff in step 2
+Known newer versions, checked 2026-11-21. Each needs the diff in step 2
 before any code changes.
 
 | Spec | Code follows | Latest | To check |
