@@ -307,6 +307,32 @@ async def progress_reaches_the_caller(client: Client) -> None:
         fail(f"progress notifications arrived as {seen}")
 
 
+async def cancel_reaches_the_tool(client: Client) -> None:
+    """Cancelling a call closes its response stream, and the tool is told.
+
+    The server tool reports progress once it runs and then waits. It
+    must receive the cancellation rather than be killed, which a second
+    tool reports back.
+    """
+    started = anyio.Event()
+
+    async def on_progress(progress: float, total: float | None, message: str | None) -> None:
+        started.set()
+
+    async def call() -> None:
+        await client.call_tool("patient", {}, progress_callback=on_progress)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(call)
+        with anyio.fail_after(10):
+            await started.wait()
+        tg.cancel_scope.cancel()
+
+    outcome = await client.call_tool("cancel_outcome", {})
+    if outcome.content[0].text != "told":
+        fail(f"the cancelled tool ended as {outcome.content[0].text!r}, wanted 'told'")
+
+
 async def logs_are_opt_in(url: str) -> None:
     """Modern logging is per-request: no `logLevel` in `_meta`, no logs.
 
@@ -347,6 +373,12 @@ async def run(url: str) -> None:
         await prompt_and_resource_ask_too(client)
         await mirrored_header_round_trip(client)
         await progress_reaches_the_caller(client)
+        # httpcore2 2.16.2 drops a closed HTTP/2 response without sending
+        # RST_STREAM (_response_closed in _async/http2.py), so over HTTP/2
+        # this client's cancel never reaches a server. The HTTP/2 reset is
+        # covered by barrel_mcp_listener_sup_SUITE with our own client.
+        if not HTTP["http2"]:
+            await cancel_reaches_the_tool(client)
         await subscription_stream(client)
         await unsubscribed_types_stay_quiet(client)
     await logs_are_opt_in(url)

@@ -37,6 +37,7 @@
     max_connections_refuses_the_next_socket/1,
     tls_serves_http1_and_http2/1,
     http2_disconnect_cancels_the_request/1,
+    http2_stream_reset_tells_the_tool/1,
     http2_get_stream_receives_events/1,
     body_timeout_is_408/1,
     plain_tcp_on_a_tls_port_is_closed/1,
@@ -44,7 +45,7 @@
     name_in_use_is_refused/1,
     http2_reset_during_body_releases_the_slot/1
 ]).
--export([slow_tool/1]).
+-export([slow_tool/1, careful_tool/2]).
 
 -define(BASE_PORT, 21800).
 
@@ -62,6 +63,7 @@ all() ->
         max_connections_refuses_the_next_socket,
         tls_serves_http1_and_http2,
         http2_disconnect_cancels_the_request,
+        http2_stream_reset_tells_the_tool,
         http2_get_stream_receives_events,
         body_timeout_is_408,
         plain_tcp_on_a_tls_port_is_closed,
@@ -331,6 +333,43 @@ http2_disconnect_cancels_the_request(Config) ->
     end,
     ok.
 
+%% An HTTP/2 client cancels one call by resetting its stream; the
+%% connection stays open. An arity-2 tool is told, with or without a
+%% response stream already open.
+http2_stream_reset_tells_the_tool(Config) ->
+    Port = ?config(port, Config),
+    Dir = ?config(priv_dir, Config),
+    #{cacerts := CaCerts} = Tls = barrel_mcp_test_helpers:tls_files(Dir),
+    {ok, _} = barrel_mcp:start_http_stream(#{port => Port, ssl => maps:without([cacerts], Tls)}),
+    ok = barrel_mcp:reg_tool(<<"careful">>, ?MODULE, careful_tool, #{}),
+    true = register(?WATCH, self()),
+    try
+        {ok, Conn} = h2_connect(Port, CaCerts),
+        lists:foreach(
+            fun({Id, Meta}) ->
+                Params0 = #{<<"name">> => <<"careful">>, <<"arguments">> => #{}},
+                #{<<"params">> := #{<<"_meta">> := Meta0}} =
+                    Request = barrel_mcp_test_helpers:modern_request(Id, <<"tools/call">>, Params0),
+                Params = Params0#{<<"_meta">> => maps:merge(Meta0, Meta)},
+                Body = iolist_to_binary(json:encode(Request#{<<"params">> => Params})),
+                Headers =
+                    h2_headers(Port) ++
+                        [{<<"mcp-protocol-version">>, <<"2026-07-28">>}] ++
+                        barrel_mcp_headers:standard(<<"tools/call">>, Params),
+                {ok, Sid} = h2:request(Conn, <<"POST">>, <<"/mcp">>, Headers, Body),
+                ok = await_watch(started, 5000),
+                ok = h2:cancel(Conn, Sid),
+                ?assertEqual(ok, await_watch({told, Id}, 2000)),
+                ?assertEqual(timeout, await_watch(finished, 2500))
+            end,
+            [{1, #{}}, {2, #{<<"progressToken">> => <<"p">>}}]
+        ),
+        ok = h2:close(Conn)
+    after
+        unregister(?WATCH)
+    end,
+    ok.
+
 %% The standalone stream over HTTP/2: its headers used to be refused
 %% by h2 for carrying `connection: keep-alive', and the engine looped
 %% on a stream the client never saw.
@@ -445,6 +484,17 @@ slow_tool(_Args) ->
     timer:sleep(1500),
     watch(finished),
     <<"slow">>.
+
+careful_tool(_Args, _Ctx) ->
+    watch(started),
+    receive
+        {cancel, RequestId} ->
+            watch({told, RequestId}),
+            <<"stopped">>
+    after 2000 ->
+        watch(finished),
+        <<"careful">>
+    end.
 
 watch(Msg) ->
     case whereis(?WATCH) of
