@@ -9,12 +9,26 @@
 -module(barrel_mcp_stdio_child).
 
 -export([start/0, echo_tool/1, touch_tool/1, a_resource/1]).
+-export([start_cancellable/0, waiting_tool/2, marked/3]).
 
 -define(URI, <<"file:///watched">>).
 
 start() ->
+    serve(fun() -> ok end).
+
+%% @doc As `start/0', plus the `waiting' tool. Kept apart because the
+%% Python interop client checks the exact tool list of `start/0'.
+start_cancellable() ->
+    serve(fun() ->
+        ok = barrel_mcp:reg_tool(<<"waiting">>, ?MODULE, waiting_tool, #{
+            description => <<"Waits to be cancelled, and leaves a file per step">>
+        })
+    end).
+
+serve(Extra) ->
     {ok, _} = application:ensure_all_started(barrel_mcp),
     ok = barrel_mcp_registry:wait_for_ready(),
+    ok = Extra(),
     ok = barrel_mcp:reg_tool(<<"echo">>, ?MODULE, echo_tool, #{
         description => <<"Echoes its input">>
     }),
@@ -34,3 +48,28 @@ touch_tool(_Args) ->
 
 a_resource(_Args) ->
     <<"body">>.
+
+%% Leaves `started-Id', then `cancelled-Id' or `finished-Id' under
+%% `dir', so a case in another OS process can follow one call.
+waiting_tool(Args, Ctx) ->
+    Dir = maps:get(<<"dir">>, Args),
+    Id = maps:get(request_id, Ctx),
+    mark(Dir, "started", Id),
+    receive
+        {cancel, Id} ->
+            mark(Dir, "cancelled", Id),
+            {tool_error, <<"cancelled">>}
+    after maps:get(<<"ms">>, Args, 5000) ->
+        mark(Dir, "finished", Id),
+        <<"done">>
+    end.
+
+mark(Dir, Step, Id) ->
+    ok = file:write_file(mark_file(Dir, Step, Id), <<>>).
+
+%% @doc Whether call `Id' left the `Step' file.
+marked(Dir, Step, Id) ->
+    filelib:is_regular(mark_file(Dir, Step, Id)).
+
+mark_file(Dir, Step, Id) ->
+    filename:join(Dir, Step ++ "-" ++ integer_to_list(Id)).

@@ -151,6 +151,18 @@ caller                              barrel_mcp_client gen_statem
 token. The state machine drops the entry on settle and clears any
 matching state-timeout.
 
+A request belongs to the process that made it. The state machine
+monitors the caller of every request and of every multi round-trip
+round (`watch_caller/3`) and drops the monitor when the request
+settles. When the caller exits first, `caller_down/2` cancels that one
+request the way `cancel/2` does: `notifications/cancelled` on a legacy
+or stdio connection, closing the response stream on modern Streamable
+HTTP. It then drops the pending entry and its progress registration.
+Other callers of the same client are not affected. `initialize` and
+`ping` are sent by the client itself, have no caller and are never
+cancelled this way. The tests are in
+`test/barrel_mcp_client_cancel_SUITE.erl`.
+
 ## 6. Behaviour contracts
 
 ### `barrel_mcp_client_transport`
@@ -215,7 +227,8 @@ wraps the chosen impl as `{Module, State}` (or `none` for no auth).
 | `spec` | map | The connect spec passed to `start_link/1`. |
 | `transport` | `{Mod, Pid}` | Active transport. |
 | `request_id` | int | Monotonic counter for outbound JSON-RPC ids. |
-| `pending` | map | `Id ⇒ #pending{caller, method, deadline, progress_token}`. |
+| `pending` | map | `Id ⇒ #pending{caller, method, deadline, progress_token, mon}`. |
+| `callers` | map | `Monitor ⇒ {req, Id}` or `{round, Ref}`: what each caller monitor is waiting on. |
 | `handler_mod` | atom | The host's handler module. |
 | `handler_state` | term | The handler's per-instance state. |
 | `async_replies` | map | `Tag ⇒ Id` for `{async, Tag, _}` requests. |

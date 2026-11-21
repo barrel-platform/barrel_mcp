@@ -189,7 +189,8 @@ Steps 1 and 2 as above, then:
 6. `{async, Plan}` → `handle_async_tool_call/7`; the legacy mode is
    `task` (immediate task, `handle_long_running_call/10`) or
    `inline`; the worker is recorded in the session's in-flight table
-   so a `notifications/cancelled` or a DELETE can kill it.
+   so a `notifications/cancelled` or a DELETE can stop it
+   (`barrel_mcp_registry:cancel_tool/3`).
 7. The answer goes back on the POST's own SSE stream
    (`stream_sse_response/5`); server-to-client requests raised while
    it runs go on the same stream when the client has no standalone
@@ -228,6 +229,16 @@ queues or starts a worker (`start_worker/3`), and the worker calls
 `barrel_mcp_protocol:handle/2` then `settle_result/2`, which drives an
 `{async, Plan}` with `barrel_mcp_protocol:drive_async_plan/4`. The
 mode decision for stdio is therefore the protocol's (section 5).
+
+The tool of a `tools/call` runs in its own process, not in the request
+worker. The worker reports it to the coordinator (`report_tool/2`,
+`{stdio_tool, ...}`), which keeps it on the request's entry. On
+`notifications/cancelled` the coordinator stops the tool with
+`barrel_mcp_registry:cancel_tool/3`, the same rule the session table
+uses over HTTP: an arity-2 handler is sent `{cancel, RequestId}`, an
+arity-1 handler is killed. Nothing is answered for the cancelled id. A
+tool still running when the input closes or when its request worker
+dies is killed.
 
 ## 5. Tool-call modes
 
@@ -369,7 +380,8 @@ area:
 | envelopes, dispatch, initialize | `test/barrel_mcp_protocol_tests.erl`, `test/barrel_mcp_protocol_envelope_tests.erl` |
 | eras on one listener | `test/barrel_mcp_dual_era_SUITE.erl` |
 | session ownership, Origin, headers, response codes | `test/barrel_mcp_http_stream_security_SUITE.erl` |
-| cancellation, replay, spec additions | `test/barrel_mcp_spec_additives_SUITE.erl` |
+| cancellation of a tool call | `test/barrel_mcp_async_tools_SUITE.erl` and `test/barrel_mcp_spec_additives_SUITE.erl` (HTTP), `test/barrel_mcp_stdio_SUITE.erl` (stdio), `test/barrel_mcp_client_cancel_SUITE.erl` (client side) |
+| replay, spec additions | `test/barrel_mcp_spec_additives_SUITE.erl` |
 | subscriptions | `test/barrel_mcp_subscriptions_SUITE.erl` |
 | listener: supervision, TLS and HTTP/2, the caps | `test/barrel_mcp_listener_sup_SUITE.erl` |
 | embedding | `test/barrel_mcp_http_engine_embed_tests.erl`, `test/barrel_mcp_http_stream_tests.erl` |

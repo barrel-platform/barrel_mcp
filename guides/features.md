@@ -77,9 +77,10 @@ deployment, and connects to both. See the
 - Top-level JSON arrays (batches) are served on `2024-11-05` and
   `2025-03-26`, and rejected from `2025-06-18`, where the spec removed
   them.
-- `notifications/cancelled` aborts the in-flight tool call; the
+- `notifications/cancelled` stops the in-flight tool call; the
   cancelled HTTP request closes with 200 and an empty body (no
-  JSON-RPC envelope, per spec).
+  JSON-RPC envelope, per spec). stdio answers nothing for the
+  cancelled id.
 - Per-session SSE ring buffer (default 256 entries) for
   `Last-Event-ID` replay; out-of-window ids surface a synthetic
   `notifications/replay_truncated` event.
@@ -129,9 +130,10 @@ deployment, and connects to both. See the
   the worker in the background. Backed by `barrel_mcp_tasks`, 
   surfaces `tasks/list`, `tasks/get`, `tasks/cancel`, and
   `notifications/tasks/status`.
-- Cancellation: cooperative arity-2 handlers see
-  `{cancel, RequestId}` in their mailbox; arity-1 handlers run to
-  completion but their result is discarded.
+- Cancellation: on `notifications/cancelled`, over Streamable HTTP
+  and stdio alike, an arity-2 handler gets `{cancel, RequestId}` in
+  its mailbox and stops itself. An arity-1 handler cannot see the
+  message, so its process is killed.
 - Progress: handlers call `(maps:get(emit_progress, Ctx))(Done,
   Total, MessageOrUndef)`; out-of-band code can use
   `barrel_mcp:notify_progress/3,4`.
@@ -227,7 +229,9 @@ by the spec.
   `tasks_list_all/1` walk every page via
   `barrel_mcp_pagination:walk/1`.
 - Cancellation: `barrel_mcp_client:cancel/2` sends
-  `notifications/cancelled` and unblocks the caller.
+  `notifications/cancelled` and unblocks the caller. A request is
+  also cancelled when the process that made it exits before the
+  answer arrives.
 - Roots changes: `barrel_mcp_client:notify_roots_list_changed/1`
   emits `notifications/roots/list_changed` to inform the server
   the host's roots have changed. The server may re-issue

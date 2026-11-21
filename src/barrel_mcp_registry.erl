@@ -82,6 +82,7 @@
     run/3,
     run/4,
     run_tool/3,
+    cancel_tool/3,
     param_header_names/0,
     run_completion/3,
     find/2,
@@ -342,6 +343,24 @@ run_tool(Name, Args, Ctx) ->
         error ->
             {error, {not_found, tool, Name}}
     end.
+
+%% @doc Stop the worker of a cancelled tool call. A handler of arity 2
+%% is sent `{cancel, RequestId}' and stops itself. One of arity 1
+%% cannot see the message, so its worker is killed, as is the worker of
+%% a tool unregistered since the call started.
+-spec cancel_tool(Name :: binary(), Worker :: pid(), RequestId :: term()) -> ok.
+cancel_tool(Name, Worker, RequestId) ->
+    Cooperative =
+        case find(tool, Name) of
+            {ok, #{module := M, function := F}} -> exported(M, F, 2);
+            error -> false
+        end,
+    _ =
+        case Cooperative of
+            true -> Worker ! {cancel, RequestId};
+            false -> exit(Worker, kill)
+        end,
+    ok.
 
 run_tool_worker(Name, Args, Ctx0, Handler, ReplyTo, RequestId) ->
     %% Gateways register many tools against one handler; without the name

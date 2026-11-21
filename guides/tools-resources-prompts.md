@@ -161,7 +161,10 @@ Arity-2 handlers are needed for tools that:
 - read or echo the request's `_meta` extension hook (available
   as `maps:get(meta, Ctx, #{})`).
 
-Arity-1 handlers continue to work; pick whichever arity you need.
+Arity-1 handlers continue to work; pick whichever arity you need. An
+arity-1 handler cannot see a cancellation, so when its call is
+cancelled its process is killed. Use arity 2 when the tool has to
+clean up after itself.
 
 #### Returning `_meta` on the response
 

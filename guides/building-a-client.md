@@ -284,8 +284,8 @@ call_with_progress(Pid, Token) ->
 
 When `progress_token` is supplied, the calling process receives one
 `{mcp_progress, Token, Params}` message per `notifications/progress`
-the server emits, until the request settles (response, cancel, or
-timeout).
+the server emits, until the request settles (response, cancel,
+timeout, or the calling process exiting).
 
 `meta => Map` is sent as `params._meta` (for example an idempotency
 key), merged with `progress_token` when both are given.
@@ -607,6 +607,23 @@ The id is the JSON-RPC request id for the in-flight call.
 read pending ids via `sys:get_state/1`. In production you usually
 don't cancel by id, you set a `timeout` on `call_tool/4` and let
 the deadline fire.
+
+A request belongs to the process that made it. If that process exits
+before the answer arrives, the client cancels the request with the
+server and drops it, and the other callers of the same client are not
+affected. To cancel one call without knowing its id, run it in its own
+process and stop that process:
+
+```erlang
+call_in_worker(Pid, Name, Args) ->
+    Owner = self(),
+    spawn(fun() ->
+        Owner ! {tool_result, barrel_mcp_client:call_tool(Pid, Name, Args)}
+    end).
+
+interrupt(Worker) ->
+    exit(Worker, kill).
+```
 
 Periodic ping is opt-in:
 
