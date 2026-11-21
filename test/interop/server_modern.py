@@ -11,6 +11,7 @@ with the handshake-era direction.
 
 from __future__ import annotations
 
+import anyio
 from mcp import types
 from mcp.server.mcpserver import Context, MCPServer
 
@@ -22,6 +23,29 @@ server = MCPServer("barrel-mcp-interop-modern")
 def echo(text: str) -> str:
     """Echo the input text back unchanged."""
     return text
+
+
+#: How the last `hold` call ended, read back by `hold_outcome`.
+HOLD = {"state": "idle"}
+
+
+@server.tool()
+async def hold() -> str:
+    """Wait until the call is cancelled."""
+    HOLD["state"] = "started"
+    try:
+        await anyio.sleep(30)
+    except anyio.get_cancelled_exc_class():
+        HOLD["state"] = "cancelled"
+        raise
+    HOLD["state"] = "finished"
+    return "held"
+
+
+@server.tool()
+def hold_outcome() -> str:
+    """Report how the last `hold` call ended."""
+    return HOLD["state"]
 
 
 @server.resource("mem://greeting")

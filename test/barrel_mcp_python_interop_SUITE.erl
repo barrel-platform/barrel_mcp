@@ -61,6 +61,8 @@
     error_tool/1,
     registry_churn_tool/1,
     cancellable_tool/2,
+    patient_tool/2,
+    cancel_outcome_tool/1,
     file_resource/1,
     greeting_resource/1,
     hello_prompt/1,
@@ -414,6 +416,8 @@ modern_direction_b(Python) ->
         %% sent to a server that would reject it.
         ?assertMatch({error, {unsupported, <<"ping">>}}, barrel_mcp_client:ping(Pid)),
 
+        ok = caller_exit_cancels_the_python_tool(Pid),
+
         %% Subscriptions are deliberately not driven here: this SDK does
         %% not implement `subscriptions/listen' and closes the pipe
         %% rather than answering method-not-found. Both ends of that
@@ -427,6 +431,30 @@ modern_direction_b(Python) ->
         end
     end,
     ok.
+
+%% The caller of a call is killed mid-flight. The reference server has
+%% to see the cancellation our client sends for it.
+caller_exit_cancels_the_python_tool(Pid) ->
+    Caller = spawn(fun() ->
+        barrel_mcp_client:call_tool(Pid, <<"hold">>, #{}, #{timeout => 30000})
+    end),
+    ok = await_hold(Pid, <<"started">>, 50),
+    exit(Caller, kill),
+    ok = await_hold(Pid, <<"cancelled">>, 50),
+    ?assertEqual({ok, ?MODERN}, barrel_mcp_client:protocol_version(Pid)),
+    ok.
+
+await_hold(_Pid, Wanted, 0) ->
+    ct:fail({hold_never_reached, Wanted});
+await_hold(Pid, Wanted, N) ->
+    {ok, Result} = barrel_mcp_client:call_tool(Pid, <<"hold_outcome">>, #{}, #{timeout => 15000}),
+    case maps:get(<<"content">>, Result) of
+        [#{<<"text">> := Wanted} | _] ->
+            ok;
+        _ ->
+            timer:sleep(100),
+            await_hold(Pid, Wanted, N - 1)
+    end.
 
 %% Our client's multi round-trip loop against an envelope the reference
 %% implementation produced: it has to recognise the InputRequiredResult,
@@ -511,6 +539,14 @@ ensure_modern_fixture() ->
         description => <<"Emits three progress notifications">>,
         input_schema => #{<<"type">> => <<"object">>}
     }),
+    ok = barrel_mcp_registry:reg(tool, <<"patient">>, ?MODULE, patient_tool, #{
+        description => <<"Waits to be cancelled">>,
+        input_schema => #{<<"type">> => <<"object">>}
+    }),
+    ok = barrel_mcp_registry:reg(tool, <<"cancel_outcome">>, ?MODULE, cancel_outcome_tool, #{
+        description => <<"How the last patient call ended">>,
+        input_schema => #{<<"type">> => <<"object">>}
+    }),
     ok = barrel_mcp_registry:reg(tool, <<"noisy">>, ?MODULE, noisy_tool, #{
         description => <<"Logs at info and debug">>,
         input_schema => #{<<"type">> => <<"object">>}
@@ -567,6 +603,8 @@ cleanup_modern_fixture() ->
                 {tool, <<"insatiable">>},
                 {tool, <<"progress">>},
                 {tool, <<"noisy">>},
+                {tool, <<"patient">>},
+                {tool, <<"cancel_outcome">>},
                 {resource, <<"greeting">>},
                 {resource, <<"gated_res">>},
                 {prompt, <<"hello_prompt">>},
@@ -581,6 +619,32 @@ cleanup_modern_fixture() ->
 
 %% Drives the subscription stream: the reference client opens
 %% `subscriptions/listen', calls this, and must see the event.
+%% Reports that it runs, then waits to be told its call was cancelled.
+%% A 2026-07-28 client cancels by closing the response stream.
+patient_tool(_Args, Ctx) ->
+    persistent_term:put({?MODULE, patient}, started),
+    (maps:get(emit_progress, Ctx))(1, 1, undefined),
+    receive
+        {cancel, _RequestId} -> persistent_term:put({?MODULE, patient}, told)
+    after 10000 -> persistent_term:put({?MODULE, patient}, finished)
+    end,
+    <<"patient">>.
+
+%% `started' here means the tool was killed without being told.
+cancel_outcome_tool(_Args) ->
+    atom_to_binary(await_patient(30)).
+
+await_patient(0) ->
+    persistent_term:get({?MODULE, patient}, never_ran);
+await_patient(N) ->
+    case persistent_term:get({?MODULE, patient}, never_ran) of
+        started ->
+            timer:sleep(100),
+            await_patient(N - 1);
+        Outcome ->
+            Outcome
+    end.
+
 touch_tool(_Args) ->
     ok = barrel_mcp:notify_resource_updated(<<"mem://greeting">>),
     <<"touched">>.

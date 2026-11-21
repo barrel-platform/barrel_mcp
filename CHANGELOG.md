@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A cancelled arity-2 tool handler that is still running 5 seconds
+  after it was sent `{cancel, RequestId}` is now killed. Before, a
+  handler that never read the message ran to the end with nobody
+  waiting for its result. This applies to every way a call is
+  cancelled, over Streamable HTTP and stdio. Set `tool_cancel_grace`
+  in the application environment to change the delay, or to `infinity`
+  to keep the old behaviour.
+
+### Fixed
+
+- A 2026-07-28 client cancels a call over Streamable HTTP by closing
+  its response stream. The server stopped the tool by killing its
+  process, so an arity-2 handler written to clean up on
+  `{cancel, RequestId}` never got the message and left its work half
+  done. The handler is now sent `{cancel, RequestId}`, as it is for
+  `notifications/cancelled`; an arity-1 handler is still killed (MCP
+  2026-07-28 cancellation, "Transport-Specific Cancellation").
+
 ## [4.7.0] - 2026-11-21
 
 ### Changed

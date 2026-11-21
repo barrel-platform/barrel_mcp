@@ -986,7 +986,10 @@ handle_async_tool_call(
                         )
                 end,
             Outcome = settle_hosted(
-                settle_unanswered(Outcome0, WorkerPid), Hosted, RequestCtx, WindowEnd
+                settle_unanswered(Outcome0, ToolName, RequestId, WorkerPid),
+                Hosted,
+                RequestCtx,
+                WindowEnd
             ),
             case SessionId of
                 undefined -> ok;
@@ -1054,16 +1057,16 @@ settle_hosted({hosted_task, TaskId}, Mod, Ctx, WindowEnd) ->
 settle_hosted(Outcome, _Hosted, _Ctx, _WindowEnd) ->
     Outcome.
 
-%% Nobody will read the worker's result: the client left, or the call
-%% was answered as timed out. Stop the worker; a disconnect has no
-%% envelope.
-settle_unanswered(disconnected, WorkerPid) ->
-    stop_worker(WorkerPid),
+%% Nobody will read the worker's result. A disconnect is a cancel and
+%% stops the tool as `notifications/cancelled' does; it has no
+%% envelope. A call answered as timed out is stopped outright.
+settle_unanswered(disconnected, ToolName, RequestId, WorkerPid) ->
+    _ = is_pid(WorkerPid) andalso barrel_mcp_registry:cancel_tool(ToolName, WorkerPid, RequestId),
     cancelled;
-settle_unanswered(timeout, WorkerPid) ->
+settle_unanswered(timeout, _ToolName, _RequestId, WorkerPid) ->
     stop_worker(WorkerPid),
     timeout;
-settle_unanswered(Outcome, _WorkerPid) ->
+settle_unanswered(Outcome, _ToolName, _RequestId, _WorkerPid) ->
     Outcome.
 
 stop_worker(WorkerPid) ->
