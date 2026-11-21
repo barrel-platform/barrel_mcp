@@ -9,10 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The HTTP server and client now use h1 0.12.0, h2 0.18.3 and hackney
-  4.12.2, with quic 3.2.0 and webtransport 0.5.12 in the lock. If your
+- The HTTP server and client now use h1 0.13.1, h2 0.18.3 and hackney
+  4.12.3, with quic 3.3.0 and webtransport 0.5.13 in the lock. If your
   release depends on any of these directly, move it to the same version
-  range. Nothing changes in the barrel_mcp API.
+  range. These are the versions livery 0.15.0 uses, so a release with
+  both resolves to one set. Nothing changes in the barrel_mcp API.
+- h1 0.13.0 serves pipelined HTTP/1.1 requests one at a time. Before, a
+  client could make the server read and queue any number of pipelined
+  requests while the first was still being answered, which grew the
+  server's memory without bound, and two responses could be written
+  into each other.
 - h1 0.12.0 closes an HTTP/1.1 connection when a request or a response
   on it is cancelled before it ended. Before, the connection stayed
   open with an unfinished exchange on it and the other side waited for
@@ -26,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Over HTTP/3, hackney 4.12.2 sends writes on a stream in the order
   they were made, and on a resumed connection only sends GET, HEAD,
   OPTIONS and TRACE requests as 0-RTT.
+- Over HTTP/3, hackney 4.12.3 fails a request at once, with the reason
+  the server gave, when the server closes the connection right after
+  the handshake. Before, the request could fail with an unrelated error
+  or only after the connect timeout.
 - A cancelled tool call now stops an arity-1 handler. It cannot see the
   `{cancel, RequestId}` message an arity-2 handler gets, so it used to
   run to the end, side effects included, with its result thrown away.
