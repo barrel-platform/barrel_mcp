@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The HTTP server and client now use h1 0.13.0, h2 0.18.3 and hackney
+- The HTTP server and client now use h1 0.13.1, h2 0.18.3 and hackney
   4.12.3, with quic 3.3.0 and webtransport 0.5.13 in the lock. If your
   release depends on any of these directly, move it to the same version
   range. These are the versions livery 0.15.0 uses, so a release with
