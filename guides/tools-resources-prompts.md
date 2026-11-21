@@ -155,7 +155,7 @@ lets them ask the client for input; see
 Arity-2 handlers are needed for tools that:
 
 - emit `notifications/progress` updates,
-- cooperate with `notifications/cancelled` (the worker receives
+- cooperate with cancellation (the worker receives
   `{cancel, RequestId}` in its mailbox),
 - need the calling session id for server→client primitives,
 - read or echo the request's `_meta` extension hook (available
@@ -165,6 +165,19 @@ Arity-1 handlers continue to work; pick whichever arity you need. An
 arity-1 handler cannot see a cancellation, so when its call is
 cancelled its process is killed. Use arity 2 when the tool has to
 clean up after itself.
+
+A call is cancelled by `notifications/cancelled` on a legacy or stdio
+connection, and by the client closing the call's response stream on a
+2026-07-28 Streamable HTTP connection. Both reach an arity-2 handler
+the same way, as `{cancel, RequestId}`. The handler then has 5 seconds
+to return; a handler still running after that is killed, so a tool
+that never reads its mailbox does not run on with nobody waiting for
+it. Change the delay in the application environment, in milliseconds,
+or set `infinity` to never kill a cancelled arity-2 handler:
+
+```erlang
+{barrel_mcp, [{tool_cancel_grace, 10000}]}
+```
 
 #### Returning `_meta` on the response
 

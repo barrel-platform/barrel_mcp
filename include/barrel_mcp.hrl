@@ -110,6 +110,8 @@
 %% `receive ... after' accepts.
 -define(MCP_DEFAULT_TOOL_TIMEOUT, 60000).
 -define(MCP_MAX_TIMEOUT, 16#FFFFFFFF).
+%% How long a cancelled arity-2 tool has to stop itself.
+-define(MCP_DEFAULT_CANCEL_GRACE, 5000).
 
 %% JSON-RPC Error Codes
 -define(JSONRPC_PARSE_ERROR, -32700).

@@ -345,9 +345,11 @@ run_tool(Name, Args, Ctx) ->
     end.
 
 %% @doc Stop the worker of a cancelled tool call. A handler of arity 2
-%% is sent `{cancel, RequestId}' and stops itself. One of arity 1
-%% cannot see the message, so its worker is killed, as is the worker of
-%% a tool unregistered since the call started.
+%% is sent `{cancel, RequestId}' and stops itself; if it is still
+%% running after the `tool_cancel_grace' application setting (5000 ms
+%% by default, `infinity' to wait for ever) its worker is killed. One
+%% of arity 1 cannot see the message, so its worker is killed at once,
+%% as is the worker of a tool unregistered since the call started.
 -spec cancel_tool(Name :: binary(), Worker :: pid(), RequestId :: term()) -> ok.
 cancel_tool(Name, Worker, RequestId) ->
     Cooperative =
@@ -357,10 +359,33 @@ cancel_tool(Name, Worker, RequestId) ->
         end,
     _ =
         case Cooperative of
-            true -> Worker ! {cancel, RequestId};
-            false -> exit(Worker, kill)
+            true ->
+                Worker ! {cancel, RequestId},
+                kill_after(cancel_grace(), Worker);
+            false ->
+                exit(Worker, kill)
         end,
     ok.
+
+%% A cancelled call has no waiter left to time it out, so a handler
+%% that ignores the message would otherwise run unbounded.
+kill_after(infinity, _Worker) ->
+    ok;
+kill_after(Grace, Worker) ->
+    spawn(fun() ->
+        Ref = monitor(process, Worker),
+        receive
+            {'DOWN', Ref, process, Worker, _Reason} -> ok
+        after Grace -> exit(Worker, kill)
+        end
+    end).
+
+cancel_grace() ->
+    case application:get_env(barrel_mcp, tool_cancel_grace, ?MCP_DEFAULT_CANCEL_GRACE) of
+        infinity -> infinity;
+        T when is_integer(T), T >= 0, T =< ?MCP_MAX_TIMEOUT -> T;
+        _ -> ?MCP_DEFAULT_CANCEL_GRACE
+    end.
 
 run_tool_worker(Name, Args, Ctx0, Handler, ReplyTo, RequestId) ->
     %% Gateways register many tools against one handler; without the name

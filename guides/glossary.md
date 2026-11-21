@@ -66,6 +66,10 @@ from the word to the code.
   run. The tool's `timeout` registration option, else
   `tool_call_timeout` in the `barrel_mcp` application environment,
   default 60000 ms. `infinity` stands for 4294967295 ms.
+- **Cancel grace**: how long a cancelled arity-2 tool handler has to
+  return after it is sent `{cancel, RequestId}` before its process is
+  killed. `tool_cancel_grace` in the `barrel_mcp` application
+  environment, default 5000 ms; `infinity` never kills it.
 - **`input_required`**: the state of a task, or the `resultType` of
   a synchronous answer, when the tool asked the client a question
   and waits for the answer (`barrel_mcp_tasks:await_input/5`). See

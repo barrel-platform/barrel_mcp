@@ -168,7 +168,11 @@ Function names are the hops; every one is in
    `{async, Plan}` → `handle_async_tool_call/7`, which computes the
    mode (section 5), spawns the worker with `reply_to =>
    reply_target(Relay, self())`, then `wait_for_tool/4` (inline) or
-   `wait_inline_or_escalate/6` (escalate).
+   `wait_inline_or_escalate/6` (escalate). A client that closes the
+   response stream during either wait cancels the call
+   (`settle_unanswered/4`): the worker is stopped with
+   `barrel_mcp_registry:cancel_tool/3`, as for
+   `notifications/cancelled`, and nothing is answered.
 8. The answer is a JSON body, or an SSE response stream when the
    client's `Accept` asks for one (`stream_sse_response/5`). A
    `{subscribe, Sub}` return opens a subscription stream

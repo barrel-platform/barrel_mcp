@@ -131,9 +131,11 @@ deployment, and connects to both. See the
   surfaces `tasks/list`, `tasks/get`, `tasks/cancel`, and
   `notifications/tasks/status`.
 - Cancellation: on `notifications/cancelled`, over Streamable HTTP
-  and stdio alike, an arity-2 handler gets `{cancel, RequestId}` in
-  its mailbox and stops itself. An arity-1 handler cannot see the
-  message, so its process is killed.
+  and stdio alike, and when a 2026-07-28 client closes the call's
+  response stream, an arity-2 handler gets `{cancel, RequestId}` in
+  its mailbox and stops itself. It is killed if it is still running
+  after `tool_cancel_grace` (5000 ms by default). An arity-1 handler
+  cannot see the message, so its process is killed at once.
 - Progress: handlers call `(maps:get(emit_progress, Ctx))(Done,
   Total, MessageOrUndef)`; out-of-band code can use
   `barrel_mcp:notify_progress/3,4`.

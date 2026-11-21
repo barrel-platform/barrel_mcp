@@ -61,6 +61,13 @@
     modern_unknown_log_level_is_invalid_params/1,
     modern_disconnect_cancels_the_request/1,
     legacy_disconnect_does_not_cancel/1,
+    modern_disconnect_tells_an_arity_2_tool/1,
+    modern_disconnect_kills_an_arity_1_tool/1,
+    modern_disconnect_stops_a_tool_that_ignores_it/1,
+    cancel_grace_can_be_turned_off/1,
+    legacy_cancel_stops_a_tool_that_ignores_it/1,
+    legacy_disconnect_does_not_tell_the_tool/1,
+    modern_disconnect_in_the_task_window_tells_the_tool/1,
     legacy_post_only_client_can_be_asked/1,
     legacy_tool_content_follows_the_revision/1,
     structured_content_is_formatted/1,
@@ -85,7 +92,10 @@
     counting_tool/2,
     region_tool/1,
     chatty_tool/2,
-    slow_tool/1
+    slow_tool/1,
+    careful_tool/2,
+    blunt_tool/1,
+    deaf_tool/2
 ]).
 
 %% Where the slow tool reports its lifecycle.
@@ -128,6 +138,13 @@ all() ->
         modern_unknown_log_level_is_invalid_params,
         modern_disconnect_cancels_the_request,
         legacy_disconnect_does_not_cancel,
+        modern_disconnect_tells_an_arity_2_tool,
+        modern_disconnect_kills_an_arity_1_tool,
+        modern_disconnect_stops_a_tool_that_ignores_it,
+        cancel_grace_can_be_turned_off,
+        legacy_cancel_stops_a_tool_that_ignores_it,
+        legacy_disconnect_does_not_tell_the_tool,
+        modern_disconnect_in_the_task_window_tells_the_tool,
         legacy_post_only_client_can_be_asked,
         legacy_tool_content_follows_the_revision,
         structured_content_is_formatted,
@@ -163,6 +180,12 @@ init_per_suite(Config) ->
     ok = barrel_mcp:reg_tool(<<"slow">>, ?MODULE, slow_tool, #{
         description => <<"Reports that it started, waits, reports that it finished">>
     }),
+    ok = barrel_mcp:reg_tool(<<"careful">>, ?MODULE, careful_tool, #{}),
+    ok = barrel_mcp:reg_tool(<<"careful_task">>, ?MODULE, careful_tool, #{
+        task_support => optional
+    }),
+    ok = barrel_mcp:reg_tool(<<"blunt">>, ?MODULE, blunt_tool, #{}),
+    ok = barrel_mcp:reg_tool(<<"deaf">>, ?MODULE, deaf_tool, #{}),
     ok = barrel_mcp:reg_tool(<<"regional">>, ?MODULE, region_tool, #{
         description => <<"Mirrors its region argument into a header">>,
         input_schema => #{
@@ -190,6 +213,10 @@ end_per_suite(_Config) ->
     barrel_mcp_registry:unreg(tool, <<"counter">>),
     barrel_mcp_registry:unreg(tool, <<"chatty">>),
     barrel_mcp_registry:unreg(tool, <<"slow">>),
+    barrel_mcp_registry:unreg(tool, <<"careful">>),
+    barrel_mcp_registry:unreg(tool, <<"careful_task">>),
+    barrel_mcp_registry:unreg(tool, <<"blunt">>),
+    barrel_mcp_registry:unreg(tool, <<"deaf">>),
     barrel_mcp_registry:unreg(tool, <<"regional">>),
     barrel_mcp_registry:unreg(resource, <<"res">>),
     try
@@ -253,6 +280,31 @@ slow_tool(_Args) ->
     timer:sleep(1500),
     watch(finished),
     <<"slow">>.
+
+%% Stops when told to, before its side effect.
+careful_tool(_Args, _Ctx) ->
+    watch({started, self()}),
+    receive
+        {cancel, RequestId} ->
+            watch({told, RequestId}),
+            <<"stopped">>
+    after 2000 ->
+        watch(finished),
+        <<"careful">>
+    end.
+
+blunt_tool(_Args) ->
+    watch({started, self()}),
+    timer:sleep(2000),
+    watch(finished),
+    <<"blunt">>.
+
+%% Arity 2, but never reads its mailbox.
+deaf_tool(_Args, _Ctx) ->
+    watch({started, self()}),
+    timer:sleep(2000),
+    watch(finished),
+    <<"deaf">>.
 
 watch(Msg) ->
     case whereis(?WATCH) of
@@ -1006,6 +1058,128 @@ legacy_disconnect_does_not_cancel(Config) ->
         ok = gen_tcp:close(Sock),
         ?assertEqual(ok, await_watch(finished, 5000))
     end).
+
+%% A disconnect cancels like `notifications/cancelled': an arity-2
+%% handler is told and stops itself.
+modern_disconnect_tells_an_arity_2_tool(Config) ->
+    with_watch(fun() ->
+        {Sock, Ref} = start_call(?config(port, Config), 7, <<"careful">>, modern_meta()),
+        ok = gen_tcp:close(Sock),
+        ?assertEqual(ok, await_watch({told, 7}, 2000)),
+        ?assertEqual(normal, await_down(Ref, 2000)),
+        ?assertEqual(timeout, await_watch(finished, 2500))
+    end).
+
+modern_disconnect_kills_an_arity_1_tool(Config) ->
+    with_watch(fun() ->
+        {Sock, Ref} = start_call(?config(port, Config), 8, <<"blunt">>, modern_meta()),
+        ok = gen_tcp:close(Sock),
+        ?assertEqual(killed, await_down(Ref, 2000)),
+        ?assertEqual(timeout, await_watch(finished, 2500))
+    end).
+
+%% An arity-2 handler that never reads the message is stopped once the
+%% grace period is over.
+modern_disconnect_stops_a_tool_that_ignores_it(Config) ->
+    with_env(tool_cancel_grace, 300, fun() ->
+        {Sock, Ref} = start_call(?config(port, Config), 9, <<"deaf">>, modern_meta()),
+        ok = gen_tcp:close(Sock),
+        ?assertEqual(timeout, await_down(Ref, 150)),
+        ?assertEqual(killed, await_down(Ref, 1000)),
+        ?assertEqual(timeout, await_watch(finished, 2500))
+    end).
+
+cancel_grace_can_be_turned_off(Config) ->
+    with_env(tool_cancel_grace, infinity, fun() ->
+        {Sock, Ref} = start_call(?config(port, Config), 10, <<"deaf">>, modern_meta()),
+        ok = gen_tcp:close(Sock),
+        ?assertEqual(ok, await_watch(finished, 4000)),
+        ?assertEqual(normal, await_down(Ref, 2000))
+    end).
+
+%% The same rule for `notifications/cancelled'.
+legacy_cancel_stops_a_tool_that_ignores_it(Config) ->
+    Port = ?config(port, Config),
+    {200, InitHeaders, _} = post(Port, init_body(), []),
+    Session = [{<<"mcp-session-id">>, header(<<"mcp-session-id">>, InitHeaders)}],
+    with_env(tool_cancel_grace, 300, fun() ->
+        {_Sock, Ref} = start_call(Port, 11, <<"deaf">>, #{}, Session),
+        Cancel = json:encode(#{
+            <<"jsonrpc">> => <<"2.0">>,
+            <<"method">> => <<"notifications/cancelled">>,
+            <<"params">> => #{<<"requestId">> => 11}
+        }),
+        {202, _, _} = post(Port, Cancel, Session),
+        ?assertEqual(timeout, await_down(Ref, 150)),
+        ?assertEqual(killed, await_down(Ref, 1000)),
+        ?assertEqual(timeout, await_watch(finished, 2500))
+    end).
+
+legacy_disconnect_does_not_tell_the_tool(Config) ->
+    Port = ?config(port, Config),
+    {200, InitHeaders, _} = post(Port, init_body(), []),
+    Session = [{<<"mcp-session-id">>, header(<<"mcp-session-id">>, InitHeaders)}],
+    with_watch(fun() ->
+        {Sock, Ref} = start_call(Port, 12, <<"careful">>, #{}, Session),
+        ok = gen_tcp:close(Sock),
+        ?assertEqual(ok, await_watch(finished, 4000)),
+        ?assertEqual(normal, await_down(Ref, 2000)),
+        ?assertEqual(timeout, await_watch({told, 12}, 0))
+    end).
+
+%% A call still inside the inline window of a task-capable tool.
+modern_disconnect_in_the_task_window_tells_the_tool(Config) ->
+    Meta = (modern_meta())#{
+        ?MCP_META_CLIENT_CAPABILITIES => #{<<"extensions">> => #{?MCP_EXT_TASKS => #{}}}
+    },
+    with_env(task_inline_ms, 5000, fun() ->
+        {Sock, Ref} = start_call(?config(port, Config), 13, <<"careful_task">>, Meta),
+        ok = gen_tcp:close(Sock),
+        ?assertEqual(ok, await_watch({told, 13}, 2000)),
+        ?assertEqual(normal, await_down(Ref, 2000)),
+        ?assertEqual(timeout, await_watch(finished, 2500))
+    end).
+
+%% Sends the call and returns once its tool runs, with a monitor on it.
+start_call(Port, Id, Tool, Meta) ->
+    start_call(Port, Id, Tool, Meta, []).
+
+start_call(Port, Id, Tool, Meta, ExtraHeaders) ->
+    Params0 = #{<<"name">> => Tool, <<"arguments">> => #{}},
+    Params =
+        case map_size(Meta) of
+            0 -> Params0;
+            _ -> Params0#{<<"_meta">> => Meta}
+        end,
+    Body = json:encode(#{
+        <<"jsonrpc">> => <<"2.0">>,
+        <<"id">> => Id,
+        <<"method">> => <<"tools/call">>,
+        <<"params">> => Params
+    }),
+    Sock = post_raw(Port, Body, ExtraHeaders),
+    receive
+        {started, Worker} -> {Sock, monitor(process, Worker)}
+    after 5000 -> ct:fail(tool_not_started)
+    end.
+
+await_down(Ref, Timeout) ->
+    receive
+        {'DOWN', Ref, process, _Pid, Reason} -> Reason
+    after Timeout -> timeout
+    end.
+
+with_env(Key, Value, Fun) ->
+    Before = application:get_env(barrel_mcp, Key),
+    ok = application:set_env(barrel_mcp, Key, Value),
+    try
+        with_watch(Fun)
+    after
+        case Before of
+            {ok, Old} -> application:set_env(barrel_mcp, Key, Old);
+            undefined -> application:unset_env(barrel_mcp, Key)
+        end
+    end.
 
 with_watch(Fun) ->
     true = register(?WATCH, self()),
