@@ -6,8 +6,8 @@ Security fixes are applied to the latest minor release on the `main` branch.
 
 | Version | Supported |
 | ------- | --------- |
-| 4.7.x   | yes       |
-| < 4.7   | no        |
+| 4.8.x   | yes       |
+| < 4.8   | no        |
 
 Run barrel_mcp on an Erlang/OTP release with the current TLS fixes:
 29.1.2, 28.5.0.8, 27.3.4.19 or later. Earlier patch releases have TLS

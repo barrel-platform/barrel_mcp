@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.8.0] - 2026-11-21
+
 ### Changed
 
 - A cancelled arity-2 tool handler that is still running 5 seconds
