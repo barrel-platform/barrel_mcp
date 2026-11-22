@@ -93,10 +93,9 @@ legacy_http_caller_exit_cancels_its_call(Config) ->
     over_http(?LEGACY, Config, told).
 
 %% "Streamable HTTP: Closing the SSE response stream is the cancellation
-%% signal" (2026-07-28/basic/patterns/cancellation.mdx:39). The server
-%% stops the tool without telling it.
+%% signal" (2026-07-28/basic/patterns/cancellation.mdx:39).
 modern_http_caller_exit_cancels_its_call(Config) ->
-    over_http(?MODERN, Config, stopped).
+    over_http(?MODERN, Config, told).
 
 %% Closing the response stream has to reach the server at once,
 %% whatever state the request is in, and must not hold up the client's
