@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- On a 2026-07-28 connection over Streamable HTTP, cancelling a call
+  that had not received anything from the server yet reached the server
+  about one second late. A tool that ran for less than a second was
+  never told, and the client's other requests waited for that second
+  too. The cancel now takes effect at once, whether you call
+  `barrel_mcp_client:cancel/2` or the calling process exits. The fix is
+  in hackney 4.12.4, which the client now requires.
+
 ## [4.8.0] - 2026-11-21
 
 ### Changed
